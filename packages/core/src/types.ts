@@ -31,11 +31,85 @@ export const CLASSIFIER_JSON_SCHEMA = {
   },
   required: ["risk_level", "user_authorization", "verdict", "reason"],
 } as const
+
 export interface EnvironmentConfig {
   trustedDomains?: string[]
   trustedGitRemotes?: string[]
   trustedPaths?: string[]
 }
+
+export interface BaseAdapter {
+  readonly name: string
+  start?(): Promise<void> | void
+  dispose?(): Promise<void> | void
+}
+
+export interface HarnessAdapter extends BaseAdapter {
+  // Inbound bridge that translates host events to GateAction and enforces GateDecision
+}
+
+export interface GateAction {
+  id: string
+  harness: string
+  sessionID: string
+  toolName: string
+  commandString?: string
+  targetPath?: string
+  rawArgs?: unknown
+  workspaceRoot: string
+  userPrompt: string
+  subagentPrompt?: string
+  environment?: EnvironmentConfig
+  metadata?: Record<string, unknown>
+}
+
+export interface GateDecision {
+  verdict: ClassifierVerdict
+  riskLevel?: RiskLevel
+  userAuthorization?: UserAuthorization
+  reason: string
+  safeTransformAlternative?: string
+  cached?: boolean
+}
+
+export interface ReviewAction {
+  id: string
+  label: string
+  reply: "once" | "always" | "reject"
+}
+
+export interface ReviewRequest {
+  id: string
+  title: string
+  message: string
+  priority?: string
+  tags?: string[]
+  actions?: ReviewAction[]
+}
+
+export interface ReviewResponse {
+  req_id: string
+  reply: "once" | "always" | "reject"
+  source?: string
+}
+
+export interface NotifierAdapter extends BaseAdapter {
+  publish(request: ReviewRequest, signal?: AbortSignal): Promise<void>
+  listen(onResponse: (resp: ReviewResponse) => Promise<void>, signal?: AbortSignal): Promise<() => void>
+  updateStatus(requestId: string, status: string, details?: string): Promise<void>
+}
+
+export interface GateEvaluator {
+  readonly name: string
+  evaluate(action: GateAction, options?: Record<string, unknown>): Promise<ClassifierResult>
+}
+
+// Backward compatibility aliases
+export type NotificationPayload = ReviewRequest
+export type ApprovalResponse = ReviewResponse
+export type RemoteAdapter = NotifierAdapter
+export type NotificationAction = ReviewAction
+export type PermissionEventData = any
 
 export interface ClassifyInput {
   // deno-lint-ignore no-explicit-any
@@ -61,44 +135,4 @@ export interface BuildClassifierPromptInput {
   workspaceRoot?: string
   directory?: string
   environment?: EnvironmentConfig
-}
-export interface PermissionEventData {
-  id: string
-  sessionID: string
-  permission: string
-  patterns: string[]
-  metadata: Record<string, unknown>
-  always: string[]
-  tool?: {
-    messageID: string
-    callID: string
-  }
-}
-
-export interface NotificationAction {
-  id: string
-  label: string
-  reply: "once" | "always" | "reject"
-}
-
-export interface NotificationPayload {
-  id: string
-  title: string
-  message: string
-  priority?: string
-  tags?: string[]
-  actions?: NotificationAction[]
-}
-
-export interface ApprovalResponse {
-  req_id: string
-  reply: "once" | "always" | "reject"
-  source?: "ntfy" | "telegram" | "manual"
-}
-
-export interface RemoteAdapter {
-  name: string
-  publish(payload: NotificationPayload, signal?: AbortSignal): Promise<void>
-  listen(onResponse: (resp: ApprovalResponse) => Promise<void>, signal?: AbortSignal): Promise<() => void>
-  updateStatus(id: string, status: string, details?: string): Promise<void>
 }
