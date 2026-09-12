@@ -17,11 +17,22 @@
       ],
       "@autogate/opencode/*": [
         "./packages/opencode/src/*"
+      ],
+      "@oh-my-pi/pi-ai": [
+        "../oh-my-pi/packages/ai/src/index.ts"
+      ],
+      "@oh-my-pi/pi-coding-agent": [
+        "../oh-my-pi/packages/coding-agent/src/index.ts"
       ]
     },
     "strict": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "exclude": ["**/test/**", "node_modules"]
+  "exclude": [
+    "**/test/**",
+    "node_modules"
+  ]
 }

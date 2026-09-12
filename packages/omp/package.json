@@ -5,5 +5,9 @@
   "type": "module",
   "dependencies": {
     "@autogate/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-ai": ">=18.0.0",
+    "@oh-my-pi/pi-coding-agent": ">=18.0.0"
   }
 }
