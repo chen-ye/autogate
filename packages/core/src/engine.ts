@@ -709,27 +709,6 @@ export class AutoGateCoreEngine {
     }
   }
 
-  public async handlePermissionAsked(request: PermissionEventData): Promise<void> {
-    const action: GateAction = {
-      id: request.id || Math.random().toString(36).slice(2),
-      harness: request.harness || "opencode",
-      sessionID: request.sessionID || "",
-      toolName: request.permission || "permission",
-      commandString: typeof request.metadata?.command === "string" ? request.metadata.command : undefined,
-      targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
-      rawArgs: request.patterns || request.metadata,
-      workspaceRoot: (request.metadata?.directory as string) || this.workspaceRoot || process.cwd(),
-      userPrompt: this.getUserPrompt(request.sessionID),
-      environment: this.config.environment,
-      metadata: request.metadata,
-    }
-    const decision = await this.evaluate(action)
-    if (this.client) {
-      const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject")
-      const targetDir = (request.metadata?.directory as string) || this.workspaceRoot
-      await this.replyPermissionLegacy(request.id, replyVal, request.sessionID, decision.reason, targetDir)
-    }
-  }
 
   public handlePermissionReplied(data: { requestID?: string; id?: string; reply?: string }): void {
     const reqID = data.requestID ?? data.id
@@ -748,28 +727,6 @@ export class AutoGateCoreEngine {
     this.resolveReviewResponse(resp)
   }
 
-  public async delegateToRemote(
-    request: PermissionEventData,
-    verdictReason?: string,
-    isCircuitBreaker?: boolean,
-    riskLevel?: RiskLevel,
-    userAuth?: UserAuthorization
-  ): Promise<GateDecision> {
-    const action: GateAction = {
-      id: request.id || Math.random().toString(36).slice(2),
-      harness: request.harness || "opencode",
-      sessionID: request.sessionID || "",
-      toolName: request.permission || "permission",
-      commandString: typeof request.metadata?.command === "string" ? request.metadata.command : undefined,
-      targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
-      rawArgs: request.patterns || request.metadata,
-      workspaceRoot: (request.metadata?.directory as string) || this.workspaceRoot || process.cwd(),
-      userPrompt: this.getUserPrompt(request.sessionID),
-      environment: this.config.environment,
-      metadata: request.metadata,
-    }
-    return this.requestReview(action, verdictReason, isCircuitBreaker, riskLevel, userAuth)
-  }
 
   private async sendInformationalNotification(
     action: GateAction,
@@ -805,56 +762,6 @@ export class AutoGateCoreEngine {
     }
   }
 
-  private async replyPermissionLegacy(
-    requestID: string,
-    reply: "once" | "always" | "reject",
-    sessionID?: string,
-    message?: string,
-    directory?: string
-  ): Promise<void> {
-    const serverUrl = (this.config as any)?.serverUrl || "http://localhost:4096"
-    const password = process.env.OPENCODE_SERVER_PASSWORD || ""
-    const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
-    const targetDir = directory || (this.workspaceRoot ? this.workspaceRoot : undefined)
-    const url = `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
-
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": authHeader,
-        },
-        body: JSON.stringify({ reply, message }),
-        signal: AbortSignal.timeout(5000),
-      })
-      if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
-        return
-      }
-    } catch (err) {}
-
-    if (!this.client) return
-    if (typeof this.client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
-      try {
-        const res = await this.client.postSessionIdPermissionsPermissionId({
-          path: { id: sessionID, permissionID: requestID },
-          body: { response: reply },
-          query: targetDir ? { directory: targetDir } : undefined,
-        })
-        if (!res?.error && res?.response?.ok !== false) return
-      } catch {}
-    }
-    if (typeof this.client?.permission?.reply === "function") {
-      try {
-        const res = await this.client.permission.reply({
-          path: { requestID },
-          body: { reply, message },
-          query: targetDir ? { directory: targetDir } : undefined,
-        })
-        if (!res?.error && res?.response?.ok !== false) return
-      } catch {}
-    }
-  }
 }
 
 export const AutoGateEngine = AutoGateCoreEngine

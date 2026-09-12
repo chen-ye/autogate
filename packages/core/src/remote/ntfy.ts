@@ -15,7 +15,7 @@ export class NtfyAdapter implements RemoteAdapter {
 
   constructor(options?: NtfyAdapterOptions) {
     this.server = (options?.server || "https://ntfy.sh").replace(/\/$/, "")
-    this.topic = options?.topic || "opencode-auto-gate"
+    this.topic = options?.topic || process.env.AUTOGATE_NTFY_TOPIC || process.env.NTFY_TOPIC || process.env.OPENCODE_NTFY_TOPIC || "autogate"
     this.token = options?.token
   }
 
@@ -25,7 +25,7 @@ const url = `${this.server}/${this.topic}`
     const headers: Record<string, string> = {
 "Title": payload.title.replace(/[^\x20-\x7E]/g, "").trim() || "Notification",
 "Priority": payload.priority ?? "urgent",
-"X-Sequence-ID": payload.id,
+      "X-Sequence-ID": payload.id.replace(/[^a-zA-Z0-9_\-]/g, "_"),
 "Content-Type": "text/plain; charset=utf-8",
 }
 
@@ -180,7 +180,7 @@ signal: fetchSignal,
     const headers: Record<string, string> = {
       "Title": status.replace(/[^\x20-\x7E]/g, "").trim() || "Status Update",
       "Priority": "default",
-      "X-Sequence-ID": id,
+      "X-Sequence-ID": id.replace(/[^a-zA-Z0-9_\-]/g, "_"),
       "Content-Type": "text/plain; charset=utf-8",
       // No Actions header intentionally to clear action buttons
     }

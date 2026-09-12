@@ -16,7 +16,7 @@ export interface AutoGateConfig {
 export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const env = process.env
 
-  const rawAutoMode = options?.autoMode ?? options?.OPENCODE_AUTO_MODE ?? env.OPENCODE_AUTO_MODE
+  const rawAutoMode = options?.autoMode ?? options?.AUTOGATE_AUTO_MODE ?? env.AUTOGATE_AUTO_MODE ?? options?.OPENCODE_AUTO_MODE ?? env.OPENCODE_AUTO_MODE
   let autoMode = true
   if (typeof rawAutoMode === "boolean") {
     autoMode = rawAutoMode
@@ -42,8 +42,8 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     }
   }
 
-  const rawTopic = options?.ntfyTopic ?? options?.NTFY_TOPIC ?? env.NTFY_TOPIC
-  const ntfyTopic = typeof rawTopic === "string" && rawTopic.trim().length > 0 ? rawTopic.trim() : "opencode-auto-gate"
+  const rawTopic = options?.ntfyTopic ?? options?.AUTOGATE_NTFY_TOPIC ?? env.AUTOGATE_NTFY_TOPIC ?? options?.NTFY_TOPIC ?? env.NTFY_TOPIC ?? env.OPENCODE_NTFY_TOPIC
+  const ntfyTopic = typeof rawTopic === "string" && rawTopic.trim().length > 0 ? rawTopic.trim() : "autogate"
 
   const rawServer = options?.ntfyServer ?? options?.NTFY_SERVER ?? env.NTFY_SERVER
   let ntfyServer = "https://ntfy.sh"

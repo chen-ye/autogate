@@ -58,6 +58,9 @@ export class OmpNativeEvaluator implements GateEvaluator {
       let apiKey = this.fallbackApiKey;
       try {
         if (ctx?.modelRegistry?.getApiKey && model) {
+          const resolvedKey = await ctx.modelRegistry.getApiKey(model, sessionId)
+          if (resolvedKey) apiKey = resolvedKey
+        } else if (ctx?.model?.apiKey) {
           apiKey = ctx.modelRegistry.getApiKey(model, sessionId) || apiKey;
         } else if (ctx?.model?.apiKey) {
           apiKey = ctx.model.apiKey || apiKey;

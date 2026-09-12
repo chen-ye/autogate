@@ -1,6 +1,5 @@
 import fs from "fs"
 import path from "path"
-import os from "os"
 import type {
   ClassifierVerdict,
   ClassifierResult,
@@ -296,8 +295,7 @@ Respond ONLY with a JSON object conforming to the following structure:
 
 export function buildClassifierSystemPrompt(): string {
   const candidatePaths = [
-    path.resolve(__dirname, "agents", "auto-gate-eval.md"),
-    path.join(os.homedir(), ".config", "opencode", "agents", "auto-gate-eval.md"),
+    path.resolve(__dirname, "../agents/auto-gate-eval.md"),
   ]
 
   let prompt = FALLBACK_CLASSIFIER_SYSTEM_PROMPT

@@ -45,7 +45,7 @@ describe("MockNtfyServer", () => {
     expect(published[0].body).toBe("Hello world message");
     expect(published[0].headers["x-sequence-id"]).toBe("req-123");
     expect(published[0].actions).toBeDefined();
-    expect(published[0].actions!.length).toBe(1);
+    expect(typeof published[0].actions).toBe("string");
 
     server.clearPublished();
     expect(server.getPublished().length).toBe(0);

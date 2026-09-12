@@ -5,18 +5,19 @@ import { fileURLToPath } from "url"
 import { tool, type Hooks, type PluginInput } from "@opencode-ai/plugin"
 import type { UserMessage, Part } from "@opencode-ai/sdk"
 import {
-  loadConfig,
-  NtfyAdapter,
-  AutoGateCoreEngine,
-  recordEscalationIntent,
-  type HarnessAdapter,
-  type PermissionEventData,
+loadConfig,
+NtfyAdapter,
+AutoGateCoreEngine,
+recordEscalationIntent,
+type HarnessAdapter,
+type PermissionEventData,
+  type GateAction,
 } from "@autogate/core"
 import {
-  OpenCodeSessionEvaluator,
-  isEvaluationSession,
-  recordEvaluationVerdict,
-  evaluationSessions,
+OpenCodeSessionEvaluator,
+isEvaluationSession,
+recordEvaluationVerdict,
+evaluationSessions,
 } from "./evaluator.js"
 
 export {
@@ -109,7 +110,78 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   }
 
   async handlePermissionAsked(request: PermissionEventData): Promise<void> {
-    await this.engine.handlePermissionAsked(request)
+    const workspaceRoot = this.ctx.directory || this.ctx.worktree || process.cwd()
+    const action: GateAction = {
+      id: request.id || Math.random().toString(36).slice(2),
+      harness: request.harness || "opencode",
+      sessionID: request.sessionID || "",
+      toolName: request.permission || "permission",
+      commandString: typeof request.metadata?.command === "string" ? request.metadata.command : undefined,
+      targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
+      rawArgs: request.patterns || request.metadata,
+      workspaceRoot: (request.metadata?.directory as string) || workspaceRoot,
+      userPrompt: this.engine.getUserPrompt(request.sessionID),
+      environment: (this.engine as any).config?.environment,
+      metadata: request.metadata,
+    }
+    const decision = await this.engine.evaluate(action)
+    const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject")
+    const targetDir = (request.metadata?.directory as string) || workspaceRoot
+    await this.replyPermission(request.id, replyVal, request.sessionID, decision.reason, targetDir)
+  }
+
+  private async replyPermission(
+    requestID: string,
+    reply: "once" | "always" | "reject",
+    sessionID?: string,
+    message?: string,
+    directory?: string
+  ): Promise<void> {
+    const config = loadConfig()
+    const serverUrl = config.serverUrl || "http://localhost:4096"
+    const password = process.env.OPENCODE_SERVER_PASSWORD || ""
+    const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
+    const workspaceRoot = this.ctx.directory || this.ctx.worktree
+    const targetDir = directory || workspaceRoot
+    const url = `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": authHeader,
+        },
+        body: JSON.stringify({ reply, message }),
+        signal: AbortSignal.timeout(5000),
+      })
+      if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
+        return
+      }
+    } catch (err) {}
+
+    const client = this.ctx.client
+    if (!client) return
+if (typeof client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
+      try {
+        const res = await client.postSessionIdPermissionsPermissionId({
+          path: { id: sessionID, permissionID: requestID },
+          body: { response: reply, message },
+          query: targetDir ? { directory: targetDir } : undefined,
+})
+if (!res?.error && res?.response?.ok !== false) return
+} catch {}
+}
+    if (typeof client?.permission?.reply === "function") {
+      try {
+        const res = await client.permission.reply({
+          path: { requestID },
+          body: { reply, message },
+          query: targetDir ? { directory: targetDir } : undefined,
+        })
+        if (!res?.error && res?.response?.ok !== false) return
+      } catch {}
+    }
   }
 
   async handlePermissionReplied(data: { requestID?: string; id?: string; reply?: string }): Promise<void> {

@@ -17,8 +17,15 @@ export class MockNtfyServer {
   private clients = new Set<ReadableStreamDefaultController>()
   private token?: string
 
-  constructor(port = 0, token?: string) {
-    this.token = token
+  constructor(portOrOpts: number | { port?: number; token?: string } = 0, token?: string) {
+    let port = 0
+    if (typeof portOrOpts === "object") {
+      port = portOrOpts.port ?? 0
+      this.token = portOrOpts.token
+    } else {
+      port = portOrOpts
+      this.token = token
+    }
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port,
@@ -112,6 +119,10 @@ export class MockNtfyServer {
 
   clearPublished(): void {
     this.published = []
+  }
+
+  simulateReply(req_id: string, reply: "once" | "always" | "reject", topic = "opencode-auto-gate"): void {
+    this.triggerAction(req_id, reply, topic)
   }
 
   triggerAction(req_id: string, reply: "once" | "always" | "reject", topic = "opencode-auto-gate"): void {
