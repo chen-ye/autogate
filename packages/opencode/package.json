@@ -1,0 +1,11 @@
+{
+  "name": "@autogate/opencode",
+  "version": "1.0.0",
+  "main": "./src/index.ts",
+  "type": "module",
+  "dependencies": {
+    "@autogate/core": "workspace:*",
+    "@opencode-ai/plugin": "^1.18.29",
+    "@opencode-ai/sdk": "^1.18.29"
+  }
+}
