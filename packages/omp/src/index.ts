@@ -31,8 +31,41 @@ export class OmpHarnessAdapter implements HarnessAdapter {
   }
 }
 
+export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine): void {
+  const parameters = pi?.zod?.object
+    ? pi.zod.object({
+        command: pi.zod.string(),
+        timeout: pi.zod.number().optional(),
+        workdir: pi.zod.string().optional(),
+      })
+    : {
+        type: "object",
+        properties: {
+          command: { type: "string" },
+          timeout: { type: "number" },
+          workdir: { type: "string" },
+        },
+        required: ["command"],
+      };
+
+  pi.registerTool({
+    name: "bash",
+    label: "Bash",
+    description: "Execute a bash command in a persistent shell session",
+    approval: "write",
+    parameters,
+    async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
+      if (!ctx?.invokeTool) {
+        throw new Error("ctx.invokeTool is unavailable for shadowed bash delegation");
+      }
+      return await ctx.invokeTool(params, { signal, onUpdate });
+    },
+  });
+}
+
 export default function autoGateOmpExtension(pi: any): void {
   pi.setLabel?.("AutoGate Security")
   const adapter = new OmpHarnessAdapter(pi)
   adapter.start().catch(() => {})
+  registerShadowedBashTool(pi, adapter.getEngine())
 }
