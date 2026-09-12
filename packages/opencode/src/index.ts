@@ -9,11 +9,22 @@ import {
   NtfyAdapter,
   AutoGateCoreEngine,
   recordEscalationIntent,
-  isEvaluationSession,
-  recordEvaluationVerdict,
   type HarnessAdapter,
   type PermissionEventData,
 } from "@autogate/core"
+import {
+  OpenCodeSessionEvaluator,
+  isEvaluationSession,
+  recordEvaluationVerdict,
+  evaluationSessions,
+} from "./evaluator.js"
+
+export {
+  OpenCodeSessionEvaluator,
+  isEvaluationSession,
+  recordEvaluationVerdict,
+  evaluationSessions,
+}
 
 export function ensureAgentInstalled(): void {
   try {
@@ -76,6 +87,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       config,
       client: ctx.client,
       adapter,
+      evaluator: new OpenCodeSessionEvaluator(ctx.client, config),
       workspaceRoot,
     })
   }

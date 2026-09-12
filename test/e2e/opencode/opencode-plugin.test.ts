@@ -3,14 +3,12 @@ import { MockNtfyServer } from "../mock-ntfy"
 import { createMockOpenCodeClient, createMockPluginContext } from "./mock-opencode"
 import {
   AutoGateCoreEngine,
-  isEvaluationSession,
-  evaluationSessions,
   sharedRecentlyRejected,
   sharedExplicitEscalations,
   loadConfig,
   NtfyAdapter,
 } from "@autogate/core"
-import { AutoGatePlugin, ensureAgentInstalled } from "@autogate/opencode"
+import { AutoGatePlugin, ensureAgentInstalled, isEvaluationSession, evaluationSessions } from "@autogate/opencode"
 
 describe("AutoGate OpenCode Plugin Integration", () => {
   let mockNtfy: MockNtfyServer

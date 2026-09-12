@@ -11,7 +11,7 @@ import type {
   UserAuthorization,
   PermissionEventData,
 } from "./types"
-import { classifyRequest, sanitizeUserPrompt } from "./classifier"
+import { sanitizeUserPrompt } from "./classifier"
 import { formatNotificationTitle, formatNotificationBody } from "./formatters"
 
 export const sharedRecentlyRejected = new Map<string, { timestamp: number; reason: string }>()
@@ -169,20 +169,7 @@ export class DefaultGateEvaluator implements GateEvaluator {
   readonly name = "default-classifier"
   constructor(private client?: any, private config?: AutoGateConfig) {}
   async evaluate(action: GateAction): Promise<ClassifierResult> {
-    if (!this.client) {
-      return { verdict: "UNSURE", reason: "No classifier client or evaluator configured" }
-    }
-    return classifyRequest({
-      client: this.client,
-      userPrompt: action.userPrompt,
-      subagentPrompt: action.subagentPrompt,
-      actionName: action.toolName,
-      actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
-      workspaceRoot: action.workspaceRoot,
-      environment: action.environment,
-      model: this.config?.classifierModel,
-      config: this.config,
-    })
+    return { verdict: "UNSURE", reason: "No evaluator configured on engine" }
   }
 }
 
@@ -714,12 +701,12 @@ export class AutoGateCoreEngine {
       }
 
       const verdict = resp.reply === "reject" ? "BLOCK" : "ALLOW"
-entry.resolve({
-verdict,
-reply: resp.reply,
-reason: `Answered remotely via ${resp.reply}`,
-})
-  }
+      entry.resolve({
+        verdict,
+        reply: resp.reply,
+        reason: `Answered remotely via ${resp.reply}`,
+      })
+    }
   }
 
   public async handlePermissionAsked(request: PermissionEventData): Promise<void> {
