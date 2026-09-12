@@ -9,13 +9,19 @@ export const verdictStore = new Map<
 export function registerToolCallHook(
   pi: any,
   engine: AutoGateCoreEngine,
-  store = verdictStore
+  store = verdictStore,
+  setContext?: (ctx: any) => void
 ): void {
   if (typeof pi?.on !== "function") {
     return
   }
 
   pi.on("tool_call", async (event: any, ctx: any) => {
+    if (ctx && typeof setContext === "function") {
+      setContext(ctx);
+    } else if (ctx && typeof (engine as any).setContext === "function") {
+      (engine as any).setContext(ctx);
+    }
     if (!engine.isEnabled()) {
       return
     }
