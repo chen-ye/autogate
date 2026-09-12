@@ -1,0 +1,11 @@
+{
+  "name": "autogate",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  }
+}

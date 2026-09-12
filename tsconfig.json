@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@autogate/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@autogate/core/*": [
+        "packages/core/src/*"
+      ]
+    },
+    "strict": true,
+    "skipLibCheck": true
+  }
+}
