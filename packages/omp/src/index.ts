@@ -6,6 +6,7 @@ import {
   type GateAction,
   type GateDecision
 } from "../../core/src/index.ts"
+import { registerToolCallHook, verdictStore } from "./hook.ts"
 
 export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness"
@@ -68,4 +69,5 @@ export default function autoGateOmpExtension(pi: any): void {
   const adapter = new OmpHarnessAdapter(pi)
   adapter.start().catch(() => {})
   registerShadowedBashTool(pi, adapter.getEngine())
+  registerToolCallHook(pi, adapter.getEngine())
 }
