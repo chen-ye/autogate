@@ -1,11 +1,12 @@
-import {
+  import {
   AutoGateCoreEngine,
   NtfyAdapter,
   DirectApiEvaluator,
+  loadConfig,
   type HarnessAdapter,
   type GateAction,
   type GateDecision
-} from "../../core/src/index.ts"
+} from "@autogate/core"
 import { registerToolCallHook, verdictStore } from "./hook.ts"
 import { resolveShadowedApproval } from "./approval-bridge.ts"
 import { registerAutomodeCommand, registerEscalatePermissionTool } from "./commands.ts"
@@ -14,9 +15,17 @@ export class OmpHarnessAdapter implements HarnessAdapter {
   private engine: AutoGateCoreEngine
 
   constructor(pi: any, options?: Record<string, unknown>) {
+    const config = loadConfig(options)
+    const adapter = new NtfyAdapter({
+      server: config.ntfyServer,
+      topic: config.ntfyTopic,
+      token: config.ntfyToken,
+    })
     this.engine = new AutoGateCoreEngine({
-      config: { autoMode: true },
+      config,
+      adapter,
       client: pi,
+      evaluator: (options as any)?.evaluator,
     })
   }
 
@@ -65,11 +74,10 @@ export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine): v
   });
 }
 
-export default function autoGateOmpExtension(pi: any): void {
+export default function autoGateOmpExtension(pi: any, options?: Record<string, unknown>): void {
   pi.setLabel?.("AutoGate Security")
-  const adapter = new OmpHarnessAdapter(pi)
-  adapter.start().catch(() => {})
-  registerShadowedBashTool(pi, adapter.getEngine())
+  const adapter = new OmpHarnessAdapter(pi, options)
+
   registerToolCallHook(pi, adapter.getEngine())
   registerAutomodeCommand(pi, adapter.getEngine())
   registerEscalatePermissionTool(pi, adapter.getEngine())
