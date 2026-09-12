@@ -8,7 +8,7 @@ import {
 } from "../../core/src/index.ts"
 import { registerToolCallHook, verdictStore } from "./hook.ts"
 import { resolveShadowedApproval } from "./approval-bridge.ts"
-
+import { registerAutomodeCommand, registerEscalatePermissionTool } from "./commands.ts"
 export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness"
   private engine: AutoGateCoreEngine
@@ -71,4 +71,6 @@ export default function autoGateOmpExtension(pi: any): void {
   adapter.start().catch(() => {})
   registerShadowedBashTool(pi, adapter.getEngine())
   registerToolCallHook(pi, adapter.getEngine())
+  registerAutomodeCommand(pi, adapter.getEngine())
+  registerEscalatePermissionTool(pi, adapter.getEngine())
 }
