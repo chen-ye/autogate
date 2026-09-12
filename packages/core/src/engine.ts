@@ -1,12 +1,15 @@
 import type { AutoGateConfig } from "./config"
 import type {
-  RemoteAdapter,
-  NotificationPayload,
-  NotificationAction,
-  ApprovalResponse,
-  PermissionEventData,
+  NotifierAdapter,
+  ReviewRequest,
+  ReviewResponse,
+  GateAction,
+  GateDecision,
+  GateEvaluator,
+  ClassifierResult,
   RiskLevel,
-  UserAuthorization
+  UserAuthorization,
+  PermissionEventData,
 } from "./types"
 import { classifyRequest, sanitizeUserPrompt } from "./classifier"
 import { formatNotificationTitle, formatNotificationBody } from "./formatters"
@@ -32,16 +35,19 @@ export function recordEscalationIntent(sessionID: string, action: string, reason
   })
 }
 
-export function getActionKey(request: PermissionEventData): string {
-  const patterns = Array.isArray(request.patterns) ? request.patterns.join(",") : ""
-  return `${request.sessionID || ""}:${request.permission}:${patterns}`
+export function getActionKey(request: PermissionEventData | GateAction): string {
+  const perm = (request as any).permission ?? (request as any).toolName ?? ""
+  const patterns = Array.isArray((request as any).patterns)
+    ? (request as any).patterns.join(",")
+    : (request as any).commandString || (request as any).targetPath || ""
+  const sessionID = (request as any).sessionID || ""
+  return `${sessionID}:${perm}:${patterns}`
 }
 
 function matchesAction(entryAction: string, request: PermissionEventData, commandString: string): boolean {
   const normEntry = entryAction.trim().replace(/^["']|["']$/g, "").toLowerCase()
   if (!normEntry) return false
 
-  // 1. Command string comparison
   const normCmd = commandString.trim().toLowerCase()
   if (normCmd) {
     if (normCmd === normEntry || normCmd.includes(normEntry) || normEntry.includes(normCmd)) {
@@ -49,7 +55,6 @@ function matchesAction(entryAction: string, request: PermissionEventData, comman
     }
   }
 
-  // 2. Patterns comparison
   if (Array.isArray(request.patterns)) {
     for (const pat of request.patterns) {
       const normPat = String(pat).trim().replace(/^["']|["']$/g, "").toLowerCase()
@@ -61,7 +66,6 @@ function matchesAction(entryAction: string, request: PermissionEventData, comman
     }
   }
 
-  // 3. Metadata filepath/path comparison
   const filepath =
     (typeof request.metadata?.filepath === "string" ? request.metadata.filepath : "") ||
     (typeof request.metadata?.path === "string" ? request.metadata.path : "") ||
@@ -77,22 +81,23 @@ function matchesAction(entryAction: string, request: PermissionEventData, comman
   return false
 }
 
-export function checkAndConsumeEscalation(request: PermissionEventData, parentSessionID?: string): string | null {
+export function checkAndConsumeEscalation(request: PermissionEventData | GateAction, parentSessionID?: string): string | null {
   sweepExpiredState()
 
-  // 1. Checks if request.permission === "bash" and command string includes AUTOGATE_ESCALATE=1
+  const perm = (request as any).permission ?? (request as any).toolName ?? ""
   const commandString =
+    (request as any).commandString ||
     (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
     (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
-    (Array.isArray(request.patterns) ? request.patterns.join(" ") : "")
+    (Array.isArray((request as any).patterns) ? (request as any).patterns.join(" ") : "") ||
+    (typeof (request as any).targetPath === "string" ? (request as any).targetPath : "")
 
-  const isBash = request.permission === "bash" || request.permission === "shell:run"
+  const isBash = perm === "bash" || perm === "shell:run"
   if (isBash && commandString.includes("AUTOGATE_ESCALATE=1")) {
     return "Escalated via AUTOGATE_ESCALATE=1 environment variable"
   }
 
-  // 2. Checks sharedExplicitEscalations
-  const sessionCandidates = [request.sessionID, parentSessionID].filter(Boolean) as string[]
+  const sessionCandidates = [(request as any).sessionID, parentSessionID].filter(Boolean) as string[]
   for (const sid of sessionCandidates) {
     const entry = sharedExplicitEscalations.get(sid)
     if (entry) {
@@ -105,7 +110,6 @@ export function checkAndConsumeEscalation(request: PermissionEventData, parentSe
     }
   }
 
-  // 3. Checks sharedRecentlyRejected
   const actionKey = getActionKey(request)
   const rejectedEntry = sharedRecentlyRejected.get(actionKey)
   if (rejectedEntry) {
@@ -119,10 +123,9 @@ export function checkAndConsumeEscalation(request: PermissionEventData, parentSe
     }
   }
 
-  // Check parent session action key if parentSessionID is provided
-  if (parentSessionID && parentSessionID !== request.sessionID) {
-    const parentPatterns = Array.isArray(request.patterns) ? request.patterns.join(",") : ""
-    const parentActionKey = `${parentSessionID}:${request.permission}:${parentPatterns}`
+  if (parentSessionID && parentSessionID !== (request as any).sessionID) {
+    const parentPatterns = Array.isArray((request as any).patterns) ? (request as any).patterns.join(",") : commandString
+    const parentActionKey = `${parentSessionID}:${perm}:${parentPatterns}`
     const parentRejected = sharedRecentlyRejected.get(parentActionKey)
     if (parentRejected) {
       if (Date.now() - parentRejected.timestamp < 60000) {
@@ -139,22 +142,22 @@ export function checkAndConsumeEscalation(request: PermissionEventData, parentSe
   return null
 }
 
-export function isTransformableAction(request: PermissionEventData, commandString?: string): boolean {
+export function isTransformableAction(request: PermissionEventData | GateAction, commandString?: string): boolean {
   const cmd = (
     commandString ||
+    (request as any).commandString ||
     (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
     (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
-    (Array.isArray(request.patterns) ? request.patterns.join(" ") : "")
+    (Array.isArray((request as any).patterns) ? (request as any).patterns.join(" ") : "") ||
+    (Array.isArray((request as any).metadata?.patterns) ? ((request as any).metadata.patterns as any[]).join(" ") : "")
   ).trim()
 
   if (!cmd) return false
 
-  // Catastrophic root deletion is not transformable (cannot trash root)
   if (/^rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?\/(\s|$)/.test(cmd) || cmd === "rm -rf /" || cmd === "rm -rf /*") {
     return false
   }
 
-  // Check if command contains rm, git restore, or git checkout (without stash)
   const hasRm = cmd.includes("rm ") || /^rm(\s+|$)/i.test(cmd)
   const hasGitRestore = cmd.includes("git restore") && !cmd.includes("stash")
   const hasGitCheckout = cmd.includes("git checkout") && !cmd.includes("stash")
@@ -162,36 +165,81 @@ export function isTransformableAction(request: PermissionEventData, commandStrin
   return hasRm || hasGitRestore || hasGitCheckout
 }
 
-export class AutoGateEngine {
-  private client: any
+export class DefaultGateEvaluator implements GateEvaluator {
+  readonly name = "default-classifier"
+  constructor(private client?: any, private config?: AutoGateConfig) {}
+  async evaluate(action: GateAction): Promise<ClassifierResult> {
+    if (!this.client) {
+      return { verdict: "UNSURE", reason: "No classifier client or evaluator configured" }
+    }
+    return classifyRequest({
+      client: this.client,
+      userPrompt: action.userPrompt,
+      subagentPrompt: action.subagentPrompt,
+      actionName: action.toolName,
+      actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
+      workspaceRoot: action.workspaceRoot,
+      environment: action.environment,
+      model: this.config?.classifierModel,
+      config: this.config,
+    })
+  }
+}
+
+function createDummyAdapter(): NotifierAdapter {
+  return {
+    name: "dummy",
+    async publish() {},
+    async listen() { return () => {} },
+    async updateStatus() {},
+  }
+}
+
+export interface AutoGateEngineOptions {
+  config: AutoGateConfig
+  adapter?: NotifierAdapter
+  evaluator?: GateEvaluator
+  workspaceRoot?: string
+  client?: any
+}
+
+export class AutoGateCoreEngine {
   private config: AutoGateConfig
-  private remoteAdapter: RemoteAdapter
+  private remoteAdapter: NotifierAdapter
+  private evaluator: GateEvaluator
   private enabled: boolean
   private userPrompt: string = ""
   private userPrompts = new Map<string, string>()
   private sessionParentCache = new Map<string, string>()
   private consecutiveBlocks: number = 0
   private consecutiveBlockThreshold: number
-  private inFlightRequests = new Map<string, { abort: AbortController; sessionID?: string; directory?: string }>()
+  private inFlightRequests = new Map<string, { resolve: (decision: GateDecision) => void; reject: (err: Error) => void; abort: AbortController; sessionID?: string; directory?: string }>()
   private turnDecisionCache = new Map<string, Set<string>>()
   private workspaceRoot?: string
   private stopRemoteListen?: () => void
+  private client?: any
 
-  constructor(
-    clientOrParams: any,
-    config?: AutoGateConfig,
-    remoteAdapter?: RemoteAdapter
-  ) {
-    if (clientOrParams && typeof clientOrParams === "object" && !Array.isArray(clientOrParams) && "config" in clientOrParams && "client" in clientOrParams) {
-      this.client = clientOrParams.client
-      this.config = clientOrParams.config
-      this.remoteAdapter = clientOrParams.adapter ?? clientOrParams.remoteAdapter!
+  constructor(optionsOrClient?: AutoGateEngineOptions | any, config?: AutoGateConfig, remoteAdapter?: NotifierAdapter, evaluator?: GateEvaluator) {
+    if (optionsOrClient && typeof optionsOrClient === "object" && !Array.isArray(optionsOrClient) && ("config" in optionsOrClient || "evaluator" in optionsOrClient || "adapter" in optionsOrClient)) {
+      const opts = optionsOrClient as AutoGateEngineOptions
+      this.config = opts.config
+      this.remoteAdapter = opts.adapter ?? (opts as any).remoteAdapter ?? createDummyAdapter()
+      this.evaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.client, opts.config)
+      this.workspaceRoot = opts.workspaceRoot ?? (opts.config as any)?.workspaceRoot
+      this.client = opts.client
     } else {
-      this.client = clientOrParams
-      this.config = config!
-      this.remoteAdapter = remoteAdapter!
+      if (optionsOrClient && typeof optionsOrClient === "object" && "autoMode" in optionsOrClient) {
+        this.config = optionsOrClient as AutoGateConfig
+        this.remoteAdapter = (config as unknown as NotifierAdapter) ?? createDummyAdapter()
+        this.evaluator = (remoteAdapter as unknown as GateEvaluator) ?? new DefaultGateEvaluator(undefined, this.config)
+      } else {
+        this.client = optionsOrClient
+        this.config = config!
+        this.remoteAdapter = remoteAdapter ?? createDummyAdapter()
+        this.evaluator = evaluator ?? new DefaultGateEvaluator(this.client, this.config)
+      }
     }
-    this.workspaceRoot = clientOrParams?.workspaceRoot || (this.config as any)?.workspaceRoot
+    this.workspaceRoot = this.workspaceRoot || (this.config as any)?.workspaceRoot
     this.enabled = this.config.autoMode
     this.consecutiveBlockThreshold = this.config.consecutiveBlockThreshold ?? 3
   }
@@ -238,7 +286,7 @@ export class AutoGateEngine {
       this.userPrompt = sanitizedText
     }
   }
- 
+
   private async fetchLatestUserMessage(sessionID: string): Promise<string> {
     if (!this.client?.session?.messages) return ""
     try {
@@ -296,7 +344,7 @@ export class AutoGateEngine {
     } catch {}
     return ""
   }
- 
+
   public async resolveSessionPrompts(sessionID?: string): Promise<{ userPrompt: string; subagentPrompt?: string }> {
     if (!sessionID) {
       return { userPrompt: this.userPrompt || "" }
@@ -417,10 +465,12 @@ export class AutoGateEngine {
   public resetConsecutiveBlocks(): void {
     this.consecutiveBlocks = 0
   }
+
   public clearTurnCache(sessionID: string): void {
     this.turnDecisionCache.delete(sessionID)
   }
-  public checkAndConsumeEscalation(request: PermissionEventData): string | null {
+
+  public checkAndConsumeEscalation(request: PermissionEventData | GateAction): string | null {
     const parentSessionID = request.sessionID ? this.sessionParentCache.get(request.sessionID) : undefined
     return checkAndConsumeEscalation(request, parentSessionID)
   }
@@ -429,13 +479,12 @@ export class AutoGateEngine {
     recordEscalationIntent(sessionID, action, reason)
   }
 
-
   public async start(): Promise<(() => void) | undefined> {
     if (this.stopRemoteListen) {
       this.stopRemoteListen()
     }
     this.stopRemoteListen = await this.remoteAdapter.listen(async (resp) => {
-      await this.handleRemoteResponse(resp)
+      this.resolveReviewResponse(resp)
     })
     return this.stopRemoteListen
   }
@@ -454,67 +503,62 @@ export class AutoGateEngine {
     sharedExplicitEscalations.clear()
   }
 
-  public async handlePermissionAsked(request: PermissionEventData): Promise<void> {
+  public async evaluate(action: GateAction): Promise<GateDecision> {
+    // 1. Checks disabled state -> requests review if disabled.
     if (!this.isEnabled()) {
-      await this.delegateToRemote(request, "AutoMode is disabled")
-      return
+      return this.requestReview(action, "AutoMode is disabled", false, undefined, undefined)
     }
 
+    // 2. Checks circuit breaker (`consecutiveBlocks >= threshold`) -> requests review.
     const threshold = this.consecutiveBlockThreshold
     if (this.consecutiveBlocks >= threshold) {
-      await this.delegateToRemote(
-        request,
+      return this.requestReview(
+        action,
         `Circuit breaker tripped: consecutive blocks (${this.consecutiveBlocks}) reached threshold (${threshold}).`,
         true
       )
-      return
     }
 
-    const { userPrompt: rawUserPrompt, subagentPrompt: rawSubagentPrompt } = await this.resolveSessionPrompts(request.sessionID)
-    const userPrompt = sanitizeUserPrompt(rawUserPrompt)
-    const subagentPrompt = rawSubagentPrompt ? sanitizeUserPrompt(rawSubagentPrompt) : undefined
-    const escalationReason = this.checkAndConsumeEscalation(request)
+    // 3. Checks explicit escalation (`checkAndConsumeEscalation`) -> requests review.
+    const parentSessionID = action.sessionID ? this.sessionParentCache.get(action.sessionID) : undefined
+    const escalationReason = checkAndConsumeEscalation(action, parentSessionID)
     if (escalationReason) {
-      await this.delegateToRemote(request, escalationReason)
-      return
+      return this.requestReview(action, escalationReason, false, undefined, undefined)
     }
 
+    // 4. Checks turn decision cache -> returns cached ALLOW if found.
+    const sid = action.sessionID || ""
     const commandString =
-      (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
-      (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
-      (Array.isArray(request.patterns) ? request.patterns.join(" ") : "")
-    const sid = request.sessionID || ""
-    const actionKey = `${request.permission}:${commandString}`
+      action.commandString ||
+      (typeof action.metadata?.command === "string" ? action.metadata.command : "") ||
+      (Array.isArray(action.metadata?.patterns) ? (action.metadata.patterns as any[]).join(" ") : "") ||
+      (Array.isArray(action.rawArgs) ? (action.rawArgs as any[]).join(" ") : "")
+    const actionKey = `${action.toolName}:${commandString || action.targetPath || JSON.stringify(action.rawArgs || "")}`
 
     if (this.turnDecisionCache.get(sid)?.has(actionKey)) {
-      const targetDir = (request.metadata?.directory as string) || this.workspaceRoot
-      await this.replyPermission(request.id, "once", request.sessionID, undefined, targetDir)
-      return
+      return {
+        verdict: "ALLOW",
+        reason: "Cached turn decision",
+        cached: true,
+      }
     }
 
+    // Resolve prompts if not already populated on action
+    if (!action.userPrompt) {
+      const resolved = await this.resolveSessionPrompts(action.sessionID)
+      action.userPrompt = sanitizeUserPrompt(resolved.userPrompt)
+      action.subagentPrompt = resolved.subagentPrompt ? sanitizeUserPrompt(resolved.subagentPrompt) : undefined
+    }
 
-    let verdictResult
+    // 5. Calls `this.evaluator.evaluate(action)`.
+    let verdictResult: ClassifierResult
     try {
-      verdictResult = await classifyRequest({
-        client: this.client,
-        userPrompt,
-        subagentPrompt,
-        actionName: request.permission,
-        actionArgs: {
-          patterns: request.patterns,
-          metadata: request.metadata,
-          always: request.always,
-        },
-        workspaceRoot:
-          typeof request.metadata?.directory === "string" ? request.metadata.directory : process.cwd(),
-        model: this.config.classifierModel,
-        environment: this.config.environment,
-        config: this.config,
-      })
+      verdictResult = await this.evaluator.evaluate(action)
     } catch (err) {
       verdictResult = { verdict: "UNSURE", reason: `Classifier error: ${err}` }
     }
 
+    // 6. On ALLOW: caches action, resets consecutive blocks, optional info notification, returns GateDecision.
     if (verdictResult.verdict === "ALLOW") {
       let sessionCache = this.turnDecisionCache.get(sid)
       if (!sessionCache) {
@@ -524,57 +568,50 @@ export class AutoGateEngine {
       sessionCache.add(actionKey)
       this.resetConsecutiveBlocks()
       if (this.config.notifyOnVerdict !== false) {
-        this.sendInformationalNotification(
-          request,
-          "ALLOW",
-          verdictResult.reason,
-          verdictResult.risk_level,
-          verdictResult.user_authorization
-        ).catch(() => {})
+        this.sendInformationalNotification(action, "ALLOW", verdictResult.reason, verdictResult.risk_level, verdictResult.user_authorization).catch(() => {})
       }
-      const targetDir = (request.metadata?.directory as string) || this.workspaceRoot
-      await this.replyPermission(request.id, "once", request.sessionID, undefined, targetDir)
-      return
+      return {
+        verdict: "ALLOW",
+        riskLevel: verdictResult.risk_level,
+        userAuthorization: verdictResult.user_authorization,
+        reason: verdictResult.reason || "Allowed by AutoGate classifier policy",
+        cached: false,
+      }
     }
 
+    // 7. On BLOCK: increments consecutive blocks, checks `isTransformableAction`, records in `sharedRecentlyRejected`, optional info notification, returns GateDecision.
     if (verdictResult.verdict === "BLOCK") {
       this.consecutiveBlocks++
       const baseReason = verdictResult.reason ?? "Blocked by AutoGate classifier policy"
-      const actionKey = getActionKey(request)
+      const regActionKey = getActionKey(action)
       sweepExpiredState()
 
-      const commandString =
-        (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
-        (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
-        (Array.isArray(request.patterns) ? request.patterns.join(" ") : "")
-
       let message = baseReason
-      if (isTransformableAction(request, commandString)) {
+      if (isTransformableAction(action, commandString)) {
         message = `[SAFE_TRANSFORM_REJECT]: ${baseReason}. Safe alternative: use 'npx trash-cli' instead of permanent 'rm', or 'git stash' before checkout/restore. To insist on manual review, call 'escalate_permission' tool, use AUTOGATE_ESCALATE=1 (for shell), or re-issue the exact action within 60s.`
       }
 
-      sharedRecentlyRejected.set(actionKey, {
+      sharedRecentlyRejected.set(regActionKey, {
         timestamp: Date.now(),
         reason: message,
       })
 
       if (this.config.notifyOnVerdict !== false) {
-        this.sendInformationalNotification(
-          request,
-          "BLOCK",
-          message,
-          verdictResult.risk_level,
-          verdictResult.user_authorization
-        ).catch(() => {})
+        this.sendInformationalNotification(action, "BLOCK", message, verdictResult.risk_level, verdictResult.user_authorization).catch(() => {})
       }
-      const targetDir = (request.metadata?.directory as string) || this.workspaceRoot
-      await this.replyPermission(request.id, "reject", request.sessionID, message, targetDir)
-      return
+
+      return {
+        verdict: "BLOCK",
+        riskLevel: verdictResult.risk_level,
+        userAuthorization: verdictResult.user_authorization,
+        reason: message,
+        safeTransformAlternative: isTransformableAction(action, commandString) ? message : undefined,
+      }
     }
 
-    // UNSURE
-    await this.delegateToRemote(
-      request,
+    // 8. On UNSURE: calls `requestReview(action, reason, isCircuitBreaker, riskLevel, userAuth)` and awaits in-flight resolver or timeout.
+    return this.requestReview(
+      action,
       verdictResult.reason,
       false,
       verdictResult.risk_level,
@@ -582,63 +619,25 @@ export class AutoGateEngine {
     )
   }
 
-  public handlePermissionReplied(data: { requestID?: string; id?: string; reply?: string }): void {
-    const reqID = data.requestID ?? data.id
-    if (!reqID) return
-
-    const entry = this.inFlightRequests.get(reqID)
-    if (entry) {
-      entry.abort.abort()
-      this.inFlightRequests.delete(reqID)
-      this.remoteAdapter
-        .updateStatus(reqID, "✅ Answered in Terminal", "Permission request was answered locally in the terminal.")
-        .catch(() => {})
-    }
-  }
-
-  public async handleRemoteResponse(resp: ApprovalResponse): Promise<void> {
-    const reqID = resp.req_id ?? (resp as any).id
-    if (!reqID) return
-
-    const entry = this.inFlightRequests.get(reqID)
-    const sessionID = entry?.sessionID
-    const directory = entry?.directory
-    if (entry) {
-      entry.abort.abort()
-      this.inFlightRequests.delete(reqID)
-    }
-
-    if (resp.reply === "once" || resp.reply === "always") {
-      this.resetConsecutiveBlocks()
-    }
-
-    try {
-      await this.remoteAdapter.updateStatus(
-        reqID,
-        `✅ Answered Remotely (${resp.reply})`,
-        `Permission request was answered remotely via ${resp.source ?? "ntfy"}.`
-      )
-    } catch {
-      // Ignore update status failure
-    }
-
-    const replyVal = resp.reply === "always" ? "always" : resp.reply === "reject" ? "reject" : "once"
-    await this.replyPermission(reqID, replyVal, sessionID, undefined, directory)
-  }
-
-  public async delegateToRemote(
-    request: PermissionEventData,
-    verdictReason?: string,
+  public async requestReview(
+    action: GateAction,
+    reason?: string,
     isCircuitBreaker?: boolean,
     riskLevel?: RiskLevel,
     userAuth?: UserAuthorization
-  ): Promise<void> {
-    const payload: NotificationPayload = {
-      id: request.id,
-      title: formatNotificationTitle(isCircuitBreaker ? "CIRCUIT BREAKER" : "REVIEW", request.permission),
+  ): Promise<GateDecision> {
+    const payload: ReviewRequest = {
+      id: action.id,
+      title: formatNotificationTitle(isCircuitBreaker ? "CIRCUIT BREAKER" : "REVIEW", action.toolName),
       message: formatNotificationBody({
-        target: request.patterns,
-        reason: verdictReason,
+        target: action.commandString
+          ? [action.commandString]
+          : action.targetPath
+          ? [action.targetPath]
+          : action.rawArgs
+          ? [String(action.rawArgs)]
+          : action.toolName,
+        reason,
         warning: isCircuitBreaker
           ? `Consecutive block threshold (${this.consecutiveBlocks} >= ${this.config.consecutiveBlockThreshold ?? 3}) reached.`
           : undefined,
@@ -655,34 +654,150 @@ export class AutoGateEngine {
     }
 
     const abortController = new AbortController()
-    this.inFlightRequests.set(request.id, {
-      abort: abortController,
-      sessionID: request.sessionID,
-      directory: (request.metadata?.directory as string) || this.workspaceRoot,
+    const decisionPromise = new Promise<GateDecision>((resolve, reject) => {
+      this.inFlightRequests.set(action.id, {
+        resolve,
+        reject,
+        abort: abortController,
+        sessionID: action.sessionID,
+        directory: action.workspaceRoot || this.workspaceRoot,
+      })
     })
 
     try {
       await this.remoteAdapter.publish(payload, abortController.signal)
     } catch (err: unknown) {
       if (abortController.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
-        return
+        return {
+          verdict: "BLOCK",
+          reason: "Review request aborted",
+        }
       }
       console.error("Failed to publish notification to remote adapter:", err)
     }
+
+    const timeoutMs = (this.config as any)?.reviewTimeout ?? 300000
+    const timeoutPromise = new Promise<GateDecision>((resolve) => {
+      setTimeout(() => {
+        const entry = this.inFlightRequests.get(action.id)
+        if (entry) {
+          this.inFlightRequests.delete(action.id)
+          entry.abort.abort()
+          resolve({
+            verdict: "BLOCK",
+            reason: `Review request timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+          })
+        }
+      }, timeoutMs)
+    })
+
+    return Promise.race([decisionPromise, timeoutPromise])
+  }
+
+  public resolveReviewResponse(resp: ReviewResponse): void {
+    const reqID = resp.req_id ?? (resp as any).id
+    if (!reqID) return
+
+    const entry = this.inFlightRequests.get(reqID)
+    if (entry) {
+      entry.abort.abort()
+      this.inFlightRequests.delete(reqID)
+      this.remoteAdapter
+        .updateStatus(reqID, `✅ Answered Remotely (${resp.reply})`, `Permission request was answered remotely via ${resp.source ?? "ntfy"}.`)
+        .catch(() => {})
+
+      if (resp.reply === "once" || resp.reply === "always") {
+        this.resetConsecutiveBlocks()
+      }
+
+      const verdict = resp.reply === "reject" ? "BLOCK" : "ALLOW"
+      entry.resolve({
+        verdict,
+        reason: `Answered remotely via ${resp.reply}`,
+      })
+    }
+  }
+
+  public async handlePermissionAsked(request: PermissionEventData): Promise<void> {
+    const action: GateAction = {
+      id: request.id || Math.random().toString(36).slice(2),
+      harness: request.harness || "opencode",
+      sessionID: request.sessionID || "",
+      toolName: request.permission || "permission",
+      commandString: typeof request.metadata?.command === "string" ? request.metadata.command : undefined,
+      targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
+      rawArgs: request.patterns || request.metadata,
+      workspaceRoot: (request.metadata?.directory as string) || this.workspaceRoot || process.cwd(),
+      userPrompt: this.getUserPrompt(request.sessionID),
+      environment: this.config.environment,
+      metadata: request.metadata,
+    }
+    const decision = await this.evaluate(action)
+    if (this.client) {
+      const replyVal = decision.verdict === "ALLOW" ? "once" : "reject"
+      const targetDir = (request.metadata?.directory as string) || this.workspaceRoot
+      await this.replyPermissionLegacy(request.id, replyVal, request.sessionID, decision.reason, targetDir)
+    }
+  }
+
+  public handlePermissionReplied(data: { requestID?: string; id?: string; reply?: string }): void {
+    const reqID = data.requestID ?? data.id
+    if (!reqID) return
+    const entry = this.inFlightRequests.get(reqID)
+    if (entry) {
+      entry.abort.abort()
+      this.inFlightRequests.delete(reqID)
+      this.remoteAdapter
+        .updateStatus(reqID, "✅ Answered in Terminal", "Permission request was answered locally in the terminal.")
+        .catch(() => {})
+    }
+  }
+
+  public async handleRemoteResponse(resp: ReviewResponse): Promise<void> {
+    this.resolveReviewResponse(resp)
+  }
+
+  public async delegateToRemote(
+    request: PermissionEventData,
+    verdictReason?: string,
+    isCircuitBreaker?: boolean,
+    riskLevel?: RiskLevel,
+    userAuth?: UserAuthorization
+  ): Promise<GateDecision> {
+    const action: GateAction = {
+      id: request.id || Math.random().toString(36).slice(2),
+      harness: request.harness || "opencode",
+      sessionID: request.sessionID || "",
+      toolName: request.permission || "permission",
+      commandString: typeof request.metadata?.command === "string" ? request.metadata.command : undefined,
+      targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
+      rawArgs: request.patterns || request.metadata,
+      workspaceRoot: (request.metadata?.directory as string) || this.workspaceRoot || process.cwd(),
+      userPrompt: this.getUserPrompt(request.sessionID),
+      environment: this.config.environment,
+      metadata: request.metadata,
+    }
+    return this.requestReview(action, verdictReason, isCircuitBreaker, riskLevel, userAuth)
   }
 
   private async sendInformationalNotification(
-    request: PermissionEventData,
+    action: GateAction,
     verdict: "ALLOW" | "BLOCK",
     reason?: string,
     riskLevel?: RiskLevel,
     userAuth?: UserAuthorization
   ): Promise<void> {
-    const payload: NotificationPayload = {
-      id: request.id,
-      title: formatNotificationTitle(verdict, request.permission),
+    const payload: ReviewRequest = {
+      id: action.id,
+      title: formatNotificationTitle(verdict, action.toolName),
       message: formatNotificationBody({
-        target: request.patterns,
+        target: action.commandString
+          ? [action.commandString]
+          : action.targetPath
+          ? [action.targetPath]
+          : action.rawArgs
+          ? [String(action.rawArgs)]
+          : action.toolName,
         reason,
         risk_level: riskLevel,
         user_authorization: userAuth,
@@ -699,36 +814,15 @@ export class AutoGateEngine {
     }
   }
 
-  private async replyPermission(
+  private async replyPermissionLegacy(
     requestID: string,
     reply: "once" | "always" | "reject",
     sessionID?: string,
     message?: string,
     directory?: string
   ): Promise<void> {
-    const serverUrl = (this.config as any)?.serverUrl || "http://localhost:4096"
-    const password = process.env.OPENCODE_SERVER_PASSWORD || ""
-    const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
-    const targetDir = directory || (this.workspaceRoot ? this.workspaceRoot : undefined)
-    const url = `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
-
-    // 1. Direct HTTP fetch with directory routing and Basic Auth
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": authHeader,
-        },
-        body: JSON.stringify({ reply, message }),
-        signal: AbortSignal.timeout(5000),
-      })
-      if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
-        return
-      }
-    } catch (err) {}
-
-    // 2. Try postSessionIdPermissionsPermissionId
+    if (!this.client) return
+    const targetDir = directory || this.workspaceRoot
     if (typeof this.client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
       try {
         const res = await this.client.postSessionIdPermissionsPermissionId({
@@ -736,13 +830,9 @@ export class AutoGateEngine {
           body: { response: reply },
           query: targetDir ? { directory: targetDir } : undefined,
         })
-        if (!res?.error && res?.response?.ok !== false) {
-          return
-        }
-      } catch (err) {}
+        if (!res?.error && res?.response?.ok !== false) return
+      } catch {}
     }
-
-    // 3. Try client.permission.reply (mock client / v2 SDK)
     if (typeof this.client?.permission?.reply === "function") {
       try {
         const res = await this.client.permission.reply({
@@ -750,54 +840,10 @@ export class AutoGateEngine {
           body: { reply, message },
           query: targetDir ? { directory: targetDir } : undefined,
         })
-        if (!res?.error && res?.response?.ok !== false) {
-          return
-        }
-      } catch (err) {}
-
-      try {
-        await this.client.permission.reply({
-          requestID,
-          reply,
-          message,
-        })
-        return
-      } catch (err) {
-        try {
-          await this.client.permission.reply({
-            sessionID,
-            permissionID: requestID,
-            response: reply,
-          })
-          return
-        } catch {}
-      }
+        if (!res?.error && res?.response?.ok !== false) return
+      } catch {}
     }
-
-    // 4. Try client._client.post fallback
-    if (typeof this.client?._client?.post === "function") {
-      try {
-        const res = await this.client._client.post({
-          url: `/permission/${encodeURIComponent(requestID)}/reply${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`,
-          body: { reply, message },
-        })
-        if (!res?.error && res?.response?.ok !== false) {
-          return
-        }
-      } catch (err) {}
-    }
-
-    if (typeof this.client?._client?.post === "function" && sessionID) {
-      try {
-        const res = await this.client._client.post({
-          url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`,
-          body: { response: reply },
-        })
-        if (!res?.error && res?.response?.ok !== false) {
-          return
-        }
-      } catch (err) {}
-    }
-    console.error(`Failed to reply to permission ${requestID}: no compatible client method found`)
   }
 }
+
+export const AutoGateEngine = AutoGateCoreEngine
