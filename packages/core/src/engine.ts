@@ -624,8 +624,11 @@ export class AutoGateCoreEngine {
     reason?: string,
     isCircuitBreaker?: boolean,
     riskLevel?: RiskLevel,
-    userAuth?: UserAuthorization
+    userAuth?: UserAuthorization,
   ): Promise<GateDecision> {
+    if (!this.stopRemoteListen) {
+      await this.start();
+    }
     const payload: ReviewRequest = {
       id: action.id,
       title: formatNotificationTitle(isCircuitBreaker ? "CIRCUIT BREAKER" : "REVIEW", action.toolName),
