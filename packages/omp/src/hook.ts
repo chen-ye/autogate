@@ -63,21 +63,27 @@ export function registerToolCallHook(
     }
 
     if (decision.verdict === "ALLOW") {
-      store.set(toolCallId, { verdict: "ALLOW", policy: "allow" })
+      const record = { verdict: "ALLOW", policy: "allow" as const }
+      store.set(toolCallId, record)
+      if (commandString) store.set(commandString, record)
       return undefined
     } else if (decision.verdict === "BLOCK") {
-      store.set(toolCallId, {
+      const record = {
         verdict: "BLOCK",
-        policy: "deny",
+        policy: "deny" as const,
         reason: decision.reason,
-      })
+      }
+      store.set(toolCallId, record)
+      if (commandString) store.set(commandString, record)
       return { block: true, reason: decision.reason }
     } else {
-      store.set(toolCallId, {
+      const record = {
         verdict: "UNSURE",
-        policy: "prompt",
+        policy: "prompt" as const,
         reason: decision.reason,
-      })
+      }
+      store.set(toolCallId, record)
+      if (commandString) store.set(commandString, record)
       return undefined
     }
   })

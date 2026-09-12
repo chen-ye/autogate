@@ -7,6 +7,7 @@ import {
   type GateDecision
 } from "../../core/src/index.ts"
 import { registerToolCallHook, verdictStore } from "./hook.ts"
+import { resolveShadowedApproval } from "./approval-bridge.ts"
 
 export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness"
@@ -53,7 +54,7 @@ export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine): v
     name: "bash",
     label: "Bash",
     description: "Execute a bash command in a persistent shell session",
-    approval: "write",
+    approval: (args: any) => resolveShadowedApproval(args),
     parameters,
     async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
       if (!ctx?.invokeTool) {
