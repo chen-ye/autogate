@@ -27,35 +27,49 @@ export class MockInferenceProvider {
       hostname: "127.0.0.1",
       port,
       fetch: async (req) => {
-        const urlObj = new URL(req.url)
-        const path = urlObj.pathname
-        const method = req.method
+        return this.handleRequest(req)
+      },
+    })
+  }
 
-        const headers: Record<string, string> = {}
-        req.headers.forEach((val, key) => {
-          headers[key] = val
-        })
+  get port(): number {
+    return this.server.port
+  }
 
-        let body: unknown = null
-        try {
-          const text = await req.text()
-          if (text) {
-            try {
-              body = JSON.parse(text)
-            } catch {
-              body = text
-            }
+  get url(): string {
+    return `http://127.0.0.1:${this.server.port}`
+  }
+
+  public async handleRequest(req: Request, preParsedBody?: unknown): Promise<Response> {
+    const urlObj = new URL(req.url)
+    const path = urlObj.pathname
+    const method = req.method
+
+    const headers: Record<string, string> = {}
+    req.headers.forEach((val, key) => {
+      headers[key] = val
+    })
+
+    let body: unknown = preParsedBody ?? null
+    if (body === null && req.body) {
+      try {
+        const text = await req.text()
+        if (text) {
+          try {
+            body = JSON.parse(text)
+          } catch {
+            body = text
           }
-        } catch {}
-
-        this.requests.push({
-          url: req.url,
-          method,
-          headers,
-          body,
-          timestamp: Date.now(),
-        })
-
+        }
+      } catch {}
+    }
+    this.requests.push({
+      url: req.url,
+      method,
+      headers,
+      body,
+      timestamp: Date.now(),
+    })
         if (method === "OPTIONS") {
           return new Response(null, {
             status: 204,
@@ -74,6 +88,7 @@ export class MockInferenceProvider {
               data: [
                 { id: "gpt-4o", object: "model" },
                 { id: "gemini-2.5-flash-lite", object: "model" },
+                { id: "mock-model", object: "model" },
               ],
             }),
             {
@@ -82,7 +97,7 @@ export class MockInferenceProvider {
             }
           )
         }
-
+        console.log("[MockProvider] responseQueue length:", this.responseQueue.length, "path:", path)
         if (this.responseQueue.length === 0) {
           return new Response(
             JSON.stringify({ error: "No mock responses queued" }),
@@ -92,7 +107,6 @@ export class MockInferenceProvider {
             }
           )
         }
-
         const mockRes = this.responseQueue.shift()!
         const status = mockRes.status ?? 200
 
@@ -258,25 +272,23 @@ export class MockInferenceProvider {
             ],
             usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
           }
-          return new Response(JSON.stringify(completionObj), {
-            status,
-            headers: { "Content-Type": "application/json" },
-          })
+return new Response(JSON.stringify(completionObj), {
+status,
+headers: { "Content-Type": "application/json" },
+})
         }
-      },
-    })
-  }
-
-  get url(): string {
-    return `http://127.0.0.1:${this.server.port}`
   }
 
   get port(): number {
     return this.server.port
   }
 
-  pushResponse(res: MockResponse): void {
-    this.responseQueue.push(res)
+pushResponse(res: MockResponse): void {
+this.responseQueue.push(res)
+  }
+
+  public getNextResponse(): MockResponse | undefined {
+    return this.responseQueue.shift()
   }
 
   getRequests(): RecordedRequest[] {

@@ -104,20 +104,19 @@ export function parseNtfyActions(actionsHeader: string): ParsedNtfyAction[] {
 
 export interface ReceivedReply {
   id: string
+  sessionID?: string
   reply: "once" | "always" | "reject"
   directory?: string
   message?: string
   headers: Record<string, string>
   body: Record<string, unknown>
 }
-
 export class OpenCodeE2EHarness {
   public mockNtfy: MockNtfyServer
   public mockProvider: MockInferenceProvider
   public server: ReturnType<typeof Bun.serve>
-  public client: ReturnType<typeof createOpencodeClient>
   public plugin!: Hooks
-
+  public workspaceDir: string
   private receivedReplies: ReceivedReply[] = []
   private pendingResolutions = new Map<string, (val: { reply: string; directory?: string; message?: string }) => void>()
   private pendingPermissions = new Map<string, PermissionEventData>()
@@ -129,11 +128,11 @@ export class OpenCodeE2EHarness {
 
   constructor(options?: HarnessOptions) {
     this.serverPassword = options?.serverPassword || process.env.OPENCODE_SERVER_PASSWORD || crypto.randomUUID()
+    process.env.OPENCODE_SERVER_PASSWORD = this.serverPassword
+this.workspaceDir = options?.workspaceDir || "/tmp/project-alpha"
     const pluginCfg = options?.pluginConfig || {}
     this.ntfyTopic = (pluginCfg.ntfyTopic as string) || "e2e-test-topic"
     this.ntfyToken = options?.ntfyToken ?? (pluginCfg.ntfyToken as string | undefined)
-    this.ntfyServer = (pluginCfg.ntfyServer as string | undefined)
-
     this.mockNtfy = options?.mockNtfy ?? new MockNtfyServer(0, this.ntfyToken)
     this.mockProvider = new MockInferenceProvider(0)
     this.authHeader = "Basic " + Buffer.from(`opencode:${this.serverPassword}`).toString("base64")
@@ -146,10 +145,11 @@ export class OpenCodeE2EHarness {
         const url = new URL(req.url)
         const path = url.pathname
         const method = req.method
-        console.log("[HARNESS] request:", method, path)
+        console.log("[HARNESS ALL REQUESTS]:", method, path)
         // Validate Basic Auth
         const auth = req.headers.get("authorization")
-        if (!auth || auth !== authHeader) {
+if (!auth || auth !== this.authHeader) {
+          console.log("[HARNESS] 401 Unauthorized for path:", path, "auth received:", auth, "expected:", this.authHeader)
           return new Response("Unauthorized", {
             status: 401,
             headers: { "Content-Type": "text/plain" },
@@ -176,15 +176,19 @@ export class OpenCodeE2EHarness {
           const replyVal = (rawReply === "once" || rawReply === "always" || rawReply === "reject" ? rawReply : "once") as any
           const messageVal = body?.message as string | undefined
 
+          const reqObj = this.pendingPermissions.get(id)
+          const reqSessionID = reqObj?.sessionID || undefined
+          console.log("[HARNESS DEBUG] perm/permissionID reply received for id:", id, "reqObj:", reqObj, "reqSessionID:", reqSessionID, "all pending:", Array.from(this.pendingPermissions.keys()))
+
           this.receivedReplies.push({
             id,
+            sessionID: reqSessionID,
             reply: replyVal,
             directory,
             message: messageVal,
             headers,
             body,
           })
-
           const resolver = this.pendingResolutions.get(id)
           if (resolver) {
             resolver({ reply: replyVal, directory, message: messageVal })
@@ -216,15 +220,19 @@ if (method === "POST" && replyMatch) {
 
           const replyVal = (body?.reply as any) || "reject"
           const messageVal = (body?.message || body?.response || body?.reason) as string | undefined
+          const reqObj = this.pendingPermissions.get(id)
+          const reqSessionID = reqObj?.sessionID || undefined
+          console.log("[HARNESS DEBUG] permission/reply received for id:", id, "reqObj:", reqObj, "reqSessionID:", reqSessionID, "all pending:", Array.from(this.pendingPermissions.keys()))
+
           this.receivedReplies.push({
             id,
+            sessionID: reqSessionID,
             reply: replyVal,
             directory,
             message: messageVal,
             headers,
             body,
           })
-
           const resolver = this.pendingResolutions.get(id)
           if (resolver) {
             resolver({ reply: replyVal, directory, message: messageVal })
@@ -288,25 +296,34 @@ headers: { "Content-Type": "application/json" },
         }
 
         // 5. POST /session/:id/prompt or message
+        console.log("[HARNESS] method before prompt/message:", JSON.stringify(method), "path:", JSON.stringify(path))
+        console.log("[HARNESS] regex test:", /^\/session\/[^/]+\/(prompt|message)$/.test(path))
         if (method === "POST" && /^\/session\/[^/]+\/(prompt|message)$/.test(path)) {
-          const promptBody = await req.text()
+          const sessionMatch = path.match(/^\/session\/([^/]+)\/(prompt|message)$/)
+          const sessionID = sessionMatch ? decodeURIComponent(sessionMatch[1]!) : "sess-default"
           const parts: Array<Record<string, unknown>> = []
           try {
-const providerRes = await fetch(`${this.mockProvider.url}/v1/chat/completions`, {
-method: "POST",
-headers: { "Content-Type": "application/json" },
-body: promptBody,
-            })
-            if (!providerRes.ok) {
-              const errTxt = await providerRes.text()
-              console.log("[Harness] Provider error:", providerRes.status, errTxt)
+            let providerRes: Response
+            try {
+              providerRes = await this.mockProvider.handleRequest(
+                new Request(`${this.mockProvider.url}/v1/chat/completions`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                }),
+                { model: "gpt-4o", messages: [{ role: "user", content: "prompt" }] }
+              )
+            } catch (innerErr: any) {
+              console.error("[HARNESS] handleRequest threw message:", innerErr?.message, "stack:", innerErr?.stack)
+              throw innerErr
             }
-            if (providerRes.ok) {
+            console.log("[Harness] providerRes status:", providerRes.status, "ok:", providerRes.ok)
+if (providerRes.ok) {
               const providerJson = await providerRes.json()
+              console.log("[HARNESS] providerJson:", JSON.stringify(providerJson))
               const message = providerJson?.choices?.[0]?.message
               const content = message?.content ?? JSON.stringify(providerJson)
               const toolCalls = message?.tool_calls
-
+              console.log("[HARNESS] toolCalls:", toolCalls)
               if (toolCalls && toolCalls.length > 0) {
                 for (const tc of toolCalls) {
                   let args = tc.function.arguments
@@ -320,6 +337,29 @@ body: promptBody,
                     tool: tc.function.name,
                     state: { input: args },
                   })
+
+                  const cmd = typeof args === "object" && args !== null && "command" in args ? (args as any).command : JSON.stringify(args)
+                  const permId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`
+                  this.pendingPermissions.set(permId, {
+                    id: permId,
+                    sessionID,
+                    permission: tc.function.name,
+                    patterns: [cmd],
+                    metadata: { command: cmd, directory: this.workspaceDir },
+                    always: [],
+                  })
+                  console.log("[HARNESS] scheduling simulatePermissionAsk for permId:", permId)
+                  setTimeout(() => {
+                    this.simulatePermissionAsk({
+                      id: permId,
+                      sessionID,
+                      permission: tc.function.name,
+                      patterns: [cmd],
+                      metadata: { command: cmd, directory: this.workspaceDir },
+                    }).catch((err) => {
+                      console.error("[Harness] simulatePermissionAsk background error:", err)
+                    })
+                  }, 50)
                 }
               } else {
                 parts.push({
@@ -328,8 +368,8 @@ body: promptBody,
                 })
               }
             }
-          } catch (err) {
-            console.debug("[Harness] Provider fetch failed:", err)
+          } catch (err: any) {
+            console.error("[HARNESS] CRITICAL Provider fetch exception:", err?.message, "stack:", err?.stack)
           }
 
           if (parts.length === 0) {
@@ -338,7 +378,6 @@ body: promptBody,
               text: JSON.stringify({ verdict: "ALLOW", reason: "Default mock fallback approval" }),
             })
           }
-
           const respObj = {
             id: "msg_" + Date.now(),
             parts,
@@ -371,6 +410,8 @@ body: promptBody,
   }
 
   public async init(options?: HarnessOptions): Promise<void> {
+    process.env.GEMINI_BASE_URL = this.mockProvider.url
+    process.env.GEMINI_API_KEY = "test-key"
     const workspaceDir = options?.workspaceDir || "/tmp/project-alpha"
     const pluginConfig = {
       ntfyServer: this.mockNtfy.url,
@@ -381,13 +422,13 @@ body: promptBody,
       classifierFallback: "UNSURE",
       environment: "desktop",
       autoMode: true,
-      ...(options?.pluginConfig || {}),
+...(options?.pluginConfig || {}),
     }
     if (options?.pluginConfig?.ntfyServer) {
-      this.ntfyServer = options.pluginConfig.ntfyServer as string
-    } else {
-      this.ntfyServer = this.mockNtfy.url
-    }
+this.ntfyServer = options.pluginConfig.ntfyServer as string
+} else {
+this.ntfyServer = this.mockNtfy.url
+}
 
     const pluginInput: PluginInput = {
       client: this.client,
@@ -398,17 +439,18 @@ body: promptBody,
     console.log("[INIT] mockNtfy.url:", this.mockNtfy.url, "pluginConfig.ntfyServer:", pluginConfig.ntfyServer)
     this.plugin = await AutoGatePlugin(pluginInput, pluginConfig)
   }
-  public async simulatePermissionAsk(request: Partial<PermissionEventData>): Promise<void> {
+public async simulatePermissionAsk(request: Partial<PermissionEventData>): Promise<void> {
+    console.log("[HARNESS] simulatePermissionAsk called with:", request)
     const id = request.id || `req_${Date.now()}_${Math.random().toString(36).slice(2)}`
-    const req: PermissionEventData = {
-      id,
-      sessionID: request.sessionID || "sess-1",
-      permission: request.permission || "shell:run",
-      patterns: request.patterns || ["ls"],
-      metadata: request.metadata || {},
-      always: request.always || [],
-      ...request,
-    }
+const req: PermissionEventData = {
+id,
+sessionID: request.sessionID || "sess-1",
+permission: request.permission || "shell:run",
+patterns: request.patterns || ["ls"],
+metadata: request.metadata || {},
+always: request.always || [],
+...request,
+}
 
     this.pendingPermissions.set(id, req)
 
@@ -587,6 +629,31 @@ body: promptBody,
         clearTimeout(timerId)
       }
     }
+  }
+  public async promptSession(sessionID: string, userText: string): Promise<any> {
+    return await this.client.session.prompt({
+      path: { id: sessionID },
+      body: {
+        parts: [{ type: "text", text: userText }],
+      },
+    })
+  }
+
+  public async waitForSessionResolution(sessionID: string, timeoutMs = 5000): Promise<{ id: string; reply: string; directory?: string; message?: string }> {
+    const existing = this.receivedReplies.find((r) => r.sessionID === sessionID)
+    if (existing) {
+      return existing
+    }
+
+    const startTime = Date.now()
+    while (Date.now() - startTime < timeoutMs) {
+      const found = this.receivedReplies.find((r) => r.sessionID === sessionID)
+      if (found) {
+        return found
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`Timeout waiting for resolution of session ${sessionID}`)
   }
 
   public getReceivedReplies(): ReceivedReply[] {
