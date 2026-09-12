@@ -11,6 +11,12 @@
       ],
       "@autogate/core/*": [
         "./packages/core/src/*"
+      ],
+      "@autogate/opencode": [
+        "./packages/opencode/src/index.ts"
+      ],
+      "@autogate/opencode/*": [
+        "./packages/opencode/src/*"
       ]
     },
     "strict": true,

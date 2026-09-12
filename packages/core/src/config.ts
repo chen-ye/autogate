@@ -1,6 +1,6 @@
 import type { EnvironmentConfig } from "./types"
 
-  export interface AutoGateConfig {
+export interface AutoGateConfig {
   autoMode: boolean
   ntfyTopic: string
   ntfyServer: string
@@ -10,6 +10,7 @@ import type { EnvironmentConfig } from "./types"
   consecutiveBlockThreshold?: number
   notifyOnVerdict?: boolean
   environment?: EnvironmentConfig
+  serverUrl?: string
 }
 
 export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
@@ -54,6 +55,9 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
       ntfyServer = "https://ntfy.sh"
     }
   }
+
+  const rawServerUrl = options?.serverUrl ?? options?.SERVER_URL ?? env.SERVER_URL
+  const serverUrl = typeof rawServerUrl === "string" && rawServerUrl.trim().length > 0 ? rawServerUrl.trim() : "http://localhost:4096"
 
   const rawToken = options?.ntfyToken ?? options?.NTFY_TOKEN ?? env.NTFY_TOKEN
   const ntfyToken = typeof rawToken === "string" && rawToken.trim().length > 0 ? rawToken.trim() : undefined
@@ -103,5 +107,6 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     consecutiveBlockThreshold,
     notifyOnVerdict,
     environment,
+    serverUrl,
   }
 }

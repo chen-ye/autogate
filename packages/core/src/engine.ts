@@ -711,11 +711,12 @@ export class AutoGateCoreEngine {
       }
 
       const verdict = resp.reply === "reject" ? "BLOCK" : "ALLOW"
-      entry.resolve({
-        verdict,
-        reason: `Answered remotely via ${resp.reply}`,
-      })
-    }
+entry.resolve({
+verdict,
+reply: resp.reply,
+reason: `Answered remotely via ${resp.reply}`,
+})
+  }
   }
 
   public async handlePermissionAsked(request: PermissionEventData): Promise<void> {
@@ -734,7 +735,7 @@ export class AutoGateCoreEngine {
     }
     const decision = await this.evaluate(action)
     if (this.client) {
-      const replyVal = decision.verdict === "ALLOW" ? "once" : "reject"
+      const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject")
       const targetDir = (request.metadata?.directory as string) || this.workspaceRoot
       await this.replyPermissionLegacy(request.id, replyVal, request.sessionID, decision.reason, targetDir)
     }
@@ -821,8 +822,28 @@ export class AutoGateCoreEngine {
     message?: string,
     directory?: string
   ): Promise<void> {
+    const serverUrl = (this.config as any)?.serverUrl || "http://localhost:4096"
+    const password = process.env.OPENCODE_SERVER_PASSWORD || ""
+    const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
+    const targetDir = directory || (this.workspaceRoot ? this.workspaceRoot : undefined)
+    const url = `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": authHeader,
+        },
+        body: JSON.stringify({ reply, message }),
+        signal: AbortSignal.timeout(5000),
+      })
+      if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
+        return
+      }
+    } catch (err) {}
+
     if (!this.client) return
-    const targetDir = directory || this.workspaceRoot
     if (typeof this.client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
       try {
         const res = await this.client.postSessionIdPermissionsPermissionId({

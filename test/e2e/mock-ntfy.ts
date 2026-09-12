@@ -1,144 +1,143 @@
-export interface PublishedMessage {
-  topic: string;
-  title?: string;
-  priority?: string;
-  tags?: string[];
-  actions?: string[];
-  body: string;
-  headers: Record<string, string>;
-  timestamp: number;
-}
+import { Server } from "bun"
 
-export interface MockNtfyServerOptions {
-  token?: string;
+export interface PublishedMessage {
+  topic: string
+  title?: string
+  priority?: string
+  tags?: string[]
+  actions?: string
+  body: string
+  headers: Record<string, string>
+  timestamp: number
 }
 
 export class MockNtfyServer {
-  private server: ReturnType<typeof Bun.serve>;
-  private published: PublishedMessage[] = [];
-  private sseClients = new Set<ReadableStreamDefaultController>();
-  private token?: string;
+  private server: ReturnType<typeof Bun.serve>
+  private published: PublishedMessage[] = []
+  private clients = new Set<ReadableStreamDefaultController>()
+  private token?: string
 
-  constructor(options?: MockNtfyServerOptions) {
-    this.token = options?.token;
+  constructor(port = 0, token?: string) {
+    this.token = token
     this.server = Bun.serve({
-      port: 0,
-      fetch: (req) => this.handleRequest(req),
-    });
+      hostname: "127.0.0.1",
+      port,
+      fetch: async (req) => {
+        if (this.token) {
+          const auth = req.headers.get("authorization")
+          if (!auth || auth !== `Bearer ${this.token}`) {
+            return new Response(JSON.stringify({ error: "Unauthorized" }), {
+              status: 401,
+              headers: { "Content-Type": "application/json" },
+            })
+          }
+        }
+        const url = new URL(req.url)
+        const path = url.pathname
+
+        if (req.method === "POST") {
+          const topic = path.replace(/^\//, "")
+          const body = await req.text()
+          const headers: Record<string, string> = {}
+          req.headers.forEach((val, key) => {
+            headers[key] = val
+          })
+
+          const msg: PublishedMessage = {
+            topic,
+            title: headers["title"],
+            priority: headers["priority"],
+            tags: headers["tags"] ? headers["tags"].split(",") : undefined,
+            actions: headers["actions"],
+            body,
+            headers,
+            timestamp: Date.now(),
+          }
+          this.published.push(msg)
+
+          if (topic.endsWith("-response") || topic.includes("response")) {
+            this.broadcast(body)
+          }
+
+          return new Response(JSON.stringify({ success: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        }
+
+        if (req.method === "GET") {
+          if (path.endsWith("/json") || path.includes("stream") || path.includes("json")) {
+            const stream = new ReadableStream({
+              start: (controller) => {
+                this.clients.add(controller)
+                controller.enqueue(new TextEncoder().encode(": connected\n\n"))
+              },
+              cancel: (controller) => {
+                this.clients.delete(controller)
+              },
+            })
+
+            return new Response(stream, {
+              status: 200,
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+              },
+            })
+          }
+        }
+
+        return new Response("Not Found", { status: 404 })
+      },
+    })
   }
 
   get url(): string {
-    return `http://localhost:${this.server.port}`;
+    return `http://127.0.0.1:${this.server.port}`
   }
 
   get port(): number {
-    return this.server.port;
+    return this.server.port
   }
 
-  getPublished(): PublishedMessage[] {
-    return [...this.published];
+  get token(): string | undefined {
+    return this.token
+  }
+
+  getPublished(topic?: string): PublishedMessage[] {
+    if (!topic) return this.published
+    return this.published.filter((m) => m.topic === topic || m.topic === `${topic}-response`)
   }
 
   clearPublished(): void {
-    this.published = [];
+    this.published = []
+  }
+
+  triggerAction(req_id: string, reply: "once" | "always" | "reject", topic = "opencode-auto-gate"): void {
+    const data = JSON.stringify({ req_id, reply })
+    this.broadcast(data)
+  }
+
+  private broadcast(data: string): void {
+    const message = `data: ${JSON.stringify({ event: "message", message: data })}\n\n`
+    const encoded = new TextEncoder().encode(message)
+    for (const client of this.clients) {
+      try {
+        client.enqueue(encoded)
+      } catch {
+        this.clients.delete(client)
+      }
+    }
   }
 
   async stop(): Promise<void> {
-    for (const client of this.sseClients) {
+    for (const client of this.clients) {
       try {
-        client.close();
+        client.close()
       } catch {}
     }
-    this.sseClients.clear();
-    await this.server.stop(true);
-  }
-
-  simulateReply(req_id: string, reply: string): void {
-    const payload = JSON.stringify({ req_id, reply });
-    const sseData = `data: ${JSON.stringify({ event: "message", message: payload })}\n\n`;
-    for (const client of this.sseClients) {
-      try {
-        client.enqueue(new TextEncoder().encode(sseData));
-      } catch {}
-    }
-  }
-
-  private async handleRequest(req: Request): Promise<Response> {
-    const url = new URL(req.url);
-    const pathname = url.pathname;
-
-    if (this.token) {
-      const auth = req.headers.get("Authorization");
-      if (auth !== `Bearer ${this.token}`) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-    }
-
-    if (pathname.endsWith("/json") || pathname.endsWith("/sse") || req.headers.get("Accept")?.includes("text/event-stream")) {
-      const stream = new ReadableStream({
-        start: (controller) => {
-          this.sseClients.add(controller);
-          controller.enqueue(new TextEncoder().encode(": connected\n\n"));
-        },
-        cancel: (controller) => {
-          this.sseClients.delete(controller as any);
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-        },
-      });
-    }
-
-    if (req.method === "POST" || req.method === "PUT") {
-      const body = await req.text();
-      const headers: Record<string, string> = {};
-      req.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
-
-      const title = req.headers.get("Title") || undefined;
-      const priority = req.headers.get("Priority") || undefined;
-      const tagsHeader = req.headers.get("Tags");
-      const tags = tagsHeader ? tagsHeader.split(",").map(t => t.trim()).filter(Boolean) : undefined;
-      const actionsHeader = req.headers.get("Actions");
-      const actions = actionsHeader ? actionsHeader.split(";").map(a => a.trim()).filter(Boolean) : undefined;
-      
-      const topic = pathname.replace(/^\//, "").replace(/\/json$/, "").replace(/\/sse$/, "");
-
-      if (pathname.includes("-response")) {
-        try {
-          const json = JSON.parse(body);
-          if (json.req_id && json.reply) {
-            this.simulateReply(json.req_id, json.reply);
-          }
-        } catch {}
-      }
-
-      this.published.push({
-        topic,
-        title,
-        priority,
-        tags,
-        actions,
-        body,
-        headers,
-        timestamp: Date.now(),
-      });
-
-      return new Response(JSON.stringify({ success: true, id: req.headers.get("X-Sequence-ID") || crypto.randomUUID() }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    return new Response(JSON.stringify({ topic: pathname, messages: this.published }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    this.clients.clear()
+    await this.server.stop(true)
   }
 }
