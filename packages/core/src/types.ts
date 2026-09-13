@@ -1,4 +1,5 @@
 export type ClassifierVerdict = "ALLOW" | "BLOCK" | "UNSURE"
+export type ReviewFallbackMode = "native" | "ntfy"
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
 export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH"

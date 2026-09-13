@@ -173,4 +173,25 @@ describe("AutoGateCoreEngine", () => {
     expect(decision.verdict).toBe("BLOCK") // replied reject via mock adapter
     expect(mockAdapter.publishedRequests.length).toBe(1)
   })
+
+  it("native fallback mode on UNSURE -> returns UNSURE immediately without calling adapter.publish", async () => {
+    engine.setFallbackMode("native")
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Unsure action", risk_level: "MEDIUM", user_authorization: "LOW" }
+    const action: GateAction = {
+      id: "act-native",
+      harness: "opencode",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "custom_command",
+      workspaceRoot: "/tmp",
+      userPrompt: "test",
+    }
+
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("UNSURE")
+    expect(decision.reason).toBe("Unsure action")
+    expect(decision.riskLevel).toBe("MEDIUM")
+    expect(decision.userAuthorization).toBe("LOW")
+    expect(mockAdapter.publishedRequests.length).toBe(0)
 })
+});

@@ -7,9 +7,7 @@ import type {
   GateDecision,
   GateEvaluator,
   ClassifierResult,
-  RiskLevel,
-  UserAuthorization,
-  PermissionEventData,
+  ReviewFallbackMode,
 } from "./types"
 import { sanitizeUserPrompt } from "./classifier"
 import { formatNotificationTitle, formatNotificationBody } from "./formatters"
@@ -205,6 +203,7 @@ export class AutoGateCoreEngine {
   private workspaceRoot?: string
   private stopRemoteListen?: () => void
   private client?: any
+  private reviewFallbackMode: ReviewFallbackMode = "ntfy"
 
   constructor(optionsOrClient?: AutoGateEngineOptions | any, config?: AutoGateConfig, remoteAdapter?: NotifierAdapter, evaluator?: GateEvaluator) {
     if (optionsOrClient && typeof optionsOrClient === "object" && !Array.isArray(optionsOrClient) && ("config" in optionsOrClient || "evaluator" in optionsOrClient || "adapter" in optionsOrClient)) {
@@ -229,6 +228,15 @@ export class AutoGateCoreEngine {
     this.workspaceRoot = this.workspaceRoot || (this.config as any)?.workspaceRoot
     this.enabled = this.config.autoMode
     this.consecutiveBlockThreshold = this.config.consecutiveBlockThreshold ?? 3
+    this.reviewFallbackMode = this.config.reviewFallbackMode ?? "ntfy"
+  }
+
+  public getFallbackMode(): ReviewFallbackMode {
+    return this.reviewFallbackMode
+  }
+
+  public setFallbackMode(mode: ReviewFallbackMode): void {
+    this.reviewFallbackMode = mode
   }
 
   public setUserPrompt(prompt: string): void
@@ -596,15 +604,23 @@ export class AutoGateCoreEngine {
       }
     }
 
-    // 8. On UNSURE: calls `requestReview(action, reason, isCircuitBreaker, riskLevel, userAuth)` and awaits in-flight resolver or timeout.
+// 8. On UNSURE: calls `requestReview(action, reason, isCircuitBreaker, riskLevel, userAuth)` and awaits in-flight resolver or timeout.
+if (this.reviewFallbackMode === "native") {
+return {
+verdict: "UNSURE",
+reason: verdictResult.reason ?? "Manual review required (native terminal fallback)",
+riskLevel: verdictResult.risk_level,
+userAuthorization: verdictResult.user_authorization,
+}
+    }
     return this.requestReview(
       action,
       verdictResult.reason,
       false,
       verdictResult.risk_level,
       verdictResult.user_authorization
-    )
-  }
+)
+}
 
   public async requestReview(
     action: GateAction,

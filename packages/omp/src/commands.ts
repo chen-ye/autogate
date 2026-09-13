@@ -1,5 +1,95 @@
 import type { AutoGateCoreEngine } from "../../core/src/index.ts"
 
+function notifyCtx(ctx: any, msg: string) {
+  if (ctx?.ui?.notify) {
+    ctx.ui.notify(msg, "info")
+  } else if (ctx?.notify) {
+    ctx.notify(msg, "info")
+  }
+}
+
+export function registerAutogateClassifierCommand(pi: any, engine: AutoGateCoreEngine): void {
+  if (typeof pi?.registerCommand !== "function") {
+    return
+  }
+
+  const handler = async (args: string, ctx: any) => {
+    const arg = (typeof args === "string" ? args : (args as any)?.arguments || "").trim().toLowerCase()
+
+    let msg = ""
+    if (arg === "off" || arg === "disable" || arg === "false" || arg === "0") {
+      engine.setEnabled(false)
+      msg = "AutoGate Classifier: DISABLED"
+    } else if (arg === "on" || arg === "enable" || arg === "true" || arg === "1") {
+      engine.setEnabled(true)
+      msg = "AutoGate Classifier: ENABLED"
+    } else if (arg === "status") {
+      msg = `AutoGate Classifier: ${engine.isEnabled() ? "ENABLED" : "DISABLED"} | Fallback Mode: ${engine.getFallbackMode()}`
+    } else if (arg === "toggle" || !arg) {
+      const nextState = !engine.isEnabled()
+      engine.setEnabled(nextState)
+      msg = `AutoGate Classifier: ${nextState ? "ENABLED" : "DISABLED"}`
+    } else {
+      const nextState = !engine.isEnabled()
+      engine.setEnabled(nextState)
+      msg = `AutoGate Classifier: ${nextState ? "ENABLED" : "DISABLED"}`
+    }
+
+    notifyCtx(ctx, msg)
+  }
+
+  pi.registerCommand("autogate-classifier", {
+    description: "Enable, disable, or check AutoGate classifier status",
+    handler,
+  })
+}
+
+export function registerAutogateFallbackCommand(pi: any, engine: AutoGateCoreEngine): void {
+  if (typeof pi?.registerCommand !== "function") {
+    return
+  }
+
+  const handler = async (args: string, ctx: any) => {
+    const arg = (typeof args === "string" ? args : (args as any)?.arguments || "").trim().toLowerCase()
+
+    let msg = ""
+    if (arg === "native" || arg === "desk" || arg === "terminal") {
+      engine.setFallbackMode("native")
+      msg = "AutoGate Fallback Mode: NATIVE (immediate terminal prompt)"
+    } else if (arg === "ntfy" || arg === "mobile" || arg === "remote") {
+      engine.setFallbackMode("ntfy")
+      msg = "AutoGate Fallback Mode: NTFY (mobile push approval)"
+    } else if (arg === "status") {
+      msg = `AutoGate Fallback Mode: ${engine.getFallbackMode()} | Classifier: ${engine.isEnabled() ? "ENABLED" : "DISABLED"}`
+    } else if (arg === "toggle" || !arg) {
+      const current = engine.getFallbackMode()
+      const nextMode = current === "native" ? "ntfy" : "native"
+      engine.setFallbackMode(nextMode)
+      if (nextMode === "native") {
+        msg = "AutoGate Fallback Mode: NATIVE (immediate terminal prompt)"
+      } else {
+        msg = "AutoGate Fallback Mode: NTFY (mobile push approval)"
+      }
+    } else {
+      const current = engine.getFallbackMode()
+      const nextMode = current === "native" ? "ntfy" : "native"
+      engine.setFallbackMode(nextMode)
+      if (nextMode === "native") {
+        msg = "AutoGate Fallback Mode: NATIVE (immediate terminal prompt)"
+      } else {
+        msg = "AutoGate Fallback Mode: NTFY (mobile push approval)"
+      }
+    }
+
+    notifyCtx(ctx, msg)
+  }
+
+  pi.registerCommand("autogate-fallback", {
+    description: "Set or check AutoGate review fallback mode (native or ntfy)",
+    handler,
+  })
+}
+
 export function registerAutomodeCommand(pi: any, engine: AutoGateCoreEngine): void {
   if (typeof pi?.registerCommand !== "function") {
     return
@@ -11,32 +101,27 @@ export function registerAutomodeCommand(pi: any, engine: AutoGateCoreEngine): vo
     let msg = ""
     if (arg === "off" || arg === "disable" || arg === "false" || arg === "0") {
       engine.setEnabled(false)
-      msg = "Auto Mode is now DISABLED (all requests route to ntfy)."
+      msg = "AutoGate Classifier: DISABLED"
     } else if (arg === "on" || arg === "enable" || arg === "true" || arg === "1") {
       engine.setEnabled(true)
-      msg = "Auto Mode is now ENABLED (classifier active)."
-    } else if (arg === "status" || !arg) {
-      const status = engine.isEnabled() ? "ENABLED (classifier active)" : "DISABLED (routing to remote)"
-      msg = `Auto Mode status: ${status}`
-    } else if (arg === "toggle") {
+      msg = "AutoGate Classifier: ENABLED"
+    } else if (arg === "status") {
+      msg = `AutoGate Classifier: ${engine.isEnabled() ? "ENABLED" : "DISABLED"} | Fallback Mode: ${engine.getFallbackMode()}`
+    } else if (arg === "toggle" || !arg) {
       const nextState = !engine.isEnabled()
       engine.setEnabled(nextState)
-      msg = `Auto Mode toggled to: ${nextState ? "ENABLED" : "DISABLED"}`
+      msg = `AutoGate Classifier: ${nextState ? "ENABLED" : "DISABLED"}`
     } else {
       const nextState = !engine.isEnabled()
       engine.setEnabled(nextState)
-      msg = `Auto Mode toggled to: ${nextState ? "ENABLED" : "DISABLED"}`
+      msg = `AutoGate Classifier: ${nextState ? "ENABLED" : "DISABLED"}`
     }
 
-    if (ctx?.ui?.notify) {
-      ctx.ui.notify(msg, "info")
-    } else if (ctx?.notify) {
-      ctx.notify(msg, "info")
-    }
+    notifyCtx(ctx, msg)
   }
 
   pi.registerCommand("automode", {
-    description: "Toggle or check AutoGate AutoMode status",
+    description: "Toggle or check AutoGate AutoMode status (alias for autogate-classifier)",
     handler,
   })
 }

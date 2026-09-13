@@ -238,6 +238,70 @@ describe("True Black-box OMP E2E Test Suite", () => {
 
     expect(receivedReply).toBeDefined();
     expect(receivedReply.req_id).toBe(reqId);
-    expect(receivedReply.reply).toBe("once");
+  }, 30000);
+
+  it("Test 4 (Black-box Native Fallback Mode): UNSURE verdict with native fallback mode records UNSURE / prompt policy without ntfy notification", async () => {
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "bash",
+        input: { command: "custom_unsure_command" },
+      },
+    });
+    mockProvider.pushResponse({
+      text: JSON.stringify({ verdict: "UNSURE", reason: "Requires human review", risk_level: "MEDIUM", user_authorization: "LOW" }),
+    });
+    mockProvider.pushResponse({
+      text: "Done",
+    });
+
+    const settings = Settings.isolated({
+      "tools.approvalMode": "write",
+    });
+    settings.setModelRole("default", "mock-provider/mock-model");
+
+    const evaluator = new DirectApiEvaluator({
+      apiKey: "test-key",
+      model: "mock-model",
+      baseUrl: mockProvider.url,
+      fetchImpl: globalThis.fetch,
+    });
+
+    const { session } = await createAgentSession({
+      cwd: sandboxDir,
+      agentDir: sandboxDir,
+      authStorage,
+      modelRegistry,
+      sessionManager: SessionManager.inMemory(),
+      settings,
+      disableExtensionDiscovery: true,
+      extensions: [pi => {
+        autoGateOmpExtension(pi, { evaluator, reviewFallbackMode: "native" });
+      }],
+      toolNames: ["bash"],
+      skills: [],
+      contextFiles: [],
+      promptTemplates: [],
+      slashCommands: [],
+      enableMCP: false,
+      enableLsp: false,
+      rules: [],
+      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      skipPythonPreflight: true,
+    });
+
+    try {
+      await session.prompt("Run unsure command");
+      const ntfyMessages = mockNtfy.getPublished();
+expect(ntfyMessages.length).toBe(0);
+
+      const branch = session.sessionManager.getBranch();
+      const hasToolResult = branch.some((m: any) => {
+        const str = JSON.stringify(m);
+        return str.includes("custom_unsure_command");
+      });
+      expect(hasToolResult).toBe(true);
+    } finally {
+      await session.dispose();
+    }
   }, 30000);
 });

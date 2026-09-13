@@ -10,7 +10,7 @@
 } from "@autogate/core"
 import { registerToolCallHook, verdictStore } from "./hook.ts"
 import { resolveShadowedApproval } from "./approval-bridge.ts"
-import { registerAutomodeCommand, registerEscalatePermissionTool } from "./commands.ts"
+import { registerAutomodeCommand, registerAutogateClassifierCommand, registerAutogateFallbackCommand, registerEscalatePermissionTool } from "./commands.ts"
 import { OmpNativeEvaluator } from "./evaluator.ts"
 export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness"
@@ -130,7 +130,8 @@ export default function autoGateOmpExtension(pi: any, options?: Record<string, u
 
 
   registerToolCallHook(pi, engine, verdictStore, (ctx) => adapter.setContext(ctx))
+  registerAutogateClassifierCommand(pi, engine)
+  registerAutogateFallbackCommand(pi, engine)
   registerAutomodeCommand(pi, engine)
   registerEscalatePermissionTool(pi, engine)
-  registerShadowedBashTool(pi, engine, adapter)
 }

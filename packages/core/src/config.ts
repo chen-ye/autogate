@@ -1,4 +1,4 @@
-import type { EnvironmentConfig } from "./types"
+import type { EnvironmentConfig, ReviewFallbackMode } from "./types"
 
 export interface AutoGateConfig {
   autoMode: boolean
@@ -11,6 +11,7 @@ export interface AutoGateConfig {
   notifyOnVerdict?: boolean
   environment?: EnvironmentConfig
   serverUrl?: string
+  reviewFallbackMode?: ReviewFallbackMode
 }
 
 export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
@@ -59,9 +60,18 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const rawServerUrl = options?.serverUrl ?? options?.SERVER_URL ?? env.SERVER_URL
   const serverUrl = typeof rawServerUrl === "string" && rawServerUrl.trim().length > 0 ? rawServerUrl.trim() : "http://localhost:4096"
 
-  const rawToken = options?.ntfyToken ?? options?.NTFY_TOKEN ?? env.NTFY_TOKEN
   const ntfyToken = typeof rawToken === "string" && rawToken.trim().length > 0 ? rawToken.trim() : undefined
 
+  const rawFallback = options?.reviewFallbackMode ?? options?.fallbackMode ?? options?.AUTOGATE_FALLBACK ?? env.AUTOGATE_FALLBACK
+  let reviewFallbackMode: ReviewFallbackMode = "ntfy"
+  if (typeof rawFallback === "string") {
+    const lower = rawFallback.toLowerCase().trim()
+    if (lower === "native" || lower === "terminal" || lower === "desk") {
+      reviewFallbackMode = "native"
+    } else if (lower === "ntfy" || lower === "mobile" || lower === "remote") {
+      reviewFallbackMode = "ntfy"
+    }
+  }
   const rawModel = options?.classifierModel ?? options?.CLASSIFIER_MODEL ?? env.CLASSIFIER_MODEL
   const classifierModel = typeof rawModel === "string" && rawModel.trim().length > 0 ? rawModel.trim() : "google/gemini-2.5-flash-lite"
 
@@ -108,5 +118,6 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     notifyOnVerdict,
     environment,
     serverUrl,
-  }
+    reviewFallbackMode,
+}
 }
