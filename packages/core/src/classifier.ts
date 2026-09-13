@@ -40,7 +40,10 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
       commandStr = obj.command
     } else if (typeof obj.cmd === "string") {
       commandStr = obj.cmd
+    } else if (typeof obj.code === "string") {
+      commandStr = obj.code
     }
+
     if (typeof obj.path === "string" && obj.path.trim()) {
       pathStr = obj.path.trim()
     } else if (typeof obj.filePath === "string" && obj.filePath.trim()) {
@@ -75,6 +78,14 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
       details += `\n- **Target Directory**: \`${directory}\``
     }
     return details
+  }
+
+  if (actionName === "eval") {
+    const lang = (actionArgs as any)?.language || (typeof actionArgs === "object" && actionArgs !== null && (actionArgs as any)?.lang) || "javascript"
+    const code = commandStr || (typeof (actionArgs as any)?.code === "string" ? (actionArgs as any).code : "")
+    if (code) {
+      return `- **Eval Code (${lang})**:\n\`\`\`${lang}\n${code.trim()}\n\`\`\``
+    }
   }
 
   if (actionName === "bash" || actionName === "shell:run") {
