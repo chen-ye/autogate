@@ -81,22 +81,23 @@ export class MockInferenceProvider {
           })
         }
 
-        if (path === "/v1/models" || path === "/models") {
-          return new Response(
-            JSON.stringify({
-              object: "list",
-              data: [
-                { id: "gpt-4o", object: "model" },
-                { id: "gemini-2.5-flash-lite", object: "model" },
+if (path === "/v1/models" || path === "/models") {
+return new Response(
+JSON.stringify({
+object: "list",
+data: [
+{ id: "gpt-4o", object: "model" },
+{ id: "gemini-2.5-flash-lite", object: "model" },
+{ id: "gemini-3.5-flash-lite", object: "model" },
                 { id: "mock-model", object: "model" },
               ],
-            }),
-            {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
+}),
+{
+status: 200,
+headers: { "Content-Type": "application/json" },
             }
           )
-        }
+}
         console.log("[MockProvider] responseQueue length:", this.responseQueue.length, "path:", path)
         if (this.responseQueue.length === 0) {
           return new Response(

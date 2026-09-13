@@ -120,7 +120,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   }
 
   const rawModel = options?.classifierModel ?? options?.CLASSIFIER_MODEL ?? env.CLASSIFIER_MODEL ?? fileConfig.classifierModel
-  const classifierModel = typeof rawModel === "string" && rawModel.trim().length > 0 ? rawModel.trim() : "google/gemini-2.5-flash-lite"
+  const classifierModel = typeof rawModel === "string" && rawModel.trim().length > 0 ? rawModel.trim() : "google/gemini-3.5-flash-lite"
 
   const rawThreshold = options?.consecutiveBlockThreshold ?? options?.CONSECUTIVE_BLOCK_THRESHOLD ?? env.CONSECUTIVE_BLOCK_THRESHOLD ?? fileConfig.consecutiveBlockThreshold
   let consecutiveBlockThreshold = 3

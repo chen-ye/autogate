@@ -83,7 +83,7 @@ export function ensureSandboxDirectory(): string {
 }
 
 export function parseModelRef(modelRef?: string): { providerID: string; modelID: string; provider?: string; model?: string } {
-  const ref = modelRef?.trim() || "google/gemini-2.5-flash-lite"
+  const ref = modelRef?.trim() || "google/gemini-3.5-flash-lite"
   const slashIdx = ref.indexOf("/")
   const providerID = slashIdx > 0 ? ref.slice(0, slashIdx) : "google"
   let modelID = slashIdx > 0 ? ref.slice(slashIdx + 1) : ref

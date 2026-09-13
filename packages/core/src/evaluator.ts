@@ -35,7 +35,7 @@ export class DirectApiEvaluator implements GateEvaluator {
         }
       }
 
-      let model = opts.model || process.env.CLASSIFIER_MODEL || "gemini-2.5-flash-lite"
+      let model = opts.model || process.env.CLASSIFIER_MODEL || "gemini-3.5-flash-lite"
       if (model.startsWith("google/")) {
         model = model.slice(7)
       }
