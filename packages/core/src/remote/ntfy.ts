@@ -23,11 +23,10 @@ export class NtfyAdapter implements RemoteAdapter {
 const url = `${this.server}/${this.topic}`
     console.log("[NTFY ADAPTER] server:", this.server, "topic:", this.topic, "url:", url)
     const headers: Record<string, string> = {
-"Title": payload.title.replace(/[^\x20-\x7E]/g, "").trim() || "Notification",
-"Priority": payload.priority ?? "urgent",
-      "X-Sequence-ID": payload.id.replace(/[^a-zA-Z0-9_\-]/g, "_"),
-"Content-Type": "text/plain; charset=utf-8",
-}
+      "Title": payload.title.replace(/[^\x20-\x7E]/g, "").trim() || "Notification",
+      "Priority": payload.priority ?? "urgent",
+      "Content-Type": "text/plain; charset=utf-8",
+    }
 
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`
@@ -46,6 +45,13 @@ const url = `${this.server}/${this.topic}`
         )
         .join("; ")
       headers["Actions"] = actionsStr
+
+      if (payload.id) {
+        const cleanId = payload.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+        if (cleanId.length > 0) {
+          headers["X-Sequence-ID"] = cleanId;
+        }
+      }
     }
 
     const fetchSignal = signal

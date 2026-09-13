@@ -756,12 +756,11 @@ export class AutoGateCoreEngine {
     }
 
     try {
-      await this.remoteAdapter.publish(payload, AbortSignal.timeout(5000))
-    } catch (err) {
-      console.error(`Failed to publish informational ${verdict} notification:`, err)
+      await this.remoteAdapter.publish(payload, AbortSignal.timeout(3000));
+    } catch {
+      // Silently swallow informational notification errors
     }
   }
-
 }
 
 export const AutoGateEngine = AutoGateCoreEngine

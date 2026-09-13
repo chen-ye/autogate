@@ -35,17 +35,10 @@ export function registerAutomodeCommand(pi: any, engine: AutoGateCoreEngine): vo
     }
   }
 
-  try {
-    pi.registerCommand({
-      name: "automode",
-      description: "Toggle or check AutoGate AutoMode status",
-      execute: handler,
-    })
-  } catch {
-    try {
-      pi.registerCommand("automode", "Toggle or check AutoGate AutoMode status", handler)
-    } catch {}
-  }
+  pi.registerCommand("automode", {
+    description: "Toggle or check AutoGate AutoMode status",
+    handler,
+  })
 }
 
 export function registerEscalatePermissionTool(pi: any, engine: AutoGateCoreEngine): void {
