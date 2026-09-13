@@ -60,6 +60,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const rawServerUrl = options?.serverUrl ?? options?.SERVER_URL ?? env.SERVER_URL
   const serverUrl = typeof rawServerUrl === "string" && rawServerUrl.trim().length > 0 ? rawServerUrl.trim() : "http://localhost:4096"
 
+  const rawToken = options?.ntfyToken ?? options?.NTFY_TOKEN ?? env.NTFY_TOKEN
   const ntfyToken = typeof rawToken === "string" && rawToken.trim().length > 0 ? rawToken.trim() : undefined
 
   const rawFallback = options?.reviewFallbackMode ?? options?.fallbackMode ?? options?.AUTOGATE_FALLBACK ?? env.AUTOGATE_FALLBACK
