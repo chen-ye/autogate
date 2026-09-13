@@ -11,7 +11,7 @@ export function resolveShadowedApproval(
     command = args
   } else if (typeof args === "object" && args !== null) {
     const obj = args as any
-    command = obj.command || obj.commandString
+    command = obj.command || obj.commandString || obj.code || obj.script
     toolCallId = obj.toolCallId || obj.id || obj.tool_call_id
   }
 

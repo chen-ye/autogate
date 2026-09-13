@@ -40,6 +40,7 @@ export function registerToolCallHook(
     const toolName = event?.toolName || event?.name || ""
     const commandString =
       event?.input?.command ||
+      event?.input?.code ||
       event?.commandString ||
       (typeof event?.input === "string" ? event.input : undefined)
     const workspaceRoot =
