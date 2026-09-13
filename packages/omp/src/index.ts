@@ -133,4 +133,5 @@ export default function autoGateOmpExtension(pi: any, options?: Record<string, u
   registerAutogateClassifierCommand(pi, engine)
   registerAutogateFallbackCommand(pi, engine)
   registerEscalatePermissionTool(pi, engine)
+  registerShadowedBashTool(pi, engine, adapter)
 }
