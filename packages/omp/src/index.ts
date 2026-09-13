@@ -106,6 +106,43 @@ export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine, ad
   });
 }
 
+export function registerShadowedEvalTool(pi: any, engine: AutoGateCoreEngine, adapter?: any): void {
+  const parameters = pi?.zod?.object
+    ? pi.zod.object({
+        code: pi.zod.string(),
+        language: pi.zod.string().optional(),
+        timeout: pi.zod.number().optional(),
+      })
+    : {
+        type: "object",
+        properties: {
+          code: { type: "string" },
+          language: { type: "string" },
+          timeout: { type: "number" },
+        },
+        required: ["code"],
+      };
+
+  pi.registerTool({
+    name: "eval",
+    label: "Eval",
+    description: "Execute Python or JavaScript code",
+    approval: (args: any) => resolveShadowedApproval(args),
+    parameters,
+    async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
+      if (ctx && adapter && typeof adapter.setContext === "function") {
+        adapter.setContext(ctx);
+      } else if (ctx && typeof (engine as any).setContext === "function") {
+        (engine as any).setContext(ctx);
+      }
+      if (!ctx?.invokeTool) {
+        throw new Error("ctx.invokeTool is unavailable for shadowed eval delegation");
+      }
+      return await ctx.invokeTool(params, { signal, onUpdate });
+    },
+  });
+}
+
 export default function autoGateOmpExtension(pi: any, options?: Record<string, unknown>): void {
   pi.setLabel?.("AutoGate Security")
   const adapter = new OmpHarnessAdapter(pi, options)
@@ -134,4 +171,5 @@ export default function autoGateOmpExtension(pi: any, options?: Record<string, u
   registerAutogateFallbackCommand(pi, engine)
   registerEscalatePermissionTool(pi, engine)
   registerShadowedBashTool(pi, engine, adapter)
+  registerShadowedEvalTool(pi, engine, adapter)
 }
