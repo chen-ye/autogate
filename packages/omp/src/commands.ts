@@ -90,42 +90,6 @@ export function registerAutogateFallbackCommand(pi: any, engine: AutoGateCoreEng
   })
 }
 
-export function registerAutomodeCommand(pi: any, engine: AutoGateCoreEngine): void {
-  if (typeof pi?.registerCommand !== "function") {
-    return
-  }
-
-  const handler = async (args: string, ctx: any) => {
-    const arg = (typeof args === "string" ? args : (args as any)?.arguments || "").trim().toLowerCase()
-
-    let msg = ""
-    if (arg === "off" || arg === "disable" || arg === "false" || arg === "0") {
-      engine.setEnabled(false)
-      msg = "AutoGate Classifier: DISABLED"
-    } else if (arg === "on" || arg === "enable" || arg === "true" || arg === "1") {
-      engine.setEnabled(true)
-      msg = "AutoGate Classifier: ENABLED"
-    } else if (arg === "status") {
-      msg = `AutoGate Classifier: ${engine.isEnabled() ? "ENABLED" : "DISABLED"} | Fallback Mode: ${engine.getFallbackMode()}`
-    } else if (arg === "toggle" || !arg) {
-      const nextState = !engine.isEnabled()
-      engine.setEnabled(nextState)
-      msg = `AutoGate Classifier: ${nextState ? "ENABLED" : "DISABLED"}`
-    } else {
-      const nextState = !engine.isEnabled()
-      engine.setEnabled(nextState)
-      msg = `AutoGate Classifier: ${nextState ? "ENABLED" : "DISABLED"}`
-    }
-
-    notifyCtx(ctx, msg)
-  }
-
-  pi.registerCommand("automode", {
-    description: "Toggle or check AutoGate AutoMode status (alias for autogate-classifier)",
-    handler,
-  })
-}
-
 export function registerEscalatePermissionTool(pi: any, engine: AutoGateCoreEngine): void {
   if (typeof pi?.registerTool !== "function") {
     return
