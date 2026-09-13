@@ -1,4 +1,7 @@
 import type { EnvironmentConfig, ReviewFallbackMode } from "./types"
+import fs from "node:fs"
+import path from "node:path"
+import os from "node:os"
 
 export interface AutoGateConfig {
   autoMode: boolean
@@ -14,10 +17,52 @@ export interface AutoGateConfig {
   reviewFallbackMode?: ReviewFallbackMode
 }
 
+function expandPath(p: string): string {
+  if (typeof p !== "string") return p
+  if (p.startsWith("~/")) {
+    return path.join(os.homedir(), p.slice(2))
+  }
+  if (p === "~") {
+    return os.homedir()
+  }
+  return p
+}
+
+export function loadFileConfig(options?: Record<string, unknown>): Record<string, unknown> {
+  const env = process.env
+  const customConfigPath = (options?.configFile ?? options?.AUTOGATE_CONFIG ?? env.AUTOGATE_CONFIG) as string | undefined
+
+  const candidates: string[] = []
+  if (typeof customConfigPath === "string" && customConfigPath.trim().length > 0) {
+    candidates.push(path.resolve(expandPath(customConfigPath.trim())))
+  }
+  candidates.push(path.resolve(process.cwd(), ".autogate.json"))
+  candidates.push(path.join(os.homedir(), ".config/autogate/config.json"))
+  candidates.push(path.join(os.homedir(), ".omp/autogate.json"))
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const content = fs.readFileSync(candidate, "utf8")
+        const parsed = JSON.parse(content)
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>
+        }
+      }
+    } catch (err) {
+      console.warn(`[AutoGate] Failed to parse config file at ${candidate}:`, err)
+      return {}
+    }
+  }
+
+  return {}
+}
+
 export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const env = process.env
+  const fileConfig = loadFileConfig(options)
 
-  const rawAutoMode = options?.autoMode ?? options?.AUTOGATE_AUTO_MODE ?? env.AUTOGATE_AUTO_MODE ?? options?.OPENCODE_AUTO_MODE ?? env.OPENCODE_AUTO_MODE
+  const rawAutoMode = options?.autoMode ?? options?.AUTOGATE_AUTO_MODE ?? env.AUTOGATE_AUTO_MODE ?? options?.OPENCODE_AUTO_MODE ?? env.OPENCODE_AUTO_MODE ?? fileConfig.autoMode
   let autoMode = true
   if (typeof rawAutoMode === "boolean") {
     autoMode = rawAutoMode
@@ -30,7 +75,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     }
   }
 
-  const rawNotifyOnVerdict = options?.notifyOnVerdict ?? options?.NOTIFY_ON_VERDICT ?? env.AUTOGATE_NOTIFY_ON_VERDICT
+  const rawNotifyOnVerdict = options?.notifyOnVerdict ?? options?.NOTIFY_ON_VERDICT ?? env.AUTOGATE_NOTIFY_ON_VERDICT ?? fileConfig.notifyOnVerdict
   let notifyOnVerdict = true
   if (typeof rawNotifyOnVerdict === "boolean") {
     notifyOnVerdict = rawNotifyOnVerdict
@@ -43,10 +88,10 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     }
   }
 
-  const rawTopic = options?.ntfyTopic ?? options?.AUTOGATE_NTFY_TOPIC ?? env.AUTOGATE_NTFY_TOPIC ?? options?.NTFY_TOPIC ?? env.NTFY_TOPIC ?? env.OPENCODE_NTFY_TOPIC
+  const rawTopic = options?.ntfyTopic ?? options?.AUTOGATE_NTFY_TOPIC ?? env.AUTOGATE_NTFY_TOPIC ?? options?.NTFY_TOPIC ?? env.NTFY_TOPIC ?? env.OPENCODE_NTFY_TOPIC ?? fileConfig.ntfyTopic
   const ntfyTopic = typeof rawTopic === "string" && rawTopic.trim().length > 0 ? rawTopic.trim() : "autogate"
 
-  const rawServer = options?.ntfyServer ?? options?.NTFY_SERVER ?? env.NTFY_SERVER
+  const rawServer = options?.ntfyServer ?? options?.NTFY_SERVER ?? env.NTFY_SERVER ?? fileConfig.ntfyServer
   let ntfyServer = "https://ntfy.sh"
   if (typeof rawServer === "string" && rawServer.trim().length > 0) {
     try {
@@ -57,13 +102,13 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     }
   }
 
-  const rawServerUrl = options?.serverUrl ?? options?.SERVER_URL ?? env.SERVER_URL
+  const rawServerUrl = options?.serverUrl ?? options?.SERVER_URL ?? env.SERVER_URL ?? fileConfig.serverUrl
   const serverUrl = typeof rawServerUrl === "string" && rawServerUrl.trim().length > 0 ? rawServerUrl.trim() : "http://localhost:4096"
 
-  const rawToken = options?.ntfyToken ?? options?.NTFY_TOKEN ?? env.NTFY_TOKEN
+  const rawToken = options?.ntfyToken ?? options?.NTFY_TOKEN ?? env.NTFY_TOKEN ?? env.AUTOGATE_NTFY_TOKEN ?? fileConfig.ntfyToken
   const ntfyToken = typeof rawToken === "string" && rawToken.trim().length > 0 ? rawToken.trim() : undefined
 
-  const rawFallback = options?.reviewFallbackMode ?? options?.fallbackMode ?? options?.AUTOGATE_FALLBACK ?? env.AUTOGATE_FALLBACK
+  const rawFallback = options?.reviewFallbackMode ?? options?.fallbackMode ?? options?.AUTOGATE_FALLBACK ?? env.AUTOGATE_FALLBACK ?? fileConfig.reviewFallbackMode ?? fileConfig.fallbackMode
   let reviewFallbackMode: ReviewFallbackMode = "ntfy"
   if (typeof rawFallback === "string") {
     const lower = rawFallback.toLowerCase().trim()
@@ -73,10 +118,11 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
       reviewFallbackMode = "ntfy"
     }
   }
-  const rawModel = options?.classifierModel ?? options?.CLASSIFIER_MODEL ?? env.CLASSIFIER_MODEL
+
+  const rawModel = options?.classifierModel ?? options?.CLASSIFIER_MODEL ?? env.CLASSIFIER_MODEL ?? fileConfig.classifierModel
   const classifierModel = typeof rawModel === "string" && rawModel.trim().length > 0 ? rawModel.trim() : "google/gemini-2.5-flash-lite"
 
-  const rawThreshold = options?.consecutiveBlockThreshold ?? options?.CONSECUTIVE_BLOCK_THRESHOLD ?? env.CONSECUTIVE_BLOCK_THRESHOLD
+  const rawThreshold = options?.consecutiveBlockThreshold ?? options?.CONSECUTIVE_BLOCK_THRESHOLD ?? env.CONSECUTIVE_BLOCK_THRESHOLD ?? fileConfig.consecutiveBlockThreshold
   let consecutiveBlockThreshold = 3
   if (typeof rawThreshold === "number" && !isNaN(rawThreshold)) {
     consecutiveBlockThreshold = rawThreshold
@@ -84,13 +130,14 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     consecutiveBlockThreshold = Number(rawThreshold)
   }
 
-  const rawTimeout = options?.classifierTimeout ?? options?.CLASSIFIER_TIMEOUT ?? env.CLASSIFIER_TIMEOUT
+  const rawTimeout = options?.classifierTimeout ?? options?.CLASSIFIER_TIMEOUT ?? env.CLASSIFIER_TIMEOUT ?? fileConfig.classifierTimeout
   let classifierTimeout = 45000
   if (typeof rawTimeout === "number" && !isNaN(rawTimeout) && rawTimeout > 0) {
     classifierTimeout = rawTimeout
   } else if (typeof rawTimeout === "string" && !isNaN(Number(rawTimeout)) && Number(rawTimeout) > 0) {
     classifierTimeout = Number(rawTimeout)
   }
+
   const envTrustedDomains = env.AUTOGATE_TRUSTED_DOMAINS
     ? env.AUTOGATE_TRUSTED_DOMAINS.split(",").map((s: string) => s.trim()).filter(Boolean)
     : undefined
@@ -102,12 +149,14 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     : undefined
 
   const optEnv = (options?.environment as EnvironmentConfig | undefined) ?? {}
+  const fileEnv = (fileConfig.environment as EnvironmentConfig | undefined) ?? {}
 
   const environment: EnvironmentConfig = {
-    trustedDomains: optEnv.trustedDomains ?? envTrustedDomains ?? ["*.example.com"],
-    trustedGitRemotes: optEnv.trustedGitRemotes ?? envTrustedRemotes ?? ["origin"],
-    trustedPaths: optEnv.trustedPaths ?? envTrustedPaths ?? ["~/Projects"],
+    trustedDomains: optEnv.trustedDomains ?? envTrustedDomains ?? fileEnv.trustedDomains ?? fileConfig.trustedDomains ?? ["*.example.com"],
+    trustedGitRemotes: optEnv.trustedGitRemotes ?? envTrustedRemotes ?? fileEnv.trustedGitRemotes ?? fileConfig.trustedGitRemotes ?? ["origin"],
+    trustedPaths: optEnv.trustedPaths ?? envTrustedPaths ?? fileEnv.trustedPaths ?? fileConfig.trustedPaths ?? ["~/Projects"],
   }
+
   return {
     autoMode,
     ntfyTopic,
@@ -120,5 +169,5 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     environment,
     serverUrl,
     reviewFallbackMode,
-}
+  }
 }
