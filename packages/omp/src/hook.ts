@@ -32,6 +32,7 @@ export function registerToolCallHook(
     }
 
     const sessionID =
+      ctx?.sessionManager?.getSessionId?.() ||
       event?.sessionID ||
       event?.sessionId ||
       ctx?.sessionID ||
@@ -43,8 +44,22 @@ export function registerToolCallHook(
       event?.input?.code ||
       event?.commandString ||
       (typeof event?.input === "string" ? event.input : undefined)
+    const targetPath =
+      event?.input?.path ||
+      event?.input?.filepath ||
+      event?.targetPath ||
+      ""
     const workspaceRoot =
       ctx?.cwd || ctx?.directory || event?.workspaceRoot || process.cwd()
+
+    const isInternalTool = ["todo", "list_pending_permissions", "escalate_permission", "hub"].includes(toolName);
+    const isVirtualUri = typeof targetPath === "string" && (targetPath.startsWith("skill://") || targetPath.startsWith("omp://"));
+    if (isInternalTool || isVirtualUri) {
+      const record = { verdict: "ALLOW", policy: "allow" as const };
+      store.set(toolCallId, record);
+      if (commandString) store.set(commandString, record);
+      return undefined;
+    }
 
     const action: GateAction = {
       id: toolCallId,
@@ -52,13 +67,15 @@ export function registerToolCallHook(
       sessionID,
       toolName,
       commandString,
-      targetPath: event?.input?.path || event?.input?.filepath || event?.targetPath,
+      targetPath,
       rawArgs: event?.input || event?.args,
       workspaceRoot,
       userPrompt: engine.getUserPrompt(sessionID),
       metadata: event?.metadata || event?.input,
+      signal: ctx?.signal || event?.signal,
     }
 
+    const hookStartTime = performance.now();
     let decision: GateDecision
     try {
       decision = await engine.evaluate(action)
@@ -68,6 +85,16 @@ export function registerToolCallHook(
         reason: `Evaluation error: ${err?.message || err}`,
       }
     }
+    const hookDurationMs = Math.round(performance.now() - hookStartTime);
+    try {
+      const logFn = pi?.logger?.debug ?? console.debug;
+      logFn.call(pi?.logger ?? console, "[AutoGate OMP Hook] Evaluated tool call", {
+        toolName,
+        toolCallId,
+        verdict: decision.verdict,
+        durationMs: hookDurationMs,
+      });
+    } catch {}
 
     if (decision.verdict === "ALLOW") {
       const record = { verdict: "ALLOW", policy: "allow" as const }

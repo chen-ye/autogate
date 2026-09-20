@@ -1,4 +1,4 @@
-  import {
+import {
   AutoGateCoreEngine,
   NtfyAdapter,
   DirectApiEvaluator,
@@ -12,12 +12,12 @@ import { registerToolCallHook, verdictStore } from "./hook.ts"
 import { resolveShadowedApproval } from "./approval-bridge.ts"
 import { registerAutogateClassifierCommand, registerAutogateFallbackCommand, registerEscalatePermissionTool } from "./commands.ts"
 import { OmpNativeEvaluator } from "./evaluator.ts"
+
 export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness"
   private engine: AutoGateCoreEngine
   private evaluator: GateEvaluator
   private currentCtx: any = null
-
 
   constructor(pi: any, options?: Record<string, unknown>) {
     const config = loadConfig(options)
@@ -31,7 +31,12 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       new OmpNativeEvaluator(
         () => this.currentCtx,
         (options as any)?.classifierModel || config.classifierModel,
-        process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AUTOGATE_API_KEY
+        process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AUTOGATE_API_KEY,
+        {
+          logger: pi?.logger,
+          classifierTimeout: config.classifierTimeout,
+          evalLogFile: config.evalLogFile,
+        }
       )
     this.engine = new AutoGateCoreEngine({
       config,
@@ -39,7 +44,6 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       evaluator: this.evaluator,
     })
   }
-
 
   setContext(ctx: any) {
     if (ctx) {
@@ -50,22 +54,17 @@ export class OmpHarnessAdapter implements HarnessAdapter {
     }
   }
 
-
   async start(): Promise<void> {
     await this.engine.start()
   }
-
 
   async dispose(): Promise<void> {
     await this.engine.stop()
   }
 
-
   getEngine(): AutoGateCoreEngine {
     return this.engine
   }
-
-
 }
 
 export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine, adapter?: any): void {
@@ -84,7 +83,6 @@ export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine, ad
         },
         required: ["command"],
       };
-
 
   pi.registerTool({
     name: "bash",
@@ -143,28 +141,38 @@ export function registerShadowedEvalTool(pi: any, engine: AutoGateCoreEngine, ad
   });
 }
 
-export default function autoGateOmpExtension(pi: any, options?: Record<string, unknown>): void {
+export default function autoGateOmpExtension(pi: any, options?: Record<string, unknown>): { adapter: OmpHarnessAdapter; engine: AutoGateCoreEngine } {
   pi.setLabel?.("AutoGate Security")
   const adapter = new OmpHarnessAdapter(pi, options)
   const engine = adapter.getEngine()
   adapter.start().catch(() => {})
 
-
-  pi.on?.("input", (event: any) => {
-    const text = event?.text || event?.input || (typeof event === "string" ? event : "")
+  pi.on?.("input", (event: any, ctx: any) => {
+    const text = event?.text || event?.input || (typeof event === "string" ? event : "");
+    const sessionID =
+      ctx?.sessionManager?.getSessionId?.() ||
+      event?.sessionID ||
+      event?.sessionId ||
+      "";
     if (text) {
-      engine.setUserPrompt(text)
+      if (sessionID) {
+        engine.setUserPrompt(sessionID, text);
+      } else {
+        engine.setUserPrompt(text);
+      }
     }
   })
 
-
-  pi.on?.("turn_end", (event: any) => {
-    const sessionID = event?.sessionID || event?.sessionId || ""
+  pi.on?.("turn_end", (event: any, ctx: any) => {
+    const sessionID =
+      ctx?.sessionManager?.getSessionId?.() ||
+      event?.sessionID ||
+      event?.sessionId ||
+      "";
     if (sessionID) {
-      engine.clearTurnCache(sessionID)
+      engine.clearTurnCache(sessionID);
     }
   })
-
 
   registerToolCallHook(pi, engine, verdictStore, (ctx) => adapter.setContext(ctx))
   registerAutogateClassifierCommand(pi, engine)
@@ -172,4 +180,6 @@ export default function autoGateOmpExtension(pi: any, options?: Record<string, u
   registerEscalatePermissionTool(pi, engine)
   registerShadowedBashTool(pi, engine, adapter)
   registerShadowedEvalTool(pi, engine, adapter)
+
+  return { adapter, engine }
 }

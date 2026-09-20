@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test"
-import { MockNtfyServer } from "../mock-ntfy"
 import { createMockOpenCodeClient, createMockPluginContext } from "./mock-opencode"
 import {
   AutoGateCoreEngine,
@@ -11,20 +10,6 @@ import {
 import { AutoGatePlugin, ensureAgentInstalled, isEvaluationSession, evaluationSessions } from "@autogate/opencode"
 
 describe("AutoGate OpenCode Plugin Integration", () => {
-  let mockNtfy: MockNtfyServer
-
-  beforeAll(async () => {
-    mockNtfy = new MockNtfyServer(0)
-  })
-
-  afterAll(async () => {
-    await mockNtfy.stop()
-  })
-
-  beforeEach(() => {
-    mockNtfy.clearPublished()
-  })
-
   afterEach(() => {
     sharedRecentlyRejected.clear()
     sharedExplicitEscalations.clear()
@@ -34,7 +19,7 @@ describe("AutoGate OpenCode Plugin Integration", () => {
   it("Slash command: /automode toggles enabled status in memory", async () => {
     const { client } = createMockOpenCodeClient()
     const ctx = createMockPluginContext(client)
-    const plugin = await AutoGatePlugin(ctx, { autoMode: true, ntfyServer: mockNtfy.url, ntfyTopic: "test-topic" })
+    const plugin = await AutoGatePlugin(ctx, { autoMode: true, ntfyServer: "https://ntfy.sh", ntfyTopic: "test-topic" })
 
     const outputOff: any = { parts: [] }
     await plugin["command.execute.before"]({ command: "automode", arguments: "off", sessionID: "sess-1" }, outputOff)
@@ -56,7 +41,7 @@ describe("AutoGate OpenCode Plugin Integration", () => {
   it("Guarded Contextual classify_result Tool: session authorization enforcement and valid execution", async () => {
     const { client } = createMockOpenCodeClient()
     const pluginContext = createMockPluginContext(client, "/workspace")
-    const hooks = await AutoGatePlugin(pluginContext, { ntfyServer: mockNtfy.url, ntfyTopic: "test-topic" })
+    const hooks = await AutoGatePlugin(pluginContext, { ntfyServer: "https://ntfy.sh", ntfyTopic: "test-topic" })
 
     const classifyResultTool = hooks.tool?.classify_result
     expect(classifyResultTool).toBeDefined()
@@ -100,7 +85,7 @@ describe("AutoGate OpenCode Plugin Integration", () => {
       classifierReason: "Default classifier policy block",
     })
     const pluginContext = createMockPluginContext(client, "/workspace")
-    const hooks = await AutoGatePlugin(pluginContext, { ntfyServer: mockNtfy.url, ntfyTopic: "test-topic" })
+    const hooks = await AutoGatePlugin(pluginContext, { ntfyServer: "https://ntfy.sh", ntfyTopic: "test-topic" })
 
     const escalateTool = hooks.tool?.escalate_permission
     expect(escalateTool).toBeDefined()

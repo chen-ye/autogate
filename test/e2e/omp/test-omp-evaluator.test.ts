@@ -8,60 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 
-export class OmpNativeEvaluator implements GateEvaluator {
-  readonly name = "omp-native-evaluator";
-
-  constructor(
-    private model: any,
-    private apiKey?: string,
-    private sessionId?: string
-  ) {}
-
-  async evaluate(action: GateAction): Promise<ClassifierResult> {
-    try {
-      const promptText = buildClassifierPrompt({
-        userPrompt: action.userPrompt,
-        subagentPrompt: action.subagentPrompt,
-        actionName: action.toolName,
-        actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
-        workspaceRoot: action.workspaceRoot,
-        environment: action.environment,
-      });
-
-      const response = await completeSimple(
-        this.model,
-        {
-          messages: [{ role: "user", content: promptText, timestamp: Date.now() }],
-        },
-        {
-          apiKey: this.apiKey,
-          sessionId: this.sessionId,
-          maxTokens: 1024,
-        }
-      );
-
-      if (response.stopReason === "error") {
-        return {
-          verdict: "UNSURE",
-          reason: `OmpNativeEvaluator error: ${response.errorMessage ?? "unknown error"}`,
-        };
-      }
-
-      const candidateText = response.content
-        .filter((c: any) => c.type === "text")
-        .map((c: any) => c.text)
-        .join("\n");
-
-      return parseVerdict(candidateText);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        verdict: "UNSURE",
-        reason: `OmpNativeEvaluator error: ${message}`,
-      };
-    }
-  }
-}
+import { OmpNativeEvaluator } from "../../../packages/omp/src/evaluator.ts";
 
 describe("OmpNativeEvaluator and completeSimple Test Suite", () => {
   let mockProvider: MockInferenceProvider;
@@ -88,9 +35,16 @@ describe("OmpNativeEvaluator and completeSimple Test Suite", () => {
     });
 
     mockProvider.pushResponse({
-      text: verdictJson,
+      toolCall: {
+        name: "classify_result",
+        input: {
+          risk_level: "LOW",
+          user_authorization: "HIGH",
+          verdict: "ALLOW",
+          reason: "Safe test command via completeSimple",
+        },
+      },
     });
-
     const model = buildModel({
       id: "mock-model",
       name: "Mock Model",

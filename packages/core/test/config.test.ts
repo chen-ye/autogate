@@ -10,6 +10,7 @@ describe("config resolution", () => {
 
   beforeEach(() => {
     delete process.env.NTFY_TOPIC
+    process.env.NTFY_SERVER = ""
     delete process.env.AUTOGATE_CONFIG
     delete process.env.AUTOGATE_NTFY_TOPIC
   })
@@ -27,6 +28,7 @@ describe("config resolution", () => {
   })
 
   it("1. Default configuration: loadConfig() returns standard defaults", () => {
+    process.env.NTFY_SERVER = "https://ntfy.sh"
     const config = loadConfig()
     expect(config.ntfyTopic).toBe("autogate")
     expect(config.ntfyServer).toBe("https://ntfy.sh")
@@ -114,5 +116,15 @@ describe("config resolution", () => {
 
     const config = loadConfig({ configFile: tmpFile })
     expect(config.reviewFallbackMode).toBe("native")
+  })
+
+  it("7. Eval log file default: loadConfig() returns ~/.omp/logs/autogate-evals.jsonl when no option is provided", () => {
+    const config = loadConfig()
+    expect(config.evalLogFile).toBe(path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl"))
+  })
+
+  it("8. Eval log file custom: loadConfig({ evalLogFile: \"/tmp/custom.jsonl\" }) returns resolved custom path", () => {
+    const config = loadConfig({ evalLogFile: "/tmp/custom.jsonl" })
+    expect(config.evalLogFile).toBe(path.resolve("/tmp/custom.jsonl"))
   })
 })

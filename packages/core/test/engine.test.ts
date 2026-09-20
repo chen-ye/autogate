@@ -193,5 +193,147 @@ describe("AutoGateCoreEngine", () => {
     expect(decision.riskLevel).toBe("MEDIUM")
     expect(decision.userAuthorization).toBe("LOW")
     expect(mockAdapter.publishedRequests.length).toBe(0)
-})
+  })
+
+  it("aborted signal -> returns BLOCK immediately without calling evaluator", async () => {
+    const controller = new AbortController()
+    controller.abort()
+
+    const action: GateAction = {
+      id: "act-aborted",
+      harness: "opencode",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "echo test",
+      workspaceRoot: "/tmp",
+      userPrompt: "test",
+      signal: controller.signal,
+    }
+
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("BLOCK")
+    expect(decision.reason).toBe("Action evaluation aborted by signal")
+    expect(mockEvaluator.evaluateCallCount).toBe(0)
+  })
+
+  it("native fallback mode when disabled -> returns UNSURE immediately without calling adapter.publish", async () => {
+    engine.setFallbackMode("native")
+    engine.setEnabled(false)
+    const action: GateAction = {
+      id: "act-disabled-native",
+      harness: "opencode",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "ls",
+      workspaceRoot: "/tmp",
+      userPrompt: "list",
+    }
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("UNSURE")
+    expect(decision.reason).toBe("AutoMode is disabled (native terminal fallback)")
+    expect(mockAdapter.publishedRequests.length).toBe(0)
+  })
+
+  it("native fallback mode on circuit breaker -> returns UNSURE immediately without calling adapter.publish", async () => {
+    engine.setFallbackMode("native")
+    mockEvaluator.nextResult = { verdict: "BLOCK", reason: "Blocked" }
+    const action: GateAction = {
+      id: "act-cb-native",
+      harness: "opencode",
+      sessionID: "ses-cb-native",
+      toolName: "bash",
+      commandString: "rm -rf unique_dir_1",
+      workspaceRoot: "/tmp",
+      userPrompt: "cleanup",
+    }
+    await engine.evaluate(action)
+    await engine.evaluate({ ...action, id: "act-cb-native-2", commandString: "rm -rf unique_dir_2" })
+    await engine.evaluate({ ...action, id: "act-cb-native-3", commandString: "rm -rf unique_dir_3" })
+    expect(engine.getConsecutiveBlocks()).toBe(3)
+
+    const decision = await engine.evaluate({ ...action, id: "act-cb-native-4", commandString: "rm -rf unique_dir_4" })
+    expect(decision.verdict).toBe("UNSURE")
+    expect(decision.reason).toContain("Circuit breaker tripped")
+    expect(mockAdapter.publishedRequests.length).toBe(0)
+  })
+
+  it("native fallback mode on escalation -> returns UNSURE immediately without calling adapter.publish", async () => {
+    engine.setFallbackMode("native")
+    mockEvaluator.nextResult = { verdict: "ALLOW", reason: "Allowed" }
+    const action: GateAction = {
+      id: "act-esc-native",
+      harness: "opencode",
+      sessionID: "ses-esc",
+      toolName: "bash",
+      commandString: "AUTOGATE_ESCALATE=1 sensitive_command",
+      workspaceRoot: "/tmp",
+      userPrompt: "escalate",
+    }
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("UNSURE")
+    expect(decision.reason).toContain("Escalated")
+    expect(mockAdapter.publishedRequests.length).toBe(0)
+  })
+
+  it("requestReview with pre-aborted signal -> returns BLOCK immediately without publishing", async () => {
+    const controller = new AbortController()
+    controller.abort()
+
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Need review" }
+    const action: GateAction = {
+      id: "act-pre-aborted",
+      harness: "opencode",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "sleep 1",
+      workspaceRoot: "/tmp",
+      userPrompt: "test",
+      signal: controller.signal,
+    }
+
+    const start = performance.now()
+    const decision = await engine.evaluate(action)
+    const duration = performance.now() - start
+
+    expect(decision.verdict).toBe("BLOCK")
+    expect(decision.reason).toContain("aborted")
+    expect(duration).toBeLessThan(50)
+    expect(mockAdapter.publishedRequests.length).toBe(0)
+  })
+
+  it("requestReview with dynamically aborted signal -> aborts and resolves to BLOCK", async () => {
+    const silentAdapter = new MockAdapter()
+    const silentEngine = new AutoGateCoreEngine({
+      config,
+      evaluator: mockEvaluator,
+      adapter: silentAdapter,
+    })
+    ;(silentAdapter as any).engineRef = silentEngine
+    silentEngine.setFallbackMode("ntfy")
+
+    const controller = new AbortController()
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Need review" }
+    const action: GateAction = {
+      id: "act-dyn-aborted",
+      harness: "opencode",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "sleep 1",
+      workspaceRoot: "/tmp",
+      userPrompt: "test",
+      signal: controller.signal,
+    }
+
+    setTimeout(() => {
+      controller.abort()
+    }, 30)
+
+    const start = performance.now()
+    const decision = await silentEngine.evaluate(action)
+    const duration = performance.now() - start
+
+    expect(decision.verdict).toBe("BLOCK")
+    expect(decision.reason).toContain("aborted")
+    expect(duration).toBeLessThan(200)
+  })
 });

@@ -2,10 +2,14 @@ import { Server } from "bun"
 
 export interface MockResponse {
   text?: string
+  content?: Array<Record<string, unknown>>
   toolCall?: {
     name: string
     input: Record<string, unknown> | string
   }
+  thinking?: string
+  reasoningTokens?: number
+  delayMs?: number
   status?: number
 }
 
@@ -109,8 +113,10 @@ headers: { "Content-Type": "application/json" },
           )
         }
         const mockRes = this.responseQueue.shift()!
+        if (mockRes.delayMs && mockRes.delayMs > 0) {
+          await Bun.sleep(mockRes.delayMs);
+        }
         const status = mockRes.status ?? 200
-
         // Handle Gemini endpoints
         if (path.includes("generateContent")) {
           const isGeminiStreaming =
@@ -176,8 +182,14 @@ headers: { "Content-Type": "application/json" },
         // Handle OpenAI chat completions or general requests
         const isStreaming = (typeof body === "object" && body !== null && (body as Record<string, unknown>).stream === true) || path.includes("stream")
         const message: Record<string, unknown> = { role: "assistant" }
+        if (mockRes.content) {
+          message.content = mockRes.content
+        } else if (mockRes.toolCall) {
+          message.content = mockRes.thinking ? [{ type: "thinking", thinking: mockRes.thinking }] : null
+        } else {
+          message.content = mockRes.thinking ? [{ type: "thinking", thinking: mockRes.thinking }, { type: "text", text: mockRes.text ?? "" }] : (mockRes.text ?? "")
+        }
         if (mockRes.toolCall) {
-          message.content = null
           message.tool_calls = [
             {
               id: "call_1",
@@ -191,8 +203,11 @@ headers: { "Content-Type": "application/json" },
               },
             },
           ]
-        } else {
-          message.content = mockRes.text ?? ""
+        }
+        if (mockRes.thinking) {
+          message.reasoning_content = mockRes.thinking
+          message.reasoning = mockRes.thinking
+          message.reasoningContent = mockRes.thinking
         }
 
         if (isStreaming) {
@@ -271,18 +286,24 @@ headers: { "Content-Type": "application/json" },
                 finish_reason: mockRes.toolCall ? "tool_calls" : "stop",
               },
             ],
-            usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 10,
+              total_tokens: 20,
+              ...(typeof mockRes.reasoningTokens === "number" ? {
+                reasoning_tokens: mockRes.reasoningTokens,
+                completion_tokens_details: { reasoning_tokens: mockRes.reasoningTokens },
+              } : {}),
+            },
+            ...(typeof mockRes.reasoningTokens === "number" ? { reasoningTokens: mockRes.reasoningTokens } : {}),
           }
-return new Response(JSON.stringify(completionObj), {
-status,
-headers: { "Content-Type": "application/json" },
-})
+          return new Response(JSON.stringify(completionObj), {
+            status,
+            headers: { "Content-Type": "application/json" },
+          })
         }
   }
 
-  get port(): number {
-    return this.server.port
-  }
 
 pushResponse(res: MockResponse): void {
 this.responseQueue.push(res)

@@ -499,25 +499,37 @@ export class AutoGateCoreEngine {
   }
 
   public async evaluate(action: GateAction): Promise<GateDecision> {
+    if (action.signal?.aborted) {
+      return {
+        verdict: "BLOCK",
+        reason: "Action evaluation aborted by signal",
+      }
+    }
     // 1. Checks disabled state -> requests review if disabled.
     if (!this.isEnabled()) {
+      if (this.reviewFallbackMode === "native") {
+        return { verdict: "UNSURE", reason: "AutoMode is disabled (native terminal fallback)" }
+      }
       return this.requestReview(action, "AutoMode is disabled", false, undefined, undefined)
     }
 
     // 2. Checks circuit breaker (`consecutiveBlocks >= threshold`) -> requests review.
     const threshold = this.consecutiveBlockThreshold
     if (this.consecutiveBlocks >= threshold) {
-      return this.requestReview(
-        action,
-        `Circuit breaker tripped: consecutive blocks (${this.consecutiveBlocks}) reached threshold (${threshold}).`,
-        true
-      )
+      const reason = `Circuit breaker tripped: consecutive blocks (${this.consecutiveBlocks}) reached threshold (${threshold}).`
+      if (this.reviewFallbackMode === "native") {
+        return { verdict: "UNSURE", reason }
+      }
+      return this.requestReview(action, reason, true)
     }
 
     // 3. Checks explicit escalation (`checkAndConsumeEscalation`) -> requests review.
     const parentSessionID = action.sessionID ? this.sessionParentCache.get(action.sessionID) : undefined
     const escalationReason = checkAndConsumeEscalation(action, parentSessionID)
     if (escalationReason) {
+      if (this.reviewFallbackMode === "native") {
+        return { verdict: "UNSURE", reason: escalationReason }
+      }
       return this.requestReview(action, escalationReason, false, undefined, undefined)
     }
 
@@ -629,6 +641,13 @@ userAuthorization: verdictResult.user_authorization,
     riskLevel?: RiskLevel,
     userAuth?: UserAuthorization,
   ): Promise<GateDecision> {
+    if (action.signal?.aborted) {
+      return {
+        verdict: "BLOCK",
+        reason: "Review request aborted by signal",
+      }
+    }
+
     if (!this.stopRemoteListen) {
       await this.start();
     }
@@ -660,6 +679,9 @@ userAuthorization: verdictResult.user_authorization,
     }
 
     const abortController = new AbortController()
+    let timeoutTimer: NodeJS.Timeout | undefined = undefined
+
+    let onAbort: (() => void) | undefined = undefined
     const decisionPromise = new Promise<GateDecision>((resolve, reject) => {
       this.inFlightRequests.set(action.id, {
         resolve,
@@ -668,12 +690,40 @@ userAuthorization: verdictResult.user_authorization,
         sessionID: action.sessionID,
         directory: action.workspaceRoot || this.workspaceRoot,
       })
+
+      if (action.signal) {
+        onAbort = () => {
+          if (timeoutTimer) clearTimeout(timeoutTimer)
+          const entry = this.inFlightRequests.get(action.id)
+          if (entry) {
+            this.inFlightRequests.delete(action.id)
+            entry.abort.abort()
+          }
+          resolve({
+            verdict: "BLOCK",
+            reason: "Review request aborted by signal",
+          })
+        }
+        if (action.signal.aborted) {
+          onAbort()
+        } else {
+          action.signal.addEventListener("abort", onAbort, { once: true })
+        }
+      }
     })
+
+    decisionPromise.finally(() => {
+      if (action.signal && onAbort) {
+        action.signal.removeEventListener("abort", onAbort)
+      }
+    }).catch(() => {})
 
     try {
       await this.remoteAdapter.publish(payload, abortController.signal)
     } catch (err: unknown) {
       if (abortController.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        this.inFlightRequests.delete(action.id)
         return {
           verdict: "BLOCK",
           reason: "Review request aborted",
@@ -684,7 +734,7 @@ userAuthorization: verdictResult.user_authorization,
 
     const timeoutMs = (this.config as any)?.reviewTimeout ?? 300000
     const timeoutPromise = new Promise<GateDecision>((resolve) => {
-      setTimeout(() => {
+      timeoutTimer = setTimeout(() => {
         const entry = this.inFlightRequests.get(action.id)
         if (entry) {
           this.inFlightRequests.delete(action.id)
@@ -697,7 +747,9 @@ userAuthorization: verdictResult.user_authorization,
       }, timeoutMs)
     })
 
-    return Promise.race([decisionPromise, timeoutPromise])
+    const finalDecision = await Promise.race([decisionPromise, timeoutPromise])
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    return finalDecision
   }
 
   public resolveReviewResponse(resp: ReviewResponse): void {

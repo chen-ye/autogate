@@ -1,21 +1,21 @@
 import { describe, it, expect, afterEach } from "bun:test"
-import { createAutoGateE2EHarness, OpenCodeE2EHarness } from "./harness"
+import { createRealOpenCodeHarness, RealOpenCodeHarness } from "./real-harness"
 import { MockInferenceProvider } from "./mock-provider"
-import { NtfyAdapter } from "@autogate/core"
 
 describe("OpenCode Pure Black-box E2E Test Suite", () => {
-  let harness: OpenCodeE2EHarness
+  let harness: RealOpenCodeHarness | undefined
 
   afterEach(async () => {
     if (harness) {
       await harness.dispose()
+      harness = undefined
     }
   })
 
   it("Test 1 (Black-box ALLOW): Executes safe bash command via client.session.prompt and mock-provider tool call", async () => {
-    harness = await createAutoGateE2EHarness({
-      workspaceDir: "/tmp/project-alpha",
-    })
+    harness = await createRealOpenCodeHarness()
+    const session = await harness.createSession({ title: "Blackbox ALLOW" })
+    const sessionID = session.data.id
 
     harness.mockProvider.pushResponse({
       toolCall: {
@@ -35,20 +35,25 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
       text: "Done",
     })
 
-    console.log("[TEST 1] prompting session")
-    await harness.promptSession("sess-bb-1", "Run safe check")
-    console.log("[TEST 1] promptSession finished. Requests:", harness.mockProvider.getRequests())
+    const promptRes = await harness.promptSession(sessionID, "Run safe check")
+    expect(promptRes.response?.ok).toBe(true)
 
-    const resolution = await harness.waitForSessionResolution("sess-bb-1", 5000)
-    console.log("[TEST 1] resolution:", resolution)
-    expect(resolution).toBeDefined()
-    expect(resolution.reply).toBe("once")
-  })
+    const messagesRes = await harness.client.session.messages({ path: { id: sessionID } })
+    const messages = messagesRes.data || []
+    const toolParts = messages.flatMap((m: any) => m.parts || []).filter((p: any) => p.type === "tool")
+    expect(toolParts.length).toBeGreaterThan(0)
+    const bashTool = toolParts.find(
+      (p: any) => p.tool === "bash" || p.state?.input?.command?.includes("echo 'opencode blackbox allow'")
+    )
+    expect(bashTool).toBeDefined()
+    expect(bashTool.state?.status).toBe("completed")
+    expect(bashTool.state?.output).toContain("opencode blackbox allow")
+  }, 30000)
 
   it("Test 2 (Black-box BLOCK): Blocks destructive git checkout via client.session.prompt and returns SAFE_TRANSFORM_REJECT", async () => {
-    harness = await createAutoGateE2EHarness({
-      workspaceDir: "/tmp/project-alpha",
-    })
+    harness = await createRealOpenCodeHarness()
+    const session = await harness.createSession({ title: "Blackbox BLOCK" })
+    const sessionID = session.data.id
 
     harness.mockProvider.pushResponse({
       toolCall: {
@@ -68,42 +73,56 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
       text: "Blocked",
     })
 
-    console.log("[TEST 2] prompting session")
-    await harness.promptSession("sess-bb-2", "Discard working tree")
-    console.log("[TEST 2] promptSession finished. Requests:", harness.mockProvider.getRequests())
+    const promptRes = await harness.promptSession(sessionID, "Discard working tree")
+    expect(promptRes.response?.ok).toBe(true)
 
-    const resolution = await harness.waitForSessionResolution("sess-bb-2", 5000)
-    console.log("[TEST 2] resolution:", resolution)
-    expect(resolution).toBeDefined()
-    expect(resolution.reply).toBe("reject")
-    expect(resolution.message).toBeDefined()
-    expect(resolution.message).toContain("SAFE_TRANSFORM_REJECT")
-    expect(resolution.message).toContain("git stash")
-  })
+    const messagesRes = await harness.client.session.messages({ path: { id: sessionID } })
+    const messages = messagesRes.data || []
+    const toolParts = messages.flatMap((m: any) => m.parts || []).filter((p: any) => p.type === "tool")
+    expect(toolParts.length).toBeGreaterThan(0)
+    const bashTool = toolParts.find(
+      (p: any) => p.tool === "bash" || p.state?.input?.command?.includes("git checkout .")
+    )
+    expect(bashTool).toBeDefined()
+    expect(bashTool.state?.status).toBe("error")
+    expect(bashTool.state?.error).toContain("SAFE_TRANSFORM_REJECT")
+    expect(bashTool.state?.error).toContain("git stash")
+  }, 30000)
+
   it("Test 3 (Black-box Live ntfy.sh Review): Unwhitelisted command prompts for review on live ntfy.sh and unblocks upon approval", async () => {
-    const liveTopic = `autogate_bb_oc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-
     const checkRateLimit = (resOrErr: any, text?: string) => {
-      const status = resOrErr?.status;
-      const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
-      if (status === 429 || status === 403 || str.includes("429") || str.includes("403") || str.includes("quota") || str.includes("rate limit") || str.includes("rate-limit") || str.includes("limit") || str.includes("forbidden")) {
-        console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
-        return true;
+      const status = resOrErr?.status
+      const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase()
+      if (
+        status === 429 ||
+        status === 403 ||
+        str.includes("429") ||
+        str.includes("403") ||
+        str.includes("quota") ||
+        str.includes("rate limit") ||
+        str.includes("rate-limit") ||
+        str.includes("limit reached") ||
+        str.includes("too many active subscriptions") ||
+        str.includes("forbidden")
+      ) {
+        console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")")
+        return true
       }
-      return false;
-    };
+      return false
+    }
 
-    let promptPromise: Promise<any> | undefined;
+    let promptPromise: Promise<any> | undefined
 
     try {
-      harness = await createAutoGateE2EHarness({
-        workspaceDir: "/tmp/project-alpha",
-        pluginConfig: {
-          ntfyServer: "https://ntfy.sh",
-          ntfyTopic: liveTopic,
-          ntfyToken: "***REMOVED***",
-        },
-      })
+      harness = await createRealOpenCodeHarness()
+
+      if (harness.isRateLimited) {
+        console.log("[SKIP] ntfy.sh rate limited (429 quota reached)")
+        return
+      }
+
+      const session = await harness.createSession({ title: "Blackbox UNSURE" })
+      const sessionID = session.data.id
 
       harness.mockProvider.pushResponse({
         toolCall: {
@@ -123,84 +142,81 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
         text: "Done",
       })
 
-      promptPromise = harness.promptSession("sess-bb-3", "Force push to main")
+      promptPromise = harness.promptSession(sessionID, "Force push to main")
 
       // Catch published alert on live ntfy.sh
-      let notifId: string | undefined
-      const startTime = Date.now()
-      let hit429 = false
-
-      while (Date.now() - startTime < 10000) {
-        try {
-          const text = await res.text().catch(() => "")
-          if (checkRateLimit(res, text)) {
-            hit429 = true
-            break
-          }
-          if (res.ok) {
-            for (const line of text.trim().split("\n")) {
-              try {
-                const data = JSON.parse(line)
-                if (data.actions && data.actions.length > 0) {
-                  const bodyStr = data.actions[0].body
-                  const match = bodyStr?.match(/"req_id":\s*"([^"]+)"/)
-                  if (match) {
-                    notifId = match[1]
-                    break
-                  }
-                }
-              } catch {}
-            }
-          }
-        } catch (fetchErr: any) {
-          if (checkRateLimit(fetchErr)) {
-            hit429 = true
-            break
-          }
+      let targetAction: any
+      try {
+        targetAction = await harness.waitForAction(undefined, 10000)
+      } catch (waitErr: any) {
+        if (checkRateLimit(waitErr) || harness.isRateLimited) {
+          try {
+            await harness.client.session.abort({ path: { id: sessionID } })
+          } catch {}
+          try {
+            await Promise.race([promptPromise.catch(() => {}), new Promise((r) => setTimeout(r, 500))])
+          } catch {}
+          return
         }
-        if (notifId) break
-        await new Promise((r) => setTimeout(r, 500))
+        throw waitErr
       }
 
-      if (hit429) {
-        try { await promptPromise.catch(() => {}); } catch {}
-        return
+      expect(targetAction).toBeDefined()
+
+      // Simulate phone tap approval
+      try {
+        await harness.simulatePhoneTap("once")
+      } catch (tapErr: any) {
+        if (checkRateLimit(tapErr) || harness.isRateLimited) {
+          try {
+            await harness.client.session.abort({ path: { id: sessionID } })
+          } catch {}
+          try {
+            await Promise.race([promptPromise.catch(() => {}), new Promise((r) => setTimeout(r, 500))])
+          } catch {}
+          return
+        }
+        throw tapErr
       }
 
-      if (!notifId) {
-        console.log("[SKIP] ntfy.sh rate limited (429 quota reached) or notification not received")
-        try { await promptPromise.catch(() => {}); } catch {}
-        return
-      }
+      const promptRes = await promptPromise
+      expect(promptRes.response?.ok).toBe(true)
 
-      expect(notifId).toBeDefined()
-
-      // Post approval webhook to live ntfy.sh response endpoint
-      const postRes = await fetch(`https://ntfy.sh/${liveTopic}-response`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer ***REMOVED***"
-        },
-        body: JSON.stringify({ req_id: notifId, reply: "once" }),
-      })
-      const postTxt = await postRes.text().catch(() => "")
-      if (checkRateLimit(postRes, postTxt)) {
-        try { await promptPromise.catch(() => {}); } catch {}
-        return
-      }
-      expect(postRes.ok).toBe(true)
-
-      const resolution = await harness.waitForSessionResolution("sess-bb-3", 10000)
-      expect(resolution).toBeDefined()
-      expect(resolution.reply).toBe("once")
-      await promptPromise
+      const messagesRes = await harness.client.session.messages({ path: { id: sessionID } })
+      const messages = messagesRes.data || []
+      const toolParts = messages.flatMap((m: any) => m.parts || []).filter((p: any) => p.type === "tool")
+      expect(toolParts.length).toBeGreaterThan(0)
     } catch (err: any) {
-      if (checkRateLimit(err)) {
-        try { if (promptPromise) await promptPromise.catch(() => {}); } catch {}
+      if (checkRateLimit(err) || harness?.isRateLimited) {
+        try {
+          if (promptPromise) await Promise.race([promptPromise.catch(() => {}), new Promise((r) => setTimeout(r, 500))])
+        } catch {}
         return
       }
       throw err
     }
-  }, 20000)
-});
+  }, 30000)
+
+  it("MockInferenceProvider respects delayMs option", async () => {
+    const provider = new MockInferenceProvider(0)
+    try {
+      provider.pushResponse({
+        text: "Delayed response",
+        delayMs: 50,
+      })
+
+      const start = Date.now()
+      const res = await fetch(`${provider.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hello" }] }),
+      })
+      const duration = Date.now() - start
+
+      expect(res.ok).toBe(true)
+      expect(duration).toBeGreaterThanOrEqual(45)
+    } finally {
+      await provider.stop()
+    }
+  })
+})

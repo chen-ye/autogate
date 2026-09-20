@@ -1,12 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { MockInferenceProvider } from "../opencode/mock-provider";
-import { MockNtfyServer } from "../mock-ntfy";
 import { DirectApiEvaluator } from "@autogate/core";
 import { createAgentSession, SessionManager, Settings } from "@oh-my-pi/pi-coding-agent";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import { Database } from "bun:sqlite";
-import autoGateOmpExtension from "../../../packages/omp/src/index.ts";
+import autoGateOmpExtension, { OmpHarnessAdapter } from "../../../packages/omp/src/index.ts";
+import { verdictStore } from "../../../packages/omp/src/hook.ts";
 import { NtfyAdapter } from "@autogate/core";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -14,14 +14,19 @@ import * as os from "node:os";
 
 describe("True Black-box OMP E2E Test Suite", () => {
   let mockProvider: MockInferenceProvider;
-  let mockNtfy: MockNtfyServer;
+  let activeAdapters: OmpHarnessAdapter[] = [];
+
+  const trackedExtension = (pi: any, options?: Record<string, unknown>) => {
+    const res = autoGateOmpExtension(pi, options);
+    activeAdapters.push(res.adapter);
+    return res;
+  };
   let sandboxDir: string;
   let authStorage: AuthStorage;
   let modelRegistry: ModelRegistry;
 
   beforeEach(async () => {
     mockProvider = new MockInferenceProvider(0);
-    mockNtfy = new MockNtfyServer(0);
     sandboxDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-blackbox-test-"));
     authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
     authStorage.setRuntimeApiKey("mock-provider", "test-key");
@@ -44,15 +49,22 @@ describe("True Black-box OMP E2E Test Suite", () => {
       ],
     });
 
-    process.env.NTFY_SERVER = mockNtfy.url;
+    process.env.NTFY_SERVER = "https://ntfy.sh";
+    process.env.NTFY_TOPIC = "autogate-test-omp";
+    process.env.NTFY_TOKEN = "***REMOVED***";
     process.env.OPENCODE_AUTO_MODE = "true";
   });
 
   afterEach(async () => {
     authStorage.close();
     await mockProvider.stop();
-    await mockNtfy.stop();
+    for (const adapter of activeAdapters) {
+      await adapter.dispose();
+    }
+    activeAdapters = [];
     delete process.env.NTFY_SERVER;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.NTFY_TOKEN;
     delete process.env.OPENCODE_AUTO_MODE;
     try {
       await fs.rm(sandboxDir, { recursive: true, force: true });
@@ -93,7 +105,7 @@ describe("True Black-box OMP E2E Test Suite", () => {
       sessionManager: SessionManager.inMemory(),
       settings,
       disableExtensionDiscovery: true,
-      extensions: [pi => autoGateOmpExtension(pi, { evaluator })],
+      extensions: [pi => trackedExtension(pi, { evaluator })],
       toolNames: ["bash"],
       skills: [],
       contextFiles: [],
@@ -154,7 +166,7 @@ describe("True Black-box OMP E2E Test Suite", () => {
       sessionManager: SessionManager.inMemory(),
       settings,
       disableExtensionDiscovery: true,
-      extensions: [pi => autoGateOmpExtension(pi, { evaluator })],
+      extensions: [pi => trackedExtension(pi, { evaluator })],
       toolNames: ["bash"],
       skills: [],
       contextFiles: [],
@@ -181,13 +193,15 @@ describe("True Black-box OMP E2E Test Suite", () => {
     }
   }, 30000);
 
-  it("Test 3 (Black-box Live ntfy.sh Mobile Approval): Tests live ntfy.sh roundtrip on unique dynamic topic", async () => {
-    const topic = `autogate_bb_omp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-const ntfyAdapter = new NtfyAdapter({
-server: "https://ntfy.sh",
-      topic: topic,
-      token: "***REMOVED***",
-});
+  it("Test 3 (Black-box Live ntfy.sh Mobile Approval): Tests live ntfy.sh roundtrip on fixed topic autogate-test-omp", async () => {
+    const topic = process.env.NTFY_TOPIC || "autogate-test-omp";
+    const token = process.env.NTFY_TOKEN || "***REMOVED***";
+    const server = process.env.NTFY_SERVER || "https://ntfy.sh";
+    const ntfyAdapter = new NtfyAdapter({
+      server,
+      topic,
+      token,
+    });
 
     const reqId = "req-bb-roundtrip-" + Date.now();
     let receivedReply: any = null;
@@ -198,7 +212,6 @@ server: "https://ntfy.sh",
       const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
       if (status === 429 || status === 403 || str.includes("429") || str.includes("403") || str.includes("quota") || str.includes("rate limit") || str.includes("rate-limit") || str.includes("limit") || str.includes("forbidden")) {
         console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
-        if (unsubscribe) unsubscribe();
         return true;
       }
       return false;
@@ -231,19 +244,19 @@ server: "https://ntfy.sh",
 
       await new Promise((r) => setTimeout(r, 2000));
 
-      const getRes = await fetch(`https://ntfy.sh/${topic}/json?poll=1`, {
-        headers: { "Authorization": "Bearer ***REMOVED***" }
+      const getRes = await fetch(`${server}/${topic}/json?poll=1`, {
+        headers: { "Authorization": `Bearer ${token}` }
       });
-const getTxt = await getRes.text().catch(() => "");
-if (checkRateLimit(getRes, getTxt)) return;
-expect(getRes.ok).toBe(true);
-expect(getTxt).toContain(reqId);
+      const getTxt = await getRes.text().catch(() => "");
+      if (checkRateLimit(getRes, getTxt)) return;
+      expect(getRes.ok).toBe(true);
+      expect(getTxt).toContain(reqId);
 
-      const replyRes = await fetch(`https://ntfy.sh/${topic}-response`, {
+      const replyRes = await fetch(`${server}/${topic}-response`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer ***REMOVED***"
+          "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify({ req_id: reqId, reply: "once" }),
       });
@@ -256,16 +269,17 @@ expect(getTxt).toContain(reqId);
         await new Promise((r) => setTimeout(r, 500));
       }
 
-      if (unsubscribe) unsubscribe();
-
       expect(receivedReply).toBeDefined();
       expect(receivedReply.req_id).toBe(reqId);
     } catch (err: any) {
       if (checkRateLimit(err)) return;
       throw err;
+    } finally {
+      if (unsubscribe) {
+        unsubscribe();
+      }
     }
   }, 30000);
-op:
 
   it("Test 4 (Black-box Native Fallback Mode): UNSURE verdict with native fallback mode records UNSURE / prompt policy without ntfy notification", async () => {
     mockProvider.pushResponse({
@@ -302,7 +316,7 @@ op:
       settings,
       disableExtensionDiscovery: true,
       extensions: [pi => {
-        autoGateOmpExtension(pi, { evaluator, reviewFallbackMode: "native" });
+        trackedExtension(pi, { evaluator, reviewFallbackMode: "native" });
       }],
       toolNames: ["bash"],
       skills: [],
@@ -316,10 +330,15 @@ op:
       skipPythonPreflight: true,
     });
 
+    const publishSpy = spyOn(NtfyAdapter.prototype, "publish");
+
     try {
       await session.prompt("Run unsure command");
-      const ntfyMessages = mockNtfy.getPublished();
-expect(ntfyMessages.length).toBe(0);
+      expect(publishSpy).not.toHaveBeenCalled();
+
+      const record = verdictStore.get("custom_unsure_command");
+      expect(record?.verdict).toBe("UNSURE");
+      expect(record?.policy).toBe("prompt");
 
       const branch = session.sessionManager.getBranch();
       const hasToolResult = branch.some((m: any) => {
@@ -327,6 +346,235 @@ expect(ntfyMessages.length).toBe(0);
         return str.includes("custom_unsure_command");
       });
       expect(hasToolResult).toBe(true);
+    } finally {
+      publishSpy.mockRestore();
+      await session.dispose();
+    }
+  }, 30000);
+
+  it("Test 5 (True Production Evaluator): Safe bash command execution with real OmpNativeEvaluator (no evaluator override)", async () => {
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "bash",
+        input: { command: "echo 'production evaluator allow'" },
+      },
+    });
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "classify_result",
+        input: {
+          verdict: "ALLOW",
+          risk_level: "LOW",
+          user_authorization: "HIGH",
+          reason: "Production evaluator safe check",
+        },
+      },
+    });
+    mockProvider.pushResponse({
+      text: "Finished successfully",
+    });
+
+    const settings = Settings.isolated({
+      "tools.approvalMode": "yolo",
+    });
+    settings.setModelRole("default", "mock-provider/mock-model");
+    settings.setModelRole("smol", "mock-provider/mock-model");
+
+    const { session } = await createAgentSession({
+      cwd: sandboxDir,
+      agentDir: sandboxDir,
+      authStorage,
+      modelRegistry,
+      sessionManager: SessionManager.inMemory(),
+      settings,
+      disableExtensionDiscovery: true,
+      extensions: [trackedExtension],
+      toolNames: ["bash"],
+      skills: [],
+      contextFiles: [],
+      promptTemplates: [],
+      slashCommands: [],
+      enableMCP: false,
+      enableLsp: false,
+      rules: [],
+      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      skipPythonPreflight: true,
+    });
+
+    try {
+      await session.prompt("Run command with real evaluator");
+      const branch = session.sessionManager.getBranch();
+      const hasToolResult = branch.some((m: any) => {
+        const isRes = m.role === "toolResult" || m.type === "toolResult" || m.message?.role === "toolResult" || (m.content && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolResult"));
+        const str = JSON.stringify(m);
+        return isRes && str.includes("production evaluator allow") && (m.isError === false || m.details?.isError === false || !m.isError);
+      });
+      expect(hasToolResult).toBe(true);
+
+      const requests = mockProvider.getRequests();
+      expect(requests.length).toBeGreaterThan(1);
+    } finally {
+      await session.dispose();
+    }
+  }, 30000);
+
+  it("Test 6 (True Production Evaluator BLOCK): Blocked bash command execution with real OmpNativeEvaluator", async () => {
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "bash",
+        input: { command: "rm -rf /" },
+      },
+    });
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "classify_result",
+        input: {
+          verdict: "BLOCK",
+          risk_level: "CRITICAL",
+          user_authorization: "NONE",
+          reason: "Dangerous root deletion command",
+        },
+      },
+    });
+    mockProvider.pushResponse({
+      text: "Blocked successfully",
+    });
+
+    const settings = Settings.isolated({
+      "tools.approvalMode": "write",
+    });
+    settings.setModelRole("default", "mock-provider/mock-model");
+    settings.setModelRole("smol", "mock-provider/mock-model");
+
+    const { session } = await createAgentSession({
+      cwd: sandboxDir,
+      agentDir: sandboxDir,
+      authStorage,
+      modelRegistry,
+      sessionManager: SessionManager.inMemory(),
+      settings,
+      disableExtensionDiscovery: true,
+      extensions: [trackedExtension],
+      toolNames: ["bash"],
+      skills: [],
+      contextFiles: [],
+      promptTemplates: [],
+      slashCommands: [],
+      enableMCP: false,
+      enableLsp: false,
+      rules: [],
+      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      skipPythonPreflight: true,
+    });
+
+    try {
+      await session.prompt("Run dangerous command");
+      const branch = session.sessionManager.getBranch();
+      const hasBlockedResult = branch.some((m: any) => {
+        const isRes = m.role === "toolResult" || m.type === "toolResult" || m.message?.role === "toolResult" || (m.content && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolResult"));
+        const str = JSON.stringify(m);
+        return isRes && (str.includes("BLOCK") || str.includes("Dangerous root deletion command") || str.includes("SAFE_TRANSFORM_REJECT"));
+      });
+      expect(hasBlockedResult).toBe(true);
+    } finally {
+      await session.dispose();
+    }
+  }, 30000);
+
+  it("Test 7 (Multi-Tool Session Fast-Paths): Agent session executes read skill://, todo, and bash, verifying fast-paths vs evaluation", async () => {
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "read",
+        input: { path: "skill://customize-omo" },
+      },
+    });
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "todo",
+        input: { action: "list" },
+      },
+    });
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "bash",
+        input: { command: "echo 'multi-tool test'" },
+      },
+    });
+    mockProvider.pushResponse({
+      toolCall: {
+        name: "classify_result",
+        input: {
+          verdict: "ALLOW",
+          risk_level: "LOW",
+          user_authorization: "HIGH",
+          reason: "Safe echo",
+        },
+      },
+    });
+    mockProvider.pushResponse({
+      text: "All tools executed successfully",
+    });
+
+
+    const settings = Settings.isolated({
+      "tools.approvalMode": "yolo",
+    });
+    settings.setModelRole("default", "mock-provider/mock-model");
+    settings.setModelRole("smol", "mock-provider/mock-model");
+
+
+    const { session } = await createAgentSession({
+      cwd: sandboxDir,
+      agentDir: sandboxDir,
+      authStorage,
+      modelRegistry,
+      sessionManager: SessionManager.inMemory(),
+      settings,
+      disableExtensionDiscovery: true,
+      extensions: [trackedExtension],
+      toolNames: ["bash", "read", "todo"],
+      skills: [],
+      contextFiles: [],
+      promptTemplates: [],
+      slashCommands: [],
+      enableMCP: false,
+      enableLsp: false,
+      rules: [],
+      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      skipPythonPreflight: true,
+    });
+
+
+    try {
+      await session.prompt("Run multi-tool workflow");
+
+
+      const branch = session.sessionManager.getBranch();
+      const hasReadResult = branch.some((m: any) => {
+        const str = JSON.stringify(m);
+        return str.includes("skill://customize-omo");
+      });
+      const hasTodoResult = branch.some((m: any) => {
+        const str = JSON.stringify(m);
+        return str.includes("list") || str.includes("todo");
+      });
+      const hasBashResult = branch.some((m: any) => {
+        const str = JSON.stringify(m);
+        return str.includes("multi-tool test");
+      });
+
+
+      expect(hasReadResult).toBe(true);
+      expect(hasTodoResult).toBe(true);
+      expect(hasBashResult).toBe(true);
+
+
+      const requests = mockProvider.getRequests();
+      const evalRequests = requests.filter((r: any) => {
+        const str = JSON.stringify(r.body);
+        return str.includes("classify_result") || str.includes("security classification");
+      });
+      expect(evalRequests.length).toBe(1);
     } finally {
       await session.dispose();
     }

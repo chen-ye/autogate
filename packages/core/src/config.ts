@@ -15,6 +15,7 @@ export interface AutoGateConfig {
   environment?: EnvironmentConfig
   serverUrl?: string
   reviewFallbackMode?: ReviewFallbackMode
+  evalLogFile?: string
 }
 
 function expandPath(p: string): string {
@@ -91,7 +92,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const rawTopic = options?.ntfyTopic ?? options?.AUTOGATE_NTFY_TOPIC ?? env.AUTOGATE_NTFY_TOPIC ?? options?.NTFY_TOPIC ?? env.NTFY_TOPIC ?? env.OPENCODE_NTFY_TOPIC ?? fileConfig.ntfyTopic
   const ntfyTopic = typeof rawTopic === "string" && rawTopic.trim().length > 0 ? rawTopic.trim() : "autogate"
 
-  const rawServer = options?.ntfyServer ?? options?.NTFY_SERVER ?? env.NTFY_SERVER ?? fileConfig.ntfyServer
+  const rawServer = options?.ntfyServer ?? options?.NTFY_SERVER ?? (env.NTFY_SERVER && env.NTFY_SERVER.trim().length > 0 ? env.NTFY_SERVER : undefined) ?? fileConfig.ntfyServer
   let ntfyServer = "https://ntfy.sh"
   if (typeof rawServer === "string" && rawServer.trim().length > 0) {
     try {
@@ -122,6 +123,10 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const rawModel = options?.classifierModel ?? options?.CLASSIFIER_MODEL ?? env.CLASSIFIER_MODEL ?? fileConfig.classifierModel
   const classifierModel = typeof rawModel === "string" && rawModel.trim().length > 0 ? rawModel.trim() : "google/gemini-3.5-flash-lite"
 
+  const rawEvalLogFile = options?.evalLogFile ?? env.AUTOGATE_EVAL_LOG ?? fileConfig.evalLogFile
+  const evalLogFile = typeof rawEvalLogFile === "string" && rawEvalLogFile.trim().length > 0
+    ? path.resolve(expandPath(rawEvalLogFile.trim()))
+    : path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl")
   const rawThreshold = options?.consecutiveBlockThreshold ?? options?.CONSECUTIVE_BLOCK_THRESHOLD ?? env.CONSECUTIVE_BLOCK_THRESHOLD ?? fileConfig.consecutiveBlockThreshold
   let consecutiveBlockThreshold = 3
   if (typeof rawThreshold === "number" && !isNaN(rawThreshold)) {
@@ -169,5 +174,6 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     environment,
     serverUrl,
     reviewFallbackMode,
+    evalLogFile,
   }
 }

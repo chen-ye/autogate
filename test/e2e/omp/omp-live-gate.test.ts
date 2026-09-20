@@ -186,14 +186,16 @@ server: "https://ntfy.sh",
         await new Promise((r) => setTimeout(r, 500));
       }
 
-      if (unsubscribe) unsubscribe();
-
       expect(receivedReply).toBeDefined();
       expect(receivedReply.req_id).toBe(reqId);
       expect(receivedReply.reply).toBe("once");
     } catch (err: any) {
       if (checkRateLimit(err)) return;
       throw err;
+    } finally {
+      if (unsubscribe) {
+        unsubscribe();
+      }
     }
   });
 });

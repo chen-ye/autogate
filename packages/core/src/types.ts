@@ -62,14 +62,14 @@ export interface GateAction {
   subagentPrompt?: string
   environment?: EnvironmentConfig
   metadata?: Record<string, unknown>
+  signal?: AbortSignal
 }
-
 export interface GateDecision {
-verdict: ClassifierVerdict
-riskLevel?: RiskLevel
-userAuthorization?: UserAuthorization
-reason: string
-safeTransformAlternative?: string
+  verdict: ClassifierVerdict
+  riskLevel?: RiskLevel
+  userAuthorization?: UserAuthorization
+  reason: string
+  safeTransformAlternative?: string
   cached?: boolean
   reply?: "once" | "always" | "reject"
 }
