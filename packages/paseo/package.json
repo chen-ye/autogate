@@ -1,0 +1,12 @@
+{
+  "name": "@autogate/paseo",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.server.ts",
+  "dependencies": {
+    "@autogate/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2"
+  }
+}

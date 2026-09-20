@@ -1,4 +1,4 @@
-import type { AutoGateConfig, EnvironmentConfig, OmpHarnessConfig, OpenCodeHarnessConfig, ReviewFallbackMode } from "./types"
+import type { AutoGateConfig, EnvironmentConfig, OmpHarnessConfig, OpenCodeHarnessConfig, PaseoHarnessConfig, ReviewFallbackMode } from "./types"
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -168,5 +168,6 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     evalLogFile,
     omp: { ...((fileConfig.omp as Record<string, unknown>) || {}), ...((options?.omp as Record<string, unknown>) || {}) },
     opencode: { ...((fileConfig.opencode as Record<string, unknown>) || {}), ...((options?.opencode as Record<string, unknown>) || {}) },
+    paseo: { ...((fileConfig.paseo as Record<string, unknown>) || {}), ...((options?.paseo as Record<string, unknown>) || {}) },
   }
 }

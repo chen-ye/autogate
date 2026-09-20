@@ -47,6 +47,11 @@ export interface OpenCodeHarnessConfig {
   serverUrl?: string
 }
 
+export interface PaseoHarnessConfig {
+  timelineBadges?: boolean
+  notifyOnVerdict?: boolean
+}
+
 export interface AutoGateConfig {
   autoMode: boolean
   ntfyTopic: string
@@ -65,6 +70,7 @@ export interface AutoGateConfig {
   evalLogFile?: string
   omp?: OmpHarnessConfig
   opencode?: OpenCodeHarnessConfig
+  paseo?: PaseoHarnessConfig
 }
 
 

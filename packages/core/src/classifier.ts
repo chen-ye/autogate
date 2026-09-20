@@ -305,9 +305,14 @@ Respond ONLY with a JSON object conforming to the following structure:
 \`\`\``
 
 export function buildClassifierSystemPrompt(): string {
-  const candidatePaths = [
-    path.resolve(__dirname, "../agents/auto-gate-eval.md"),
-  ]
+  const candidatePaths: string[] = []
+  try {
+    if (typeof __dirname !== "undefined") {
+      candidatePaths.push(path.resolve(__dirname, "../agents/auto-gate-eval.md"))
+    } else if (typeof import.meta !== "undefined" && typeof import.meta.url === "string") {
+      candidatePaths.push(path.resolve(path.dirname(new URL(import.meta.url).pathname), "../agents/auto-gate-eval.md"))
+    }
+  } catch {}
 
   let prompt = FALLBACK_CLASSIFIER_SYSTEM_PROMPT
   for (const p of candidatePaths) {
