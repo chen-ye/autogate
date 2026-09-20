@@ -38,6 +38,35 @@ export interface EnvironmentConfig {
   trustedGitRemotes?: string[]
   trustedPaths?: string[]
 }
+export interface OmpHarnessConfig {
+  reviewFallbackMode?: "native" | "ntfy"
+  evalLogFile?: string
+}
+
+export interface OpenCodeHarnessConfig {
+  serverUrl?: string
+}
+
+export interface AutoGateConfig {
+  autoMode: boolean
+  ntfyTopic: string
+  ntfyServer: string
+  ntfyToken?: string
+  classifierModel: string
+  classifierTimeout?: number
+  consecutiveBlockThreshold?: number
+  notifyOnVerdict?: boolean
+  environment?: EnvironmentConfig
+  serverUrl?: string
+  /**
+   * @deprecated Kept for backward compatibility. Use config.omp?.reviewFallbackMode or harness-level settings instead.
+   */
+  reviewFallbackMode?: ReviewFallbackMode
+  evalLogFile?: string
+  omp?: OmpHarnessConfig
+  opencode?: OpenCodeHarnessConfig
+}
+
 
 export interface BaseAdapter {
   readonly name: string
@@ -104,6 +133,15 @@ export interface NotifierAdapter extends BaseAdapter {
 export interface GateEvaluator {
   readonly name: string
   evaluate(action: GateAction, options?: Record<string, unknown>): Promise<ClassifierResult>
+}
+
+export interface EngineOptions {
+  config?: AutoGateConfig
+  adapter?: NotifierAdapter
+  evaluator?: GateEvaluator
+  workspaceRoot?: string
+  client?: any
+  remoteReviewEnabled?: boolean
 }
 
 // Backward compatibility aliases

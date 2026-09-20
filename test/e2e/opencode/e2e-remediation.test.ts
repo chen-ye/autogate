@@ -118,7 +118,7 @@ harness = undefined
       }
 
       try {
-        targetAction = await harness.waitForAction(undefined, 5000)
+        targetAction = await harness.waitForAction(undefined, 10000)
       } catch (waitErr: any) {
         if (checkRateLimit(waitErr) || harness.isRateLimited || waitErr?.message?.includes("Timed out")) {
           const isPending = await Promise.race([
@@ -332,7 +332,7 @@ harness = undefined
       }
 
       try {
-        targetAction = await harness.waitForAction(undefined, 5000)
+        targetAction = await harness.waitForAction(undefined, 10000)
       } catch (waitErr: any) {
         if (checkRateLimit(waitErr) || harness.isRateLimited || waitErr?.message?.includes("Timed out")) {
           const isPending = await Promise.race([

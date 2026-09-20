@@ -6,7 +6,8 @@ import {
   type HarnessAdapter,
   type GateAction,
   type GateDecision,
-  type GateEvaluator
+  type GateEvaluator,
+  type ReviewFallbackMode
 } from "@autogate/core"
 import { registerToolCallHook, verdictStore } from "./hook.ts"
 import { resolveShadowedApproval } from "./approval-bridge.ts"
@@ -21,6 +22,12 @@ export class OmpHarnessAdapter implements HarnessAdapter {
 
   constructor(pi: any, options?: Record<string, unknown>) {
     const config = loadConfig(options)
+    const fallbackMode =
+      (options as any)?.reviewFallbackMode ??
+      (options as any)?.config?.reviewFallbackMode ??
+      config.omp?.reviewFallbackMode ??
+      (config as any)?.reviewFallbackMode ??
+      "ntfy"
     const adapter = new NtfyAdapter({
       server: config.ntfyServer,
       topic: config.ntfyTopic,
@@ -42,6 +49,7 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       config,
       adapter,
       evaluator: this.evaluator,
+      remoteReviewEnabled: fallbackMode !== "native",
     })
   }
 
@@ -53,6 +61,23 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       }
     }
   }
+  setFallbackMode(mode: ReviewFallbackMode): void {
+    this.engine.setFallbackMode(mode)
+    this.engine.setRemoteReviewEnabled(mode !== "native")
+  }
+
+  getFallbackMode(): ReviewFallbackMode {
+    return this.engine.getFallbackMode()
+  }
+
+  setRemoteReviewEnabled(enabled: boolean): void {
+    this.engine.setRemoteReviewEnabled(enabled)
+  }
+
+  isRemoteReviewEnabled(): boolean {
+    return this.engine.isRemoteReviewEnabled()
+  }
+
 
   async start(): Promise<void> {
     await this.engine.start()

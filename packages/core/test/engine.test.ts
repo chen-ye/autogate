@@ -230,7 +230,7 @@ describe("AutoGateCoreEngine", () => {
     }
     const decision = await engine.evaluate(action)
     expect(decision.verdict).toBe("UNSURE")
-    expect(decision.reason).toBe("AutoMode is disabled (native terminal fallback)")
+    expect(decision.reason).toBe("AutoMode is disabled (local harness fallback)")
     expect(mockAdapter.publishedRequests.length).toBe(0)
   })
 
@@ -336,4 +336,108 @@ describe("AutoGateCoreEngine", () => {
     expect(decision.reason).toContain("aborted")
     expect(duration).toBeLessThan(200)
   })
-});
+
+  it("remoteReviewEnabled initialization, getter/setter, and backward compatibility", () => {
+    // Default is true
+    const engDefault = new AutoGateCoreEngine({ config, evaluator: mockEvaluator, adapter: mockAdapter })
+    expect(engDefault.isRemoteReviewEnabled()).toBe(true)
+    expect(engDefault.getFallbackMode()).toBe("ntfy")
+
+    // Explicit remoteReviewEnabled: false
+    const engDisabled = new AutoGateCoreEngine({ config, evaluator: mockEvaluator, adapter: mockAdapter, remoteReviewEnabled: false })
+    expect(engDisabled.isRemoteReviewEnabled()).toBe(false)
+    expect(engDisabled.getFallbackMode()).toBe("native")
+
+    // Explicit remoteReviewEnabled: true
+    const engExplicitTrue = new AutoGateCoreEngine({ config, evaluator: mockEvaluator, adapter: mockAdapter, remoteReviewEnabled: true })
+    expect(engExplicitTrue.isRemoteReviewEnabled()).toBe(true)
+    expect(engExplicitTrue.getFallbackMode()).toBe("ntfy")
+
+    // Backward compatibility: reviewFallbackMode === "native" in config
+    const engLegacyNative = new AutoGateCoreEngine({
+      config: { ...config, reviewFallbackMode: "native" },
+      evaluator: mockEvaluator,
+      adapter: mockAdapter,
+    })
+    expect(engLegacyNative.isRemoteReviewEnabled()).toBe(false)
+    expect(engLegacyNative.getFallbackMode()).toBe("native")
+
+    // setRemoteReviewEnabled changes state and syncs fallbackMode
+    engDefault.setRemoteReviewEnabled(false)
+    expect(engDefault.isRemoteReviewEnabled()).toBe(false)
+    expect(engDefault.getFallbackMode()).toBe("native")
+
+    engDefault.setRemoteReviewEnabled(true)
+    expect(engDefault.isRemoteReviewEnabled()).toBe(true)
+    expect(engDefault.getFallbackMode()).toBe("ntfy")
+
+    // setFallbackMode("native") aliases to setRemoteReviewEnabled(false)
+    engDefault.setFallbackMode("native")
+    expect(engDefault.isRemoteReviewEnabled()).toBe(false)
+    expect(engDefault.getFallbackMode()).toBe("native")
+
+    // setFallbackMode("ntfy") aliases to setRemoteReviewEnabled(true)
+    engDefault.setFallbackMode("ntfy")
+    expect(engDefault.isRemoteReviewEnabled()).toBe(true)
+    expect(engDefault.getFallbackMode()).toBe("ntfy")
+  })
+
+  it("remoteReviewEnabled: false on UNSURE -> returns UNSURE immediately without calling adapter.publish", async () => {
+    engine.setRemoteReviewEnabled(false)
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Action needs review", risk_level: "HIGH", user_authorization: "NONE" }
+    const action: GateAction = {
+      id: "act-remote-disabled-unsure",
+      harness: "generic",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "sudo dangerous_tool",
+      workspaceRoot: "/tmp",
+      userPrompt: "run tool",
+    }
+
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("UNSURE")
+    expect(decision.reason).toBe("Action needs review")
+    expect(decision.riskLevel).toBe("HIGH")
+    expect(decision.userAuthorization).toBe("NONE")
+    expect(mockAdapter.publishedRequests.length).toBe(0)
+  })
+
+  it("remoteReviewEnabled: false on UNSURE with undefined reason -> defaults to local harness fallback reason", async () => {
+    engine.setRemoteReviewEnabled(false)
+    mockEvaluator.nextResult = { verdict: "UNSURE" }
+    const action: GateAction = {
+      id: "act-remote-disabled-no-reason",
+      harness: "generic",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "some_command",
+      workspaceRoot: "/tmp",
+      userPrompt: "run",
+    }
+
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("UNSURE")
+    expect(decision.reason).toBe("Manual review required (local harness fallback)")
+    expect(mockAdapter.publishedRequests.length).toBe(0)
+  })
+
+  it("remoteReviewEnabled: true on UNSURE -> delegates to adapter.publish", async () => {
+    engine.setRemoteReviewEnabled(true)
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Action needs review" }
+    const action: GateAction = {
+      id: "act-remote-enabled-unsure",
+      harness: "generic",
+      sessionID: "ses-1",
+      toolName: "bash",
+      commandString: "some_command",
+      workspaceRoot: "/tmp",
+      userPrompt: "run",
+    }
+
+    const decision = await engine.evaluate(action)
+    expect(decision.verdict).toBe("BLOCK") // MockAdapter was initialized with autoReply = "reject"
+    expect(mockAdapter.publishedRequests.length).toBe(1)
+    expect(mockAdapter.publishedRequests[0].id).toBe("act-remote-enabled-unsure")
+  })
+})

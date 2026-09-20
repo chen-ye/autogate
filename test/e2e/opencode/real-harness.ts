@@ -316,7 +316,6 @@ this.mockProvider = new MockInferenceProvider(0)
       serverUrl: this.url,
       classifierModel: "mock-provider/mock-model",
       autoMode: true,
-      reviewFallbackMode: "ntfy",
       ...(options?.pluginConfig || {}),
     }
     const pluginEntry = [[pluginPath, pluginConfig]]

@@ -6,17 +6,21 @@ import os from "node:os"
 
 describe("config resolution", () => {
   const originalEnv = { ...process.env }
+  const originalHomedir = os.homedir
   let tempFiles: string[] = []
+  let tempDirs: string[] = []
 
   beforeEach(() => {
     delete process.env.NTFY_TOPIC
     process.env.NTFY_SERVER = ""
     delete process.env.AUTOGATE_CONFIG
     delete process.env.AUTOGATE_NTFY_TOPIC
+    delete process.env.XDG_CONFIG_HOME
   })
 
   afterEach(() => {
     process.env = { ...originalEnv }
+    os.homedir = originalHomedir
     for (const f of tempFiles) {
       try {
         if (fs.existsSync(f)) {
@@ -25,6 +29,14 @@ describe("config resolution", () => {
       } catch {}
     }
     tempFiles = []
+    for (const d of tempDirs) {
+      try {
+        if (fs.existsSync(d)) {
+          fs.rmSync(d, { recursive: true, force: true })
+        }
+      } catch {}
+    }
+    tempDirs = []
   })
 
   it("1. Default configuration: loadConfig() returns standard defaults", () => {
@@ -126,5 +138,128 @@ describe("config resolution", () => {
   it("8. Eval log file custom: loadConfig({ evalLogFile: \"/tmp/custom.jsonl\" }) returns resolved custom path", () => {
     const config = loadConfig({ evalLogFile: "/tmp/custom.jsonl" })
     expect(config.evalLogFile).toBe(path.resolve("/tmp/custom.jsonl"))
+  })
+
+  it("9. ~/.config/autogate/config.json is loaded when present", () => {
+    const fakeHome = path.join(os.tmpdir(), `autogate-home-${Date.now()}`)
+    tempDirs.push(fakeHome)
+    const configDir = path.join(fakeHome, ".config", "autogate")
+    fs.mkdirSync(configDir, { recursive: true })
+    const configFile = path.join(configDir, "config.json")
+    fs.writeFileSync(configFile, JSON.stringify({ ntfyTopic: "xdg-fallback-topic" }), "utf8")
+
+    os.homedir = () => fakeHome
+    delete process.env.XDG_CONFIG_HOME
+
+    const fileConfig = loadFileConfig()
+    expect(fileConfig.ntfyTopic).toBe("xdg-fallback-topic")
+
+    const config = loadConfig()
+    expect(config.ntfyTopic).toBe("xdg-fallback-topic")
+  })
+
+  it("10. $XDG_CONFIG_HOME/autogate/config.json is honored before ~/.config/autogate/config.json", () => {
+    const fakeHome = path.join(os.tmpdir(), `autogate-home-${Date.now()}`)
+    tempDirs.push(fakeHome)
+    const homeConfigDir = path.join(fakeHome, ".config", "autogate")
+    fs.mkdirSync(homeConfigDir, { recursive: true })
+    fs.writeFileSync(path.join(homeConfigDir, "config.json"), JSON.stringify({ ntfyTopic: "home-topic" }), "utf8")
+
+    const fakeXdg = path.join(os.tmpdir(), `autogate-xdg-${Date.now()}`)
+    tempDirs.push(fakeXdg)
+    const xdgConfigDir = path.join(fakeXdg, "autogate")
+    fs.mkdirSync(xdgConfigDir, { recursive: true })
+    fs.writeFileSync(path.join(xdgConfigDir, "config.json"), JSON.stringify({ ntfyTopic: "xdg-topic" }), "utf8")
+
+    os.homedir = () => fakeHome
+    process.env.XDG_CONFIG_HOME = fakeXdg
+
+    const fileConfig = loadFileConfig()
+    expect(fileConfig.ntfyTopic).toBe("xdg-topic")
+
+    const config = loadConfig()
+    expect(config.ntfyTopic).toBe("xdg-topic")
+  })
+
+  it("11. .autogate.json in cwd is NOT loaded", () => {
+    const cwdFile = path.resolve(process.cwd(), ".autogate.json")
+    tempFiles.push(cwdFile)
+    fs.writeFileSync(cwdFile, JSON.stringify({ ntfyTopic: "cwd-topic" }), "utf8")
+
+    const fakeHome = path.join(os.tmpdir(), `autogate-empty-home-${Date.now()}`)
+    tempDirs.push(fakeHome)
+    os.homedir = () => fakeHome
+    delete process.env.XDG_CONFIG_HOME
+
+    const fileConfig = loadFileConfig()
+    expect(fileConfig.ntfyTopic).toBeUndefined()
+
+    const config = loadConfig()
+    expect(config.ntfyTopic).toBe("autogate")
+  })
+
+  it("12. options.omp deeply merges with fileConfig.omp", () => {
+    const tmpFile = path.join(os.tmpdir(), `autogate-test-${Date.now()}.json`)
+    tempFiles.push(tmpFile)
+
+    const fileData = {
+      omp: {
+        reviewFallbackMode: "native",
+        evalLogFile: "/tmp/from-file.jsonl",
+      },
+    }
+    fs.writeFileSync(tmpFile, JSON.stringify(fileData), "utf8")
+
+    const config = loadConfig({
+      configFile: tmpFile,
+      omp: {
+        evalLogFile: "/tmp/from-options.jsonl",
+      },
+    })
+
+    expect(config.omp).toEqual({
+      reviewFallbackMode: "native",
+      evalLogFile: "/tmp/from-options.jsonl",
+    })
+  })
+
+  it("13. options.opencode deeply merges with fileConfig.opencode", () => {
+    const tmpFile = path.join(os.tmpdir(), `autogate-test-${Date.now()}.json`)
+    tempFiles.push(tmpFile)
+
+    const fileData = {
+      opencode: {
+        serverUrl: "http://file-server:4096",
+      },
+    }
+    fs.writeFileSync(tmpFile, JSON.stringify(fileData), "utf8")
+
+    const config = loadConfig({
+      configFile: tmpFile,
+      opencode: {
+        serverUrl: "http://options-server:4096",
+      },
+    })
+
+    expect(config.opencode).toEqual({
+      serverUrl: "http://options-server:4096",
+    })
+  })
+
+  it("14. ~/.omp/autogate.json is NOT loaded by loadFileConfig", () => {
+    const fakeHome = path.join(os.tmpdir(), `autogate-omp-home-${Date.now()}`)
+    tempDirs.push(fakeHome)
+    const ompDir = path.join(fakeHome, ".omp")
+    fs.mkdirSync(ompDir, { recursive: true })
+    fs.writeFileSync(path.join(ompDir, "autogate.json"), JSON.stringify({ ntfyTopic: "omp-topic" }), "utf8")
+
+    os.homedir = () => fakeHome
+    delete process.env.XDG_CONFIG_HOME
+
+    const fileConfig = loadFileConfig()
+    expect(fileConfig.ntfyTopic).toBeUndefined()
+
+    const config = loadConfig()
+    expect(config.ntfyTopic).toBe("autogate")
   })
 })

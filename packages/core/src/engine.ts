@@ -1,5 +1,5 @@
-import type { AutoGateConfig } from "./config"
 import type {
+  AutoGateConfig,
   NotifierAdapter,
   ReviewRequest,
   ReviewResponse,
@@ -8,6 +8,9 @@ import type {
   GateEvaluator,
   ClassifierResult,
   ReviewFallbackMode,
+  RiskLevel,
+  UserAuthorization,
+  PermissionEventData,
 } from "./types"
 import { sanitizeUserPrompt } from "./classifier"
 import { formatNotificationTitle, formatNotificationBody } from "./formatters"
@@ -186,6 +189,7 @@ export interface AutoGateEngineOptions {
   evaluator?: GateEvaluator
   workspaceRoot?: string
   client?: any
+  remoteReviewEnabled?: boolean
 }
 
 export class AutoGateCoreEngine {
@@ -204,15 +208,18 @@ export class AutoGateCoreEngine {
   private stopRemoteListen?: () => void
   private client?: any
   private reviewFallbackMode: ReviewFallbackMode = "ntfy"
+  private remoteReviewEnabled: boolean = true
 
   constructor(optionsOrClient?: AutoGateEngineOptions | any, config?: AutoGateConfig, remoteAdapter?: NotifierAdapter, evaluator?: GateEvaluator) {
-    if (optionsOrClient && typeof optionsOrClient === "object" && !Array.isArray(optionsOrClient) && ("config" in optionsOrClient || "evaluator" in optionsOrClient || "adapter" in optionsOrClient)) {
+    let remoteReviewOption: boolean | undefined
+    if (optionsOrClient && typeof optionsOrClient === "object" && !Array.isArray(optionsOrClient) && ("config" in optionsOrClient || "evaluator" in optionsOrClient || "adapter" in optionsOrClient || "remoteReviewEnabled" in optionsOrClient)) {
       const opts = optionsOrClient as AutoGateEngineOptions
       this.config = opts.config
       this.remoteAdapter = opts.adapter ?? (opts as any).remoteAdapter ?? createDummyAdapter()
       this.evaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.client, opts.config)
       this.workspaceRoot = opts.workspaceRoot ?? (opts.config as any)?.workspaceRoot
       this.client = opts.client
+      remoteReviewOption = opts.remoteReviewEnabled
     } else {
       if (optionsOrClient && typeof optionsOrClient === "object" && "autoMode" in optionsOrClient) {
         this.config = optionsOrClient as AutoGateConfig
@@ -229,6 +236,24 @@ export class AutoGateCoreEngine {
     this.enabled = this.config.autoMode
     this.consecutiveBlockThreshold = this.config.consecutiveBlockThreshold ?? 3
     this.reviewFallbackMode = this.config.reviewFallbackMode ?? "ntfy"
+    if (remoteReviewOption !== undefined) {
+      this.remoteReviewEnabled = remoteReviewOption
+      this.reviewFallbackMode = remoteReviewOption ? "ntfy" : "native"
+    } else if (this.config?.reviewFallbackMode === "native") {
+      this.remoteReviewEnabled = false
+      this.reviewFallbackMode = "native"
+    } else {
+      this.remoteReviewEnabled = true
+    }
+  }
+
+  public isRemoteReviewEnabled(): boolean {
+    return this.remoteReviewEnabled
+  }
+
+  public setRemoteReviewEnabled(enabled: boolean): void {
+    this.remoteReviewEnabled = enabled
+    this.reviewFallbackMode = enabled ? "ntfy" : "native"
   }
 
   public getFallbackMode(): ReviewFallbackMode {
@@ -237,6 +262,11 @@ export class AutoGateCoreEngine {
 
   public setFallbackMode(mode: ReviewFallbackMode): void {
     this.reviewFallbackMode = mode
+    if (mode === "native") {
+      this.setRemoteReviewEnabled(false)
+    } else {
+      this.setRemoteReviewEnabled(true)
+    }
   }
 
   public setUserPrompt(prompt: string): void
@@ -507,8 +537,8 @@ export class AutoGateCoreEngine {
     }
     // 1. Checks disabled state -> requests review if disabled.
     if (!this.isEnabled()) {
-      if (this.reviewFallbackMode === "native") {
-        return { verdict: "UNSURE", reason: "AutoMode is disabled (native terminal fallback)" }
+      if (!this.remoteReviewEnabled) {
+        return { verdict: "UNSURE", reason: "AutoMode is disabled (local harness fallback)" }
       }
       return this.requestReview(action, "AutoMode is disabled", false, undefined, undefined)
     }
@@ -517,7 +547,7 @@ export class AutoGateCoreEngine {
     const threshold = this.consecutiveBlockThreshold
     if (this.consecutiveBlocks >= threshold) {
       const reason = `Circuit breaker tripped: consecutive blocks (${this.consecutiveBlocks}) reached threshold (${threshold}).`
-      if (this.reviewFallbackMode === "native") {
+      if (!this.remoteReviewEnabled) {
         return { verdict: "UNSURE", reason }
       }
       return this.requestReview(action, reason, true)
@@ -527,7 +557,7 @@ export class AutoGateCoreEngine {
     const parentSessionID = action.sessionID ? this.sessionParentCache.get(action.sessionID) : undefined
     const escalationReason = checkAndConsumeEscalation(action, parentSessionID)
     if (escalationReason) {
-      if (this.reviewFallbackMode === "native") {
+      if (!this.remoteReviewEnabled) {
         return { verdict: "UNSURE", reason: escalationReason }
       }
       return this.requestReview(action, escalationReason, false, undefined, undefined)
@@ -617,13 +647,13 @@ export class AutoGateCoreEngine {
     }
 
 // 8. On UNSURE: calls `requestReview(action, reason, isCircuitBreaker, riskLevel, userAuth)` and awaits in-flight resolver or timeout.
-if (this.reviewFallbackMode === "native") {
-return {
-verdict: "UNSURE",
-reason: verdictResult.reason ?? "Manual review required (native terminal fallback)",
-riskLevel: verdictResult.risk_level,
-userAuthorization: verdictResult.user_authorization,
-}
+    if (!this.remoteReviewEnabled) {
+      return {
+        verdict: "UNSURE",
+        reason: verdictResult.reason ?? "Manual review required (local harness fallback)",
+        riskLevel: verdictResult.risk_level,
+        userAuthorization: verdictResult.user_authorization,
+      }
     }
     return this.requestReview(
       action,

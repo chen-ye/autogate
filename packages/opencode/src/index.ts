@@ -71,11 +71,15 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   private engine: AutoGateCoreEngine
   private stopListener?: () => void
   private ctx: PluginInput
+  readonly serverUrl: string
 
   constructor(ctx: PluginInput, options?: Record<string, unknown>) {
     this.ctx = ctx
     ensureAgentInstalled()
     const config = loadConfig(options)
+    const serverUrl = config.opencode?.serverUrl || config.serverUrl || "http://localhost:4096"
+    this.serverUrl = serverUrl
+    config.serverUrl = serverUrl
     const adapter = new NtfyAdapter({
       server: config.ntfyServer,
       topic: config.ntfyTopic,
@@ -90,6 +94,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       adapter,
       evaluator: new OpenCodeSessionEvaluator(ctx.client, config),
       workspaceRoot,
+      remoteReviewEnabled: true,
     })
   }
 
@@ -137,8 +142,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     message?: string,
     directory?: string
   ): Promise<void> {
-    const config = loadConfig()
-    const serverUrl = config.serverUrl || "http://localhost:4096"
+    const serverUrl = this.serverUrl || "http://localhost:4096"
     const password = process.env.OPENCODE_SERVER_PASSWORD || ""
     const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
     const workspaceRoot = this.ctx.directory || this.ctx.worktree

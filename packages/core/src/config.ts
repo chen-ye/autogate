@@ -1,22 +1,8 @@
-import type { EnvironmentConfig, ReviewFallbackMode } from "./types"
+import type { AutoGateConfig, EnvironmentConfig, OmpHarnessConfig, OpenCodeHarnessConfig, ReviewFallbackMode } from "./types"
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
-export interface AutoGateConfig {
-  autoMode: boolean
-  ntfyTopic: string
-  ntfyServer: string
-  ntfyToken?: string
-  classifierModel: string
-  classifierTimeout?: number
-  consecutiveBlockThreshold?: number
-  notifyOnVerdict?: boolean
-  environment?: EnvironmentConfig
-  serverUrl?: string
-  reviewFallbackMode?: ReviewFallbackMode
-  evalLogFile?: string
-}
 
 function expandPath(p: string): string {
   if (typeof p !== "string") return p
@@ -37,10 +23,15 @@ export function loadFileConfig(options?: Record<string, unknown>): Record<string
   if (typeof customConfigPath === "string" && customConfigPath.trim().length > 0) {
     candidates.push(path.resolve(expandPath(customConfigPath.trim())))
   }
-  candidates.push(path.resolve(process.cwd(), ".autogate.json"))
-  candidates.push(path.join(os.homedir(), ".config/autogate/config.json"))
-  candidates.push(path.join(os.homedir(), ".omp/autogate.json"))
 
+  const xdgConfigHome = env.XDG_CONFIG_HOME?.trim()
+  if (xdgConfigHome) {
+    candidates.push(path.resolve(expandPath(path.join(xdgConfigHome, "autogate", "config.json"))))
+  }
+  const fallbackConfigPath = path.join(os.homedir(), ".config", "autogate", "config.json")
+  if (!candidates.includes(fallbackConfigPath)) {
+    candidates.push(fallbackConfigPath)
+  }
   for (const candidate of candidates) {
     try {
       if (fs.existsSync(candidate)) {
@@ -157,9 +148,9 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const fileEnv = (fileConfig.environment as EnvironmentConfig | undefined) ?? {}
 
   const environment: EnvironmentConfig = {
-    trustedDomains: optEnv.trustedDomains ?? envTrustedDomains ?? fileEnv.trustedDomains ?? fileConfig.trustedDomains ?? ["*.example.com"],
-    trustedGitRemotes: optEnv.trustedGitRemotes ?? envTrustedRemotes ?? fileEnv.trustedGitRemotes ?? fileConfig.trustedGitRemotes ?? ["origin"],
-    trustedPaths: optEnv.trustedPaths ?? envTrustedPaths ?? fileEnv.trustedPaths ?? fileConfig.trustedPaths ?? ["~/Projects"],
+    trustedDomains: optEnv.trustedDomains ?? envTrustedDomains ?? fileEnv.trustedDomains ?? (fileConfig.trustedDomains as string[] | undefined) ?? ["*.example.com"],
+    trustedGitRemotes: optEnv.trustedGitRemotes ?? envTrustedRemotes ?? fileEnv.trustedGitRemotes ?? (fileConfig.trustedGitRemotes as string[] | undefined) ?? ["origin"],
+    trustedPaths: optEnv.trustedPaths ?? envTrustedPaths ?? fileEnv.trustedPaths ?? (fileConfig.trustedPaths as string[] | undefined) ?? ["~/Projects"],
   }
 
   return {
@@ -175,5 +166,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     serverUrl,
     reviewFallbackMode,
     evalLogFile,
+    omp: { ...((fileConfig.omp as Record<string, unknown>) || {}), ...((options?.omp as Record<string, unknown>) || {}) },
+    opencode: { ...((fileConfig.opencode as Record<string, unknown>) || {}), ...((options?.opencode as Record<string, unknown>) || {}) },
   }
 }
