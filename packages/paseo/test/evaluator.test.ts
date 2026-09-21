@@ -143,9 +143,9 @@ describe("PaseoNativeEvaluator", () => {
       assert.strictEqual(capturedOptions.callerAgentId, undefined);
       assert.strictEqual("callerAgentId" in capturedOptions, false);
 
-      // Strict Invariant 3: toolPolicy.tools MUST be empty {}
-      assert.deepStrictEqual(capturedOptions.config?.toolPolicy?.tools, {});
-      assert.strictEqual(Object.keys(capturedOptions.config?.toolPolicy?.tools || {}).length, 0);
+      // Strict Invariant 3: internal: true and no toolPolicy
+      assert.strictEqual(capturedOptions.config?.internal, true);
+      assert.strictEqual(capturedOptions.config?.toolPolicy, undefined);
 
       // Strict Invariant 4: cwd defaults to /tmp/autogate-eval
       assert.strictEqual(capturedOptions.cwd, DEFAULT_EVAL_CWD);

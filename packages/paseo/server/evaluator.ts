@@ -152,6 +152,10 @@ export class PaseoNativeEvaluator implements GateEvaluator {
       if (typeof metaProvider === "object" && metaProvider !== null) {
         const str = metaProvider.provider || metaProvider.id || metaProvider.name;
         if (typeof str === "string" && str.trim()) {
+          const model = metaProvider.model;
+          if (model && typeof model === "string" && model.trim()) {
+            return `${str.trim()}/${model.trim()}`;
+          }
           return str.trim();
         }
       }
@@ -169,6 +173,10 @@ export class PaseoNativeEvaluator implements GateEvaluator {
           if (typeof cfgMeta === "object" && cfgMeta !== null) {
             const str = cfgMeta.provider || cfgMeta.id || cfgMeta.name;
             if (typeof str === "string" && str.trim()) {
+              const model = cfgMeta.model;
+              if (model && typeof model === "string" && model.trim()) {
+                return `${str.trim()}/${model.trim()}`;
+              }
               return str.trim();
             }
           }
@@ -191,6 +199,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
 
     try {
       const paseo = await this.resolvePaseo();
+      console.log("[AutoGate Native] resolvePaseo found:", Boolean(paseo?.agents?.create));
 
       if (!paseo?.agents || typeof paseo.agents.create !== "function") {
         if (fallback && typeof fallback.evaluate === "function") {
@@ -221,7 +230,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         config: {
           provider: resolvedProvider,
           systemPrompt: buildClassifierSystemPrompt(),
-          toolPolicy: { tools: {} },
+          internal: true,
         },
         prompt: userPromptText,
         outputSchema: CLASSIFIER_JSON_SCHEMA,
@@ -236,7 +245,9 @@ export class PaseoNativeEvaluator implements GateEvaluator {
       let evalAgent: any;
       try {
         evalAgent = await paseo.agents.create(createOptions);
+        console.log("[AutoGate Native] created evalAgent:", evalAgent?.id);
       } catch (createErr: any) {
+        console.error("[AutoGate Native] createAgent error:", createErr?.message || createErr);
         if (fallback && typeof fallback.evaluate === "function") {
           return await fallback.evaluate(action, runtimeOptions);
         }

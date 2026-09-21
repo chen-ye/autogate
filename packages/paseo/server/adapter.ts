@@ -224,10 +224,20 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
       if (!requestId) {
         return;
       }
+      // Recursion guard: never evaluate permissions for the evaluator agent itself
+      if (
+        event?.agent?.labels?.["autogate.role"] === "evaluator" ||
+        event?.agent?.title?.startsWith("[auto-gate-eval]")
+      ) {
+        return;
+      }
+
 
       const action = extractActionFromRequest(event);
+      console.log("[AutoGate] onPermissionRequested for:", action.toolName, action.commandString);
       const agent = this.getAgent(event?.agent?.id, event, context);
       const decision = await this.engine.evaluate(action);
+      console.log("[AutoGate] decision verdict:", decision.verdict, decision.reason);
 
       if (this.config.paseo?.timelineBadges !== false) {
         try {
