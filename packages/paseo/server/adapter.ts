@@ -8,9 +8,10 @@ import {
   type GateEvaluator,
   type NotifierAdapter,
   type ReviewResponse,
+  type AutoGateConfig,
 } from "@autogate/core";
 import { extractActionFromRequest } from "./inspect.js";
-
+import { PaseoNativeEvaluator } from "./evaluator.js";
 export interface PendingPermissionRequest {
   agentId: string;
   action: GateAction;
@@ -21,6 +22,8 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
   readonly name: string = "paseo";
 
   private server: any;
+  private options?: Record<string, unknown>;
+  private config: AutoGateConfig;
   private engine: AutoGateCoreEngine;
   private ntfyAdapter: NotifierAdapter;
   private pendingRequests: Map<string, PendingPermissionRequest> = new Map();
@@ -28,14 +31,17 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
   private unregisterResolved?: () => void;
   private stopRemoteListen?: () => void;
   private isDisposed: boolean = false;
+  private lastHookPaseo?: any;
 
   constructor(server: any, options?: Record<string, unknown>) {
     this.server = server;
+    this.options = options;
 
     const config = loadConfig(options);
     if (config.paseo?.notifyOnVerdict !== undefined) {
       config.notifyOnVerdict = config.paseo.notifyOnVerdict;
     }
+    this.config = config;
 
     this.ntfyAdapter =
       (options?.adapter as NotifierAdapter) ??
@@ -45,31 +51,42 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         token: config.ntfyToken,
       });
 
+    const directApiEvaluator = new DirectApiEvaluator({
+      apiKey:
+        (options?.apiKey as string) ||
+        (options?.evaluatorApiKey as string) ||
+        (config as any).apiKey ||
+        process.env.AUTOGATE_API_KEY ||
+        process.env.GEMINI_API_KEY ||
+        process.env.GOOGLE_API_KEY ||
+        config.ntfyToken ||
+        "test-key",
+      baseUrl:
+        (options?.baseUrl as string) ||
+        (options?.evaluatorBaseUrl as string) ||
+        (config as any).evaluatorBaseUrl ||
+        process.env.AUTOGATE_EVALUATOR_BASE_URL ||
+        process.env.AUTOGATE_INFERENCE_URL ||
+        process.env.GEMINI_BASE_URL,
+      model:
+        (options?.classifierModel as string) ||
+        config.classifierModel ||
+        "gemini-3.5-flash-lite",
+      timeoutMs: config.classifierTimeout,
+    });
+
     const evaluator =
       (options?.evaluator as GateEvaluator | undefined) ??
-      new DirectApiEvaluator({
-        apiKey:
-          (options?.apiKey as string) ||
-          (options?.evaluatorApiKey as string) ||
-          (config as any).apiKey ||
-          process.env.AUTOGATE_API_KEY ||
-          process.env.GEMINI_API_KEY ||
-          process.env.GOOGLE_API_KEY ||
-          config.ntfyToken ||
-          "test-key",
-        baseUrl:
-          (options?.baseUrl as string) ||
-          (options?.evaluatorBaseUrl as string) ||
-          (config as any).evaluatorBaseUrl ||
-          process.env.AUTOGATE_EVALUATOR_BASE_URL ||
-          process.env.AUTOGATE_INFERENCE_URL ||
-          process.env.GEMINI_BASE_URL,
-        model:
-          (options?.classifierModel as string) ||
-          config.classifierModel ||
-          "gemini-3.5-flash-lite",
-        timeoutMs: config.classifierTimeout,
-      });
+      (config.paseo?.useDirectApi === true
+        ? directApiEvaluator
+        : new PaseoNativeEvaluator(() => this.getPaseoClient(), {
+            fallbackEvaluator: directApiEvaluator,
+            classifierTimeout: config.classifierTimeout,
+            config,
+            evaluatorProvider: config.paseo?.evaluatorProvider,
+            ...(options as Record<string, unknown>),
+          }));
+
     this.engine =
       (options?.engine as AutoGateCoreEngine) ??
       new AutoGateCoreEngine({
@@ -99,6 +116,16 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     }
 
     this.startListening().catch(() => {});
+  }
+
+  private getPaseoClient(): any {
+    return (
+      this.lastHookPaseo ||
+      (this.options as any)?.paseo ||
+      (this.options as any)?.client ||
+      this.server?.paseo ||
+      this.server
+    );
   }
 
   public getEngine(): AutoGateCoreEngine {
@@ -189,6 +216,10 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
   ): Promise<void> => {
     if (this.isDisposed) return;
     try {
+      if (context?.paseo) {
+        this.lastHookPaseo = context.paseo;
+      }
+
       const requestId = event?.request?.id ?? event?.requestId;
       if (!requestId) {
         return;
@@ -198,7 +229,41 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
       const agent = this.getAgent(event?.agent?.id, event, context);
       const decision = await this.engine.evaluate(action);
 
-      if (decision.verdict === "ALLOW") {
+      if (this.config.paseo?.timelineBadges !== false) {
+        try {
+          const targetAgent = this.getAgent(event?.agent?.id || action.sessionID, event, context) ?? agent;
+          let timelineAgent = targetAgent;
+          if (!timelineAgent?.timeline?.append) {
+            const client = context?.paseo ?? this.getPaseoClient();
+            const agentId = event?.agent?.id || action.sessionID;
+            if (agentId && typeof client?.agents?.ref === "function") {
+              const refAgent = client.agents.ref(agentId);
+              if (refAgent?.timeline?.append) {
+                timelineAgent = refAgent;
+              }
+            }
+          }
+          if (typeof timelineAgent?.timeline?.append === "function") {
+            await timelineAgent.timeline.append({
+              type: "plugin",
+              id: "autogate-eval-" + action.id,
+              kind: "autogate-eval",
+              version: 1,
+              data: {
+                verdict: decision.verdict,
+                risk_level: decision.riskLevel,
+                reason: decision.reason,
+                command: action.commandString,
+                toolName: action.toolName,
+                evalAgentId: (decision as any).metadata?.evalAgentId,
+              },
+            });
+          }
+        } catch {
+          // Wrapped in a try/catch so timeline append failures never disrupt permission resolution.
+}
+}
+if (decision.verdict === "ALLOW") {
         if (agent && typeof agent.respondToPermission === "function") {
           try {
             await agent.respondToPermission({
@@ -270,6 +335,12 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         if (agent) return agent;
       } catch {}
     }
+    if (this.lastHookPaseo?.agents?.ref && agentId) {
+      try {
+        const agent = this.lastHookPaseo.agents.ref(agentId);
+        if (agent) return agent;
+      } catch {}
+    }
     if (this.server?.paseo?.agents?.ref && agentId) {
       try {
         const agent = this.server.paseo.agents.ref(agentId);
@@ -288,6 +359,12 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         if (agent) return agent;
       } catch {}
     }
+    if ((this.options as any)?.paseo?.agents?.ref && agentId) {
+      try {
+        const agent = (this.options as any).paseo.agents.ref(agentId);
+        if (agent) return agent;
+      } catch {}
+    }
     if (event?.agent) {
       return event.agent;
     }
@@ -296,6 +373,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
 
   public async dispose(): Promise<void> {
     this.isDisposed = true;
+    this.lastHookPaseo = undefined;
     if (this.unregisterRequested) {
       try {
         this.unregisterRequested();

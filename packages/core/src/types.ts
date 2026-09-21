@@ -50,6 +50,14 @@ export interface OpenCodeHarnessConfig {
 export interface PaseoHarnessConfig {
   timelineBadges?: boolean
   notifyOnVerdict?: boolean
+  /**
+   * Specifies the provider/model string (e.g. "omp", "antigravity") for native evaluation in Paseo.
+   */
+  evaluatorProvider?: string
+  /**
+   * Forces using DirectApiEvaluator instead of Paseo agent creation.
+   */
+  useDirectApi?: boolean
 }
 
 export interface AutoGateConfig {

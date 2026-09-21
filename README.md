@@ -49,7 +49,7 @@ AutoGate operates across three main components:
 
 1. **Core Security Engine (`@autogate/core`)**: Evaluates actions against safety policies using an autonomous classifier (`DirectApiEvaluator` or harness-native providers). Decoupled from host-specific mechanisms.
 2. **Harness Adapters**: Native plugins and extensions translating host-specific permission lifecycles into standardized gate actions:
-   - **`@autogate/paseo`**: Daemon plugin for Paseo (`>=0.8.0`) intercepting `agent.permission_requested`. Protects all agent providers (OMP, Claude, Codex, Antigravity) running inside Paseo.
+   - **`@autogate/paseo`**: Daemon plugin for Paseo (`>=0.8.0`) intercepting `agent.permission_requested`. Protects all agent providers (OMP, Claude, Codex, Antigravity) running inside Paseo using `PaseoNativeEvaluator` with host provider reuse, strict sandbox isolation, and UI timeline audit badges.
    - **`@autogate/opencode`**: Plugin for OpenCode intercepting tool execution requests.
    - **`@autogate/omp`**: Extension for Oh My Pi (OMP) providing shadowed tool interception and terminal fallback options.
 3. **Dual-Channel Review Bridge (`NtfyAdapter`)**: Concurrently presents permission prompts in the active host interface while dispatching push notifications with action buttons to an [ntfy](https://ntfy.sh) topic. A reverse webhook listener over an outbound SSE connection receives mobile tap responses with no open inbound ports required.
@@ -88,6 +88,8 @@ AutoGate uses a single canonical configuration file located at `~/.config/autoga
   },
   "paseo": {
     "timelineBadges": true,
+    "evaluatorProvider": "omp",
+    "useDirectApi": false,
     "notifyOnVerdict": false
   },
   "opencode": {
@@ -110,7 +112,10 @@ AutoGate uses a single canonical configuration file located at `~/.config/autoga
 | `ntfyTopic` | `string` | `"autogate"` | Secret topic name for push notifications. |
 | `ntfyToken` | `string` | `undefined` | Optional bearer token for authenticated ntfy topics. |
 | `consecutiveBlockThreshold` | `number` | `3` | Maximum consecutive blocks before halting an agent. |
-| `paseo` | `object` | `{}` | Settings specific to the Paseo harness. |
+| `paseo` | `object` | `{}` | Settings specific to the Paseo harness (see table below). |
+| `paseo.timelineBadges` | `boolean` | `true` | Whether to render audit cards (`kind: "autogate-eval"`) on the agent's Paseo timeline. |
+| `paseo.evaluatorProvider` | `string` | `undefined` | Provider or model identifier for native evaluation (e.g. `"omp"`, `"antigravity"`). Defaults to host metadata generation provider or `"omp"`. |
+| `paseo.useDirectApi` | `boolean` | `false` | Force using DirectApiEvaluator instead of Paseo agent creation. |
 | `opencode` | `object` | `{}` | Settings specific to the OpenCode harness. |
 | `omp` | `object` | `{}` | Settings specific to the Oh My Pi harness. |
 
@@ -153,6 +158,15 @@ To view plugin logs:
 ```bash
 paseo plugin logs autogate
 ```
+
+##### Paseo Native Evaluation Architecture
+
+In Paseo environments, AutoGate utilizes `PaseoNativeEvaluator` instead of relying on external API calls:
+
+- **Provider Reuse (No Parallel Pipeline)**: Discovers and reuses host-configured models and corporate proxies from Paseo (such as OMP's `enterprise-llm` gateway or configured `metadataGeneration` models). This eliminates the need for `AUTOGATE_API_KEY` or separate inference endpoints in enterprise environments.
+- **Strict Security Isolation**: Spawns ephemeral evaluation agents with zero parentage (`parent: undefined`), empty tool policy (`toolPolicy: { tools: {} }`), isolated scratch directory (`/tmp/autogate-eval`), `autoArchive: true`, and `notifyOnFinish: false`. The evaluator agent cannot run tools, mutate files, or leak subagent messages to the target agent.
+- **UI Timeline Badges**: Injects read-only audit cards into the agent's Paseo UI timeline (`kind: "autogate-eval"`). Operators and users can inspect the classifier verdict, risk level, and rationale directly in the Paseo session interface.
+- **Backwards Compatibility**: Supports `DirectApiEvaluator` as a fallback or directly when `useDirectApi: true` is configured or in standalone mock environments.
 
 #### 2. OpenCode Plugin (`@autogate/opencode`)
 

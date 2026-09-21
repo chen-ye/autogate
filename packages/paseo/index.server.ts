@@ -1,5 +1,6 @@
 import { PaseoHarnessAdapter } from "./server/adapter.js";
 import { extractActionFromRequest, shellCommand } from "./server/inspect.js";
+import { PaseoNativeEvaluator, type PaseoNativeEvaluatorOptions } from "./server/evaluator.js";
 
 /**
  * Daemon contribution entrypoint for Paseo.
@@ -22,4 +23,11 @@ export default function contribute(
   };
 }
 
-export { contribute, PaseoHarnessAdapter, extractActionFromRequest, shellCommand };
+export {
+  contribute,
+  PaseoHarnessAdapter,
+  PaseoNativeEvaluator,
+  extractActionFromRequest,
+  shellCommand,
+  type PaseoNativeEvaluatorOptions,
+};
