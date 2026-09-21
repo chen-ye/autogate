@@ -27,10 +27,11 @@ export function loadFileConfig(options?: Record<string, unknown>): Record<string
   const xdgConfigHome = env.XDG_CONFIG_HOME?.trim()
   if (xdgConfigHome) {
     candidates.push(path.resolve(expandPath(path.join(xdgConfigHome, "autogate", "config.json"))))
-  }
-  const fallbackConfigPath = path.join(os.homedir(), ".config", "autogate", "config.json")
-  if (!candidates.includes(fallbackConfigPath)) {
-    candidates.push(fallbackConfigPath)
+  } else {
+    const fallbackConfigPath = path.join(os.homedir(), ".config", "autogate", "config.json")
+    if (!candidates.includes(fallbackConfigPath)) {
+      candidates.push(fallbackConfigPath)
+    }
   }
   for (const candidate of candidates) {
     try {

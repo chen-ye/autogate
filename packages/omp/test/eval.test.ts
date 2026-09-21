@@ -16,12 +16,16 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
   let store: Map<string, any>
   let mockProvider: MockInferenceProvider
 
+  const originalEnv = { ...process.env }
+
   beforeEach(() => {
     store = new Map()
     mockProvider = new MockInferenceProvider(0)
+    process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), `empty-xdg-omp-${Date.now()}`)
   })
 
   afterEach(async () => {
+    process.env = { ...originalEnv }
     await mockProvider.stop()
   })
 

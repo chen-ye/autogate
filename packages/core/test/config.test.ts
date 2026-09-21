@@ -15,7 +15,9 @@ describe("config resolution", () => {
     process.env.NTFY_SERVER = ""
     delete process.env.AUTOGATE_CONFIG
     delete process.env.AUTOGATE_NTFY_TOPIC
-    delete process.env.XDG_CONFIG_HOME
+    const emptyConfigDir = path.join(os.tmpdir(), `empty-xdg-config-${Date.now()}`)
+    tempDirs.push(emptyConfigDir)
+    process.env.XDG_CONFIG_HOME = emptyConfigDir
   })
 
   afterEach(() => {
