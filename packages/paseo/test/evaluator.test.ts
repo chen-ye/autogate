@@ -143,10 +143,10 @@ describe("PaseoNativeEvaluator", () => {
       assert.strictEqual(capturedOptions.callerAgentId, undefined);
       assert.strictEqual("callerAgentId" in capturedOptions, false);
 
-      // Strict Invariant 3: internal: true and no toolPolicy
+      // Strict Invariant 3: internal: true, modeId: "ask", and no toolPolicy
       assert.strictEqual(capturedOptions.config?.internal, true);
+      assert.strictEqual(capturedOptions.config?.modeId, "ask");
       assert.strictEqual(capturedOptions.config?.toolPolicy, undefined);
-
       // Strict Invariant 4: cwd defaults to /tmp/autogate-eval
       assert.strictEqual(capturedOptions.cwd, DEFAULT_EVAL_CWD);
 
@@ -222,6 +222,32 @@ describe("PaseoNativeEvaluator", () => {
 
       await evaluator.evaluate(action);
       assert.strictEqual(capturedOptions.labels?.["autogate.targetAgentId"], "session-from-lower-d");
+    });
+
+    it("locks evaluator agents to modeId 'ask' and omits toolPolicy so Paseo never throws ToolPolicyUnsupportedError", async () => {
+      let capturedOptions: any = null;
+      const mockPaseo = {
+        agents: {
+          create: async (options: any) => {
+            capturedOptions = options;
+            return {
+              id: "eval-agent-mode",
+              waitForFinish: async () => ({
+                status: "idle",
+                lastMessage: JSON.stringify({ verdict: "ALLOW", reason: "ok" }),
+              }),
+            };
+          },
+        },
+      };
+
+      const evaluator = new PaseoNativeEvaluator(mockPaseo);
+      await evaluator.evaluate(createMockAction());
+
+      assert.ok(capturedOptions !== null);
+      assert.strictEqual(capturedOptions.config?.modeId, "ask");
+      assert.strictEqual(capturedOptions.config?.toolPolicy, undefined);
+      assert.strictEqual(capturedOptions.config?.internal, true);
     });
   });
 
@@ -434,6 +460,40 @@ describe("PaseoNativeEvaluator", () => {
       assert.strictEqual(capturedOptions.config?.provider, "obj-id-val");
     });
 
+    it("preserves model from paseo.metadataGeneration.providers[0] (e.g. provider 'omp' and model 'litellm/gemini/gemini-flash-lite-latest')", async () => {
+      let capturedOptions: any = null;
+      const mockPaseo = {
+        metadataGeneration: {
+          providers: [
+            {
+              provider: "omp",
+              model: "litellm/gemini/gemini-flash-lite-latest",
+            },
+          ],
+        },
+        agents: {
+          create: async (options: any) => {
+            capturedOptions = options;
+            return {
+              id: "eval-model-preserve",
+              waitForFinish: async () => ({
+                status: "idle",
+                lastMessage: JSON.stringify({ verdict: "ALLOW", reason: "ok" }),
+              }),
+            };
+          },
+        },
+      };
+
+      const evaluator = new PaseoNativeEvaluator(mockPaseo);
+      await evaluator.evaluate(createMockAction());
+
+      assert.strictEqual(
+        capturedOptions.config?.provider,
+        "omp/litellm/gemini/gemini-flash-lite-latest"
+      );
+    });
+
     it("resolves provider from paseo.daemonConfig.metadataGeneration.providers[0]", async () => {
       let capturedOptions: any = null;
       const mockPaseo = {
@@ -492,6 +552,46 @@ describe("PaseoNativeEvaluator", () => {
       await evaluator.evaluate(createMockAction());
 
       assert.strictEqual(capturedOptions.config?.provider, "async-cfg-provider");
+    });
+
+    it("preserves model from async paseo.config.get() metadataGeneration.providers[0]", async () => {
+      let capturedOptions: any = null;
+      const mockPaseo = {
+        config: {
+          get: async () => ({
+            config: {
+              metadataGeneration: {
+                providers: [
+                  {
+                    provider: "omp",
+                    model: "litellm/gemini/gemini-flash-lite-latest",
+                  },
+                ],
+              },
+            },
+          }),
+        },
+        agents: {
+          create: async (options: any) => {
+            capturedOptions = options;
+            return {
+              id: "eval-async-model-preserve",
+              waitForFinish: async () => ({
+                status: "idle",
+                lastMessage: JSON.stringify({ verdict: "ALLOW", reason: "ok" }),
+              }),
+            };
+          },
+        },
+      };
+
+      const evaluator = new PaseoNativeEvaluator(mockPaseo);
+      await evaluator.evaluate(createMockAction());
+
+      assert.strictEqual(
+        capturedOptions.config?.provider,
+        "omp/litellm/gemini/gemini-flash-lite-latest"
+      );
     });
 
     it("defaults to 'omp' when no provider or metadata is specified", async () => {

@@ -122,13 +122,13 @@ class MockGateEvaluator implements GateEvaluator {
 }
 
 describe("PaseoHarnessAdapter", () => {
-  it("initializes AutoGateCoreEngine with remoteReviewEnabled: true and pure dual-channel mode", () => {
+  it("initializes AutoGateCoreEngine with remoteReviewEnabled: false and pure dual-channel mode", () => {
     const server = new MockServer();
     const adapter = new PaseoHarnessAdapter(server);
     const engine = adapter.getEngine();
 
-    assert.strictEqual(engine.isRemoteReviewEnabled(), true);
-    assert.strictEqual(engine.getFallbackMode(), "ntfy");
+    assert.strictEqual(engine.isRemoteReviewEnabled(), false);
+    assert.strictEqual(engine.getFallbackMode(), "native");
     assert.strictEqual(adapter.name, "paseo");
     assert.ok(adapter.getPendingRequests());
   });
@@ -226,7 +226,7 @@ describe("PaseoHarnessAdapter", () => {
         verdict: "UNSURE" as const,
         reason: "Needs human review",
       }),
-      isRemoteReviewEnabled: () => true,
+      isRemoteReviewEnabled: () => false,
       getFallbackMode: () => "ntfy",
       stop: async () => {},
       resolveReviewResponse: () => {},
@@ -257,6 +257,104 @@ describe("PaseoHarnessAdapter", () => {
     assert.strictEqual(pending?.agentId, "agent-42");
     assert.strictEqual(pending?.action.id, "req-unsure-1");
     assert.strictEqual(pending?.action.commandString, "sudo reboot");
+  });
+
+  it("handles UNSURE non-blocking: completes in < 15ms, publishes to notifier, and tracks pending request", async () => {
+    const server = new MockServer();
+    const agent = new MockAgent("agent-unsure-perf");
+    const mockNotifier = new MockNotifierAdapter();
+    const mockEngine: any = {
+      evaluate: async () => ({
+        verdict: "UNSURE" as const,
+        reason: "Sensitive operation requiring dual-channel review",
+      }),
+      isRemoteReviewEnabled: () => false,
+      getFallbackMode: () => "ntfy",
+      stop: async () => {},
+      resolveReviewResponse: () => {},
+      handlePermissionReplied: () => {},
+    };
+
+    const adapter = new PaseoHarnessAdapter(server, {
+      engine: mockEngine,
+      adapter: mockNotifier,
+    });
+
+    const requestId = "req-unsure-timing-1";
+    const event = {
+      agent,
+      request: {
+        id: requestId,
+        name: "bash",
+        input: { command: "terraform apply" },
+      },
+    };
+
+    const start = performance.now();
+    await server.emit("agent.permission_requested", event);
+    const elapsed = performance.now() - start;
+
+    assert.ok(elapsed < 15, `Expected elapsed time < 15ms, got ${elapsed}ms`);
+    assert.strictEqual(mockNotifier.published.length, 1);
+    assert.strictEqual(mockNotifier.published[0].id, requestId);
+    assert.strictEqual(adapter.getPendingRequests().has(requestId), true);
+    assert.strictEqual(agent.responses.length, 0);
+  });
+
+  it("actively denies tool calls from evaluator sessions and does NOT proceed to engine evaluation", async () => {
+    const server = new MockServer();
+    const mockEvaluator = new MockGateEvaluator();
+    const adapter = new PaseoHarnessAdapter(server, {
+      evaluator: mockEvaluator,
+    });
+
+    // 1. Evaluator agent identified by label
+    const evalAgentWithLabel = new MockAgent("eval-agent-by-label");
+    const eventWithLabel = {
+      agent: Object.assign(evalAgentWithLabel, {
+        labels: { "autogate.role": "evaluator" },
+      }),
+      request: {
+        id: "req-eval-label-1",
+        name: "bash",
+        input: { command: "rm -rf /tmp/test" },
+      },
+    };
+
+    await server.emit("agent.permission_requested", eventWithLabel);
+
+    assert.strictEqual(evalAgentWithLabel.responses.length, 1);
+    assert.strictEqual(evalAgentWithLabel.responses[0].requestId, "req-eval-label-1");
+    assert.strictEqual(evalAgentWithLabel.responses[0].response.behavior, "deny");
+    assert.strictEqual(
+      evalAgentWithLabel.responses[0].response.message,
+      "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools."
+    );
+    assert.strictEqual(mockEvaluator.evaluatedActions.length, 0);
+
+    // 2. Evaluator agent identified by title prefix
+    const evalAgentWithTitle = new MockAgent("eval-agent-by-title");
+    const eventWithTitle = {
+      agent: Object.assign(evalAgentWithTitle, {
+        title: "[auto-gate-eval] bash",
+      }),
+      request: {
+        id: "req-eval-title-1",
+        name: "bash",
+        input: { command: "echo leak" },
+      },
+    };
+
+    await server.emit("agent.permission_requested", eventWithTitle);
+
+    assert.strictEqual(evalAgentWithTitle.responses.length, 1);
+    assert.strictEqual(evalAgentWithTitle.responses[0].requestId, "req-eval-title-1");
+    assert.strictEqual(evalAgentWithTitle.responses[0].response.behavior, "deny");
+    assert.strictEqual(
+      evalAgentWithTitle.responses[0].response.message,
+      "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools."
+    );
+    assert.strictEqual(mockEvaluator.evaluatedActions.length, 0);
   });
 
   it("reverse webhook listener: replies allow for once/always and deletes from pendingRequests", async () => {

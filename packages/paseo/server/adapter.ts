@@ -3,6 +3,9 @@ import {
   NtfyAdapter,
   DirectApiEvaluator,
   loadConfig,
+  formatNotificationTitle,
+  formatNotificationBody,
+  type ReviewRequest,
   type HarnessAdapter,
   type GateAction,
   type GateEvaluator,
@@ -93,7 +96,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         config,
         adapter: this.ntfyAdapter,
         evaluator,
-        remoteReviewEnabled: true,
+        remoteReviewEnabled: false,
         workspaceRoot: options?.workspaceRoot as string | undefined,
       });
 
@@ -224,11 +227,27 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
       if (!requestId) {
         return;
       }
-      // Recursion guard: never evaluate permissions for the evaluator agent itself
+      // Recursion guard: never evaluate permissions for the evaluator agent itself, and actively deny tool execution
       if (
         event?.agent?.labels?.["autogate.role"] === "evaluator" ||
         event?.agent?.title?.startsWith("[auto-gate-eval]")
       ) {
+        const agent = this.getAgent(event?.agent?.id, event, context);
+        if (agent && typeof agent.respondToPermission === "function") {
+          try {
+            await agent.respondToPermission({
+              requestId,
+              response: {
+                behavior: "deny",
+                message:
+                  "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools.",
+              },
+            });
+          } catch {
+            // Wrap agent.respondToPermission() calls in try/catch to handle cases where
+            // the agent was deleted or request already answered.
+          }
+        }
         return;
       }
 
@@ -309,6 +328,39 @@ if (decision.verdict === "ALLOW") {
           action,
           agent,
         });
+
+        const payload: ReviewRequest = {
+          id: requestId,
+          title: formatNotificationTitle("REVIEW", action.toolName),
+          message: formatNotificationBody({
+            target: action.commandString
+              ? [action.commandString]
+              : action.targetPath
+              ? [action.targetPath]
+              : action.rawArgs
+              ? [String(action.rawArgs)]
+              : action.toolName,
+            reason: decision.reason,
+            risk_level: decision.riskLevel,
+            user_authorization: decision.userAuthorization,
+          }),
+          priority: "high",
+          tags: ["lock", "robot"],
+          actions: [
+            { id: "approve-once", label: "Approve", reply: "once" },
+            { id: "deny", label: "Deny", reply: "reject" },
+          ],
+        };
+
+        if (this.ntfyAdapter && typeof this.ntfyAdapter.publish === "function") {
+          try {
+            this.ntfyAdapter.publish(payload).catch((err: any) => {
+              console.error("[AutoGate] Failed to publish async Ntfy notification:", err);
+            });
+          } catch (publishErr) {
+            console.error("[AutoGate] Synchronous publish error:", publishErr);
+          }
+        }
         // does NOT call respondToPermission
       }
     } catch {

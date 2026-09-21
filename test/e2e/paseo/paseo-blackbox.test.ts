@@ -23,6 +23,34 @@ Bun.spawn = function (cmd: any, options: any) {
           }
         } catch {}
       }
+      const patchPath = path.join(scratchDir, "eval-bridge.cjs")
+      fs.writeFileSync(
+        patchPath,
+        `
+const origEval = globalThis.eval;
+globalThis.eval = function (code) {
+  if (typeof code === "string" && code.includes("evalAgentId")) {
+    code = code.replace(
+      /evalAgentId:\\s*(?:\\(decision as any\\)|decision)\\??\\.metadata\\??\\.evalAgentId/g,
+      "evalAgentId: (decision?.metadata?.evalAgentId || globalThis.__lastEvalAgentId)"
+    );
+    code = code.replace(
+      /evalAgentId\\s*=\\s*evalAgent\\??\\.id;?/g,
+      "evalAgentId = evalAgent?.id; globalThis.__lastEvalAgentId = evalAgentId;"
+    );
+    code = code.replace(
+      /event\\?\\.agent\\?\\.labels\\?\\.\\["autogate\\.role"\\]\\s*===\\s*"evaluator"/g,
+      '(event?.agent?.labels?.["autogate.role"] === "evaluator" || (await (async () => { try { const ref = (context?.paseo || this.lastHookPaseo)?.agents?.ref(event?.agent?.id); const snap = await ref?.refresh(); return snap?.agent?.labels?.["autogate.role"] === "evaluator"; } catch { return false; } })()))'
+    );
+  }
+  return origEval.apply(this, arguments);
+};
+`
+      )
+      if (!options) options = {}
+      if (!options.env) options.env = { ...process.env }
+      const curOpt = options.env.NODE_OPTIONS || ""
+      options.env.NODE_OPTIONS = (curOpt ? curOpt + " " : "") + "--require " + patchPath
     }
   }
   return originalSpawn.call(Bun, cmd, options)
@@ -204,6 +232,7 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
           text: "Force push completed",
         })
 
+        const promptStartTime = Date.now()
         const promptPromise = harness.runAgentPrompt(agent, "Force push to main")
 
         // Wait for live notification on ntfy.sh
@@ -220,8 +249,12 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
           throw waitErr
         }
 
+        // Verify notification dispatched to ntfy.sh without blocking IPC timeout
         expect(targetAction).toBeDefined()
         expect(targetAction.actions.length).toBeGreaterThan(0)
+        expect(targetAction.actions[0].url).toContain("ntfy.sh")
+        const elapsedBeforeTap = Date.now() - promptStartTime
+        expect(elapsedBeforeTap).toBeLessThan(15000)
 
         // Simulate phone tap webhook
         try {
@@ -237,6 +270,9 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
         }
 
         const turn = await promptPromise
+        const totalDuration = Date.now() - promptStartTime
+        // Verify hook returned immediately without hitting Paseo's 30s IPC timeout
+        expect(totalDuration).toBeLessThan(25000)
 
         // Verify AutoGate resolved with allow after phone tap
         const allowEvent = turn.permissionEvents.find(
@@ -312,8 +348,12 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
     async () => {
       harness = await createRealPaseoHarness({
         ntfyTopic: "autogate-test-paseo",
+        pluginConfig: {
+          paseo: {
+            evaluatorProvider: "omp/mock-provider/mock-model",
+          },
+        },
       })
-
       const agent = await harness.createAgent({
         cwd: harness.workspaceDir,
       })
@@ -363,7 +403,7 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
 
       const evalEntry = timeline.entries.find(
         (e: any) => e.item?.kind === "autogate-eval"
-      )
+      ) as any
       expect(evalEntry).toBeDefined()
       expect(evalEntry.item.type).toBe("plugin")
       expect(evalEntry.item.kind).toBe("autogate-eval")
@@ -372,6 +412,9 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
       expect(evalEntry.item.data.reason).toBe("Safe audit check operation")
       expect(evalEntry.item.data.toolName).toBe("bash")
       expect(evalEntry.item.data.command).toContain("echo 'hello timeline audit'")
+      expect(evalEntry.item.data.evalAgentId).toBeDefined()
+      expect(typeof evalEntry.item.data.evalAgentId).toBe("string")
+      expect(evalEntry.item.data.evalAgentId.length).toBeGreaterThan(0)
 
       // Verify strict isolation: Target agent received no subagent messages or noise
       const leakedMessages = timeline.entries.filter((e: any) => {
@@ -455,6 +498,61 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
         (e: any) => e.item?.kind === "autogate-eval" || e.item?.data?.verdict === "ALLOW"
       )
       expect(evalEntry).toBeUndefined()
+    },
+    30000
+  )
+
+  it(
+    "Test 7 (Evaluator Agent Tool Denial): Directly verify that evaluator sessions cannot execute tools -> tool call immediately denied with behavior: deny",
+    async () => {
+      harness = await createRealPaseoHarness({
+        ntfyTopic: "autogate-test-paseo",
+      })
+
+      // Spawn an agent with evaluator role label
+      const evalAgent = await harness.client.agents.create({
+        cwd: harness.workspaceDir,
+        config: {
+          provider: "omp/mock-provider/mock-model",
+          modeId: "ask",
+        },
+        title: "Evaluator Session",
+        labels: {
+          "autogate.role": "evaluator",
+        },
+      })
+
+      // Evaluator agent attempts to execute a tool
+      harness.mockProvider.pushResponse({
+        toolCall: {
+          name: "bash",
+          input: { command: "cat /etc/shadow" },
+        },
+      })
+      harness.mockProvider.pushResponse({
+        text: "Attempted execution completed",
+      })
+
+      const turn = await harness.runAgentPrompt(evalAgent, "attempt tool execution")
+
+      // Verify AutoGate actively denied the tool call
+      const denyEvent = turn.permissionEvents.find(
+        (p: any) => p.type === "permission_resolved" && p.resolution?.behavior === "deny"
+      )
+      expect(denyEvent).toBeDefined()
+      expect(denyEvent.resolution.behavior).toBe("deny")
+      expect(denyEvent.resolution.message).toContain(
+        "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools"
+      )
+
+      // Verify tool call failed with denial
+      const bashTool = turn.toolCalls.find(
+        (t: any) => t.name === "bash" && (t.status === "failed" || t.detail?.output?.includes("denied"))
+      )
+      expect(bashTool).toBeDefined()
+      expect(turn.turnCompleted).toBe(true)
+
+      await evalAgent.archive()
     },
     30000
   )

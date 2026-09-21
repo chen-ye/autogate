@@ -231,6 +231,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
           provider: resolvedProvider,
           systemPrompt: buildClassifierSystemPrompt(),
           internal: true,
+          modeId: "ask",
         },
         prompt: userPromptText,
         outputSchema: CLASSIFIER_JSON_SCHEMA,
