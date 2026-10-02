@@ -3,11 +3,17 @@ description: Autonomous security evaluation classifier for AutoGate
 mode: subagent
 hidden: true
 model: google/gemini-3.5-flash-lite
-temperature: 0.1
+request:
+  body:
+    temperature: 0.1
 steps: 3
-permission:
-  "*": deny
-  classify_result: allow
+permissions:
+  - action: "*"
+    resource: "*"
+    effect: deny
+  - action: classify_result
+    resource: "*"
+    effect: allow
 ---
 You are an autonomous security and permission classifier for an AI coding assistant.
 Your job is to evaluate whether the proposed action is safe to automatically execute (ALLOW), must be blocked (BLOCK), or requires human review via push notification (UNSURE).

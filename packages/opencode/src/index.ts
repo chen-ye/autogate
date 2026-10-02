@@ -367,6 +367,102 @@ export async function AutoGatePlugin(
 
 export const plugin = {
   id: "auto-gate",
+  async setup(ctx: any) {
+    const adapter = new OpenCodeHarnessAdapter(ctx, ctx.options)
+    const engine = adapter.getEngine()
+    await adapter.start()
+
+    const config = loadConfig(ctx.options)
+    console.log(`AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`)
+
+    // Register tools via ctx.tool.transform if available
+    if (ctx.tool && typeof ctx.tool.transform === "function") {
+      await ctx.tool.transform((editor: any) => {
+        editor.add({
+          name: "classify_result",
+          description: "Report the security classification result for the agent action (internal evaluation tool)",
+          input: {
+            type: "object",
+            properties: {
+              risk_level: { type: "string", enum: ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+              user_authorization: { type: "string", enum: ["NONE", "LOW", "MEDIUM", "HIGH"] },
+              verdict: { type: "string", enum: ["ALLOW", "BLOCK", "UNSURE"] },
+              reason: { type: "string" },
+            },
+            required: ["risk_level", "user_authorization", "verdict", "reason"],
+          },
+          async execute(args: any, context: any) {
+            if (!isEvaluationSession(context.sessionID)) {
+              throw new Error("classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.")
+            }
+            recordEvaluationVerdict(context.sessionID, {
+              verdict: args.verdict,
+              risk_level: args.risk_level,
+              user_authorization: args.user_authorization,
+              reason: args.reason,
+            })
+            ctx.session?.interrupt?.(context.sessionID).catch(() => {})
+            return {
+              content: JSON.stringify(args),
+            }
+          },
+        })
+
+        editor.add({
+          name: "escalate_permission",
+          description: "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
+          input: {
+            type: "object",
+            properties: {
+              action: { type: "string", description: "The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')" },
+              reason: { type: "string", description: "Why the safe alternative or automated transform cannot be used and human review is required" },
+            },
+            required: ["action", "reason"],
+          },
+          async execute(args: any, context: any) {
+            recordEscalationIntent(context.sessionID, args.action, args.reason)
+            return {
+              content: `Manual verification intent registered for '${args.action}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
+            }
+          },
+        })
+      })
+    }
+
+    // Subscribe to events
+    if (ctx.event && typeof ctx.event.subscribe === "function") {
+      const controller = new AbortController()
+      ;(async () => {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+            if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
+              const eventData = event.properties || event.data
+              if (eventData) {
+                await adapter.handlePermissionAsked(eventData)
+              }
+            } else if (event.type === "permission.replied" || event.type === "permission.v2.replied") {
+              const eventData = event.properties || event.data
+              if (eventData) {
+                await adapter.handlePermissionReplied(eventData)
+              }
+            } else if (
+              event.type === "session.idle" ||
+              (event.type === "session.status" && (event.properties?.status === "idle" || event.data?.status === "idle"))
+            ) {
+              const sessionID = event.properties?.sessionID || event.data?.sessionID
+              if (sessionID) {
+                adapter.clearTurnCache(sessionID)
+              }
+            }
+          }
+        } catch {}
+      })()
+    }
+
+    return async () => {
+      await adapter.dispose()
+    }
+  },
   server: AutoGatePlugin,
 }
 
