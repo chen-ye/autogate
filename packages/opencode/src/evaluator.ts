@@ -411,7 +411,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           signal: AbortSignal.timeout(5000),
         });
         if (res.ok) {
-          const json = await res.json();
+          const json = (await res.json()) as any;
           if (json?.data?.id || json?.id) {
             sessionRes = json;
             break;
@@ -421,7 +421,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     }
   }
 
-  const sessionID = sessionRes?.data?.id ?? (sessionRes as any)?.id;
+  const sessionID = sessionRes?.data?.id ?? sessionRes?.id;
   if (!sessionID) {
     throw new Error("Failed to create ephemeral classifier session: missing session ID");
   }

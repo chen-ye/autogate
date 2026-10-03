@@ -304,7 +304,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
           : undefined;
 
         if (toolCall) {
-          let args: any = toolCall.arguments ?? toolCall.function?.arguments;
+          let args: any = (toolCall as any).arguments ?? (toolCall as any).function?.arguments;
           if (typeof args === "string") {
             try {
               args = JSON.parse(args);
