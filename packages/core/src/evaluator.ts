@@ -95,7 +95,7 @@ export class DirectApiEvaluator implements GateEvaluator {
           throw new Error(`HTTP error ${response.status}: ${errorText}`);
         }
 
-        const data = await response.json();
+        const data = (await response.json()) as any;
         const candidateText =
           data?.candidates?.[0]?.content?.parts?.[0]?.text ??
           data?.candidates?.[0]?.output ??

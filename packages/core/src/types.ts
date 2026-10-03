@@ -159,14 +159,21 @@ export interface EngineOptions {
   remoteReviewEnabled?: boolean;
 }
 
-export type AutoGateEngineOptions = EngineOptions;
-
 // Backward compatibility aliases
 export type NotificationPayload = ReviewRequest;
 export type ApprovalResponse = ReviewResponse;
 export type RemoteAdapter = NotifierAdapter;
 export type NotificationAction = ReviewAction;
-export type PermissionEventData = Record<string, unknown>;
+export interface PermissionEventData {
+  [key: string]: any;
+  permission?: string;
+  toolName?: string;
+  patterns?: unknown[];
+  metadata?: Record<string, any>;
+  commandString?: string;
+  targetPath?: string;
+  sessionID?: string;
+}
 
 export interface ClassifyInput {
   model?: string;

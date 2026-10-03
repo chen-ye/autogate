@@ -95,7 +95,7 @@ export class NtfyAdapter implements RemoteAdapter {
 
     const run = async () => {
       while (!controller.signal.aborted) {
-        let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+        let reader: any;
         try {
           const response = await fetch(url, {
             headers,
