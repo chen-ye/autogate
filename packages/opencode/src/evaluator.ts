@@ -329,7 +329,11 @@ export function resetCachedEvaluationAgent(): void {
   cachedEvalAgent = undefined;
 }
 
-export async function classifyRequest(input: ClassifyInput): Promise<ClassifierResult> {
+export interface OpenCodeClassifyInput extends ClassifyInput {
+  client?: any;
+}
+
+export async function classifyRequest(input: OpenCodeClassifyInput): Promise<ClassifierResult> {
   // Entry
   const sandboxDir = ensureSandboxDirectory();
   const userPrompt = input.userPrompt ?? "";

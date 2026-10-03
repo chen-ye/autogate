@@ -156,20 +156,19 @@ export interface EngineOptions {
   adapter?: NotifierAdapter;
   evaluator?: GateEvaluator;
   workspaceRoot?: string;
-  client?: any;
   remoteReviewEnabled?: boolean;
 }
+
+export type AutoGateEngineOptions = EngineOptions;
 
 // Backward compatibility aliases
 export type NotificationPayload = ReviewRequest;
 export type ApprovalResponse = ReviewResponse;
 export type RemoteAdapter = NotifierAdapter;
 export type NotificationAction = ReviewAction;
-export type PermissionEventData = any;
+export type PermissionEventData = Record<string, unknown>;
 
 export interface ClassifyInput {
-  // deno-lint-ignore no-explicit-any
-  client: any;
   model?: string;
   request?: PermissionEventData;
   userPrompt?: string;
@@ -179,7 +178,7 @@ export interface ClassifyInput {
   actionArgs?: unknown;
   workspaceRoot?: string;
   environment?: EnvironmentConfig;
-  config?: any;
+  config?: unknown;
 }
 
 export interface BuildClassifierPromptInput {
