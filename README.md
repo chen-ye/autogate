@@ -47,10 +47,10 @@ AutoGate acts as an intelligent security boundary between autonomous coding agen
 
 AutoGate operates across three main components:
 
-1. **Core Security Engine (`@autogate/core`)**: Evaluates actions against safety policies using an autonomous classifier (`DirectApiEvaluator` or harness-native providers). Decoupled from host-specific mechanisms.
-2. **Harness Adapters**: Native plugins and extensions translating host-specific permission lifecycles into standardized gate actions:
+1. **Host-Agnostic Core Security Engine (`@autogate/core`)**: Pure, decoupled security engine that consumes standardized `GateAction` contracts and evaluates safety policies without any runtime dependency on host SDKs or APIs. Contains zero host client references, loose `any` types, or host session traversal logic.
+2. **Harness Adapters**: Native host adapters translating host-specific permission lifecycles, message transcripts, and subagent session hierarchies into standardized `GateAction` structures:
+   - **`@autogate/opencode`**: Plugin for OpenCode intercepting tool execution requests and permission events. Encapsulates session tree traversal, subagent prompt extraction, and ephemeral evaluation session lifecycle under strict TypeScript contracts (`OpenCodePromptResolver`, `OpenCodeSessionClient`).
    - **`@autogate/paseo`**: Daemon plugin for Paseo (`>=0.8.0`) intercepting `agent.permission_requested`. Protects all agent providers (OMP, Claude, Codex, Antigravity) running inside Paseo using `PaseoNativeEvaluator` with host provider reuse, strict sandbox isolation, and UI timeline audit badges.
-   - **`@autogate/opencode`**: Plugin for OpenCode intercepting tool execution requests.
    - **`@autogate/omp`**: Extension for Oh My Pi (OMP) providing shadowed tool interception and terminal fallback options.
 3. **Dual-Channel Review Bridge (`NtfyAdapter`)**: Concurrently presents permission prompts in the active host interface while dispatching push notifications with action buttons to an [ntfy](https://ntfy.sh) topic. A reverse webhook listener over an outbound SSE connection receives mobile tap responses with no open inbound ports required.
 
