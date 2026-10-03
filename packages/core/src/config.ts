@@ -21,14 +21,40 @@ function expandPath(p: string): string {
   return p;
 }
 
+export function isRecord(val: unknown): val is Record<string, unknown> {
+  return typeof val === "object" && val !== null && !Array.isArray(val);
+}
+
+export function isStringArray(val: unknown): val is string[] {
+  return Array.isArray(val) && val.every((item) => typeof item === "string");
+}
+
+export function parseEnvironmentConfig(val: unknown): EnvironmentConfig | undefined {
+  if (!isRecord(val)) return undefined;
+  return {
+    trustedDomains: isStringArray(val.trustedDomains) ? val.trustedDomains : undefined,
+    trustedGitRemotes: isStringArray(val.trustedGitRemotes) ? val.trustedGitRemotes : undefined,
+    trustedPaths: isStringArray(val.trustedPaths) ? val.trustedPaths : undefined,
+  };
+}
+
+function parseHarnessRecord(val: unknown): Record<string, unknown> {
+  return isRecord(val) ? val : {};
+}
+
 export function loadFileConfig(options?: Record<string, unknown>): Record<string, unknown> {
   const env = process.env;
-  const customConfigPath = (options?.configFile ??
-    options?.AUTOGATE_CONFIG ??
-    env.AUTOGATE_CONFIG) as string | undefined;
+  const customConfigPath =
+    typeof options?.configFile === "string"
+      ? options.configFile
+      : typeof options?.AUTOGATE_CONFIG === "string"
+        ? options.AUTOGATE_CONFIG
+        : typeof env.AUTOGATE_CONFIG === "string"
+          ? env.AUTOGATE_CONFIG
+          : undefined;
 
   const candidates: string[] = [];
-  if (typeof customConfigPath === "string" && customConfigPath.trim().length > 0) {
+  if (customConfigPath && customConfigPath.trim().length > 0) {
     candidates.push(path.resolve(expandPath(customConfigPath.trim())));
   }
 
@@ -45,9 +71,9 @@ export function loadFileConfig(options?: Record<string, unknown>): Record<string
     try {
       if (fs.existsSync(candidate)) {
         const content = fs.readFileSync(candidate, "utf8");
-        const parsed = JSON.parse(content);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return parsed as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(content);
+        if (isRecord(parsed)) {
+          return parsed;
         }
       }
     } catch (err) {
@@ -217,22 +243,32 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
         .filter(Boolean)
     : undefined;
 
-  const optEnv = (options?.environment as EnvironmentConfig | undefined) ?? {};
-  const fileEnv = (fileConfig.environment as EnvironmentConfig | undefined) ?? {};
+  const optEnv = parseEnvironmentConfig(options?.environment) ?? {};
+  const fileEnv = parseEnvironmentConfig(fileConfig.environment) ?? {};
+
+  const fileTrustedDomains = isStringArray(fileConfig.trustedDomains)
+    ? fileConfig.trustedDomains
+    : undefined;
+  const fileTrustedRemotes = isStringArray(fileConfig.trustedGitRemotes)
+    ? fileConfig.trustedGitRemotes
+    : undefined;
+  const fileTrustedPaths = isStringArray(fileConfig.trustedPaths)
+    ? fileConfig.trustedPaths
+    : undefined;
 
   const environment: EnvironmentConfig = {
     trustedDomains: optEnv.trustedDomains ??
       envTrustedDomains ??
       fileEnv.trustedDomains ??
-      (fileConfig.trustedDomains as string[] | undefined) ?? ["*.example.com"],
+      fileTrustedDomains ?? ["*.example.com"],
     trustedGitRemotes: optEnv.trustedGitRemotes ??
       envTrustedRemotes ??
       fileEnv.trustedGitRemotes ??
-      (fileConfig.trustedGitRemotes as string[] | undefined) ?? ["origin"],
+      fileTrustedRemotes ?? ["origin"],
     trustedPaths: optEnv.trustedPaths ??
       envTrustedPaths ??
       fileEnv.trustedPaths ??
-      (fileConfig.trustedPaths as string[] | undefined) ?? ["~/Projects"],
+      fileTrustedPaths ?? ["~/Projects"],
   };
 
   return {
@@ -249,16 +285,16 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     reviewFallbackMode,
     evalLogFile,
     omp: {
-      ...((fileConfig.omp as Record<string, unknown>) || {}),
-      ...((options?.omp as Record<string, unknown>) || {}),
+      ...parseHarnessRecord(fileConfig.omp),
+      ...parseHarnessRecord(options?.omp),
     },
     opencode: {
-      ...((fileConfig.opencode as Record<string, unknown>) || {}),
-      ...((options?.opencode as Record<string, unknown>) || {}),
+      ...parseHarnessRecord(fileConfig.opencode),
+      ...parseHarnessRecord(options?.opencode),
     },
     paseo: {
-      ...((fileConfig.paseo as Record<string, unknown>) || {}),
-      ...((options?.paseo as Record<string, unknown>) || {}),
+      ...parseHarnessRecord(fileConfig.paseo),
+      ...parseHarnessRecord(options?.paseo),
     },
-  };
+  } satisfies AutoGateConfig;
 }
