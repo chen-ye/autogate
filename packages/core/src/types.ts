@@ -4,6 +4,39 @@ export type ReviewFallbackMode = "native" | "ntfy";
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH";
 
+export type SessionId = string & { readonly __brand: "SessionId" };
+export type RequestId = string & { readonly __brand: "RequestId" };
+export type ActionId = string & { readonly __brand: "ActionId" };
+export type TopicName = string & { readonly __brand: "TopicName" };
+
+export function parseSessionId(value: unknown, fallback: string = "default-session"): SessionId {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return fallback as SessionId;
+  }
+  return value.trim() as SessionId;
+}
+
+export function parseRequestId(value: unknown): RequestId {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`Invalid RequestId: expected non-empty string, got ${typeof value}`);
+  }
+  return value.trim() as RequestId;
+}
+
+export function parseActionId(value: unknown): ActionId {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`Invalid ActionId: expected non-empty string, got ${typeof value}`);
+  }
+  return value.trim() as ActionId;
+}
+
+export function parseTopicName(value: unknown): TopicName {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`Invalid TopicName: expected non-empty string, got ${typeof value}`);
+  }
+  return value.trim() as TopicName;
+}
+
 export type ClassifierResult =
   | {
       readonly verdict: "ALLOW";
@@ -105,9 +138,9 @@ export interface HarnessAdapter extends BaseAdapter {
 }
 
 export interface GateAction {
-  id: string;
+  id: ActionId | string;
   harness: string;
-  sessionID: string;
+  sessionID: SessionId | string;
   toolName: string;
   commandString?: string;
   targetPath?: string;
@@ -118,6 +151,38 @@ export interface GateAction {
   environment?: EnvironmentConfig;
   metadata?: Record<string, unknown>;
   signal?: AbortSignal;
+}
+
+export function createGateAction(input: {
+  id?: string;
+  harness?: string;
+  sessionID?: string;
+  toolName: string;
+  commandString?: string;
+  targetPath?: string;
+  rawArgs?: unknown;
+  workspaceRoot?: string;
+  userPrompt?: string;
+  subagentPrompt?: string;
+  environment?: EnvironmentConfig;
+  metadata?: Record<string, unknown>;
+  signal?: AbortSignal;
+}): GateAction {
+  return {
+    id: parseActionId(input.id || Math.random().toString(36).slice(2)),
+    harness: input.harness || "generic",
+    sessionID: parseSessionId(input.sessionID || "default-session"),
+    toolName: input.toolName,
+    commandString: input.commandString,
+    targetPath: input.targetPath,
+    rawArgs: input.rawArgs,
+    workspaceRoot: input.workspaceRoot || process.cwd(),
+    userPrompt: input.userPrompt || "",
+    subagentPrompt: input.subagentPrompt,
+    environment: input.environment,
+    metadata: input.metadata,
+    signal: input.signal,
+  };
 }
 export type GateDecision =
   | {
