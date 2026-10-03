@@ -1,10 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { MockInferenceProvider } from "../opencode/mock-provider";
-import { AutoGateCoreEngine, DirectApiEvaluator, NtfyAdapter, type GateAction } from "@autogate/core";
+import {
+  AutoGateCoreEngine,
+  DirectApiEvaluator,
+  NtfyAdapter,
+  type GateAction,
+} from "@autogate/core";
 import { OmpNativeEvaluator } from "../../../packages/omp/src/evaluator.ts";
 import autoGateOmpExtension from "../../../packages/omp/src/index.ts";
-import { createAgentSession, SessionManager, Settings } from "@oh-my-pi/pi-coding-agent";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent";
+import {
+  createAgentSession,
+  SessionManager,
+  Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+  AuthStorage,
+  SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -86,7 +98,12 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
 
   it("Test 1 (Inference Timeout Abort): OmpNativeEvaluator times out and returns UNSURE", async () => {
     mockProvider.pushResponse({
-      text: JSON.stringify({ verdict: "ALLOW", reason: "Should not reach", risk_level: "LOW", user_authorization: "HIGH" }),
+      text: JSON.stringify({
+        verdict: "ALLOW",
+        reason: "Should not reach",
+        risk_level: "LOW",
+        user_authorization: "HIGH",
+      }),
       delayMs: 300,
     });
     const model = buildModel({
@@ -188,7 +205,12 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
     });
     // 2. Evaluator classification response: slow (400ms delay, exceeds 150ms toolCallTimeoutMs)
     mockProvider.pushResponse({
-      text: JSON.stringify({ verdict: "ALLOW", reason: "Safe", risk_level: "LOW", user_authorization: "HIGH" }),
+      text: JSON.stringify({
+        verdict: "ALLOW",
+        reason: "Safe",
+        risk_level: "LOW",
+        user_authorization: "HIGH",
+      }),
       delayMs: 400,
     });
     // 3. Final response after tool execution / block
@@ -218,11 +240,13 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
       sessionManager: SessionManager.inMemory(),
       settings,
       disableExtensionDiscovery: true,
-      extensions: [pi => {
-        const ext = autoGateOmpExtension(pi, { evaluator });
-        activeEngines.push(ext.engine);
-        return ext;
-      }],
+      extensions: [
+        (pi) => {
+          const ext = autoGateOmpExtension(pi, { evaluator });
+          activeEngines.push(ext.engine);
+          return ext;
+        },
+      ],
       toolNames: ["bash"],
       skills: [],
       contextFiles: [],
@@ -231,7 +255,13 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
     activeSessions.push(session);

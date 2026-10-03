@@ -15,7 +15,7 @@ import { PaseoNativeEvaluator, type PaseoNativeEvaluatorOptions } from "./server
  */
 export default function contribute(
   server: any,
-  options?: Record<string, unknown>
+  options?: Record<string, unknown>,
 ): () => Promise<void> {
   const adapter = new PaseoHarnessAdapter(server, options);
   return async () => {

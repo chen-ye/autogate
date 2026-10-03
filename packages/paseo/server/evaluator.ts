@@ -1,10 +1,5 @@
 import fs from "fs";
-import type {
-  GateEvaluator,
-  GateAction,
-  ClassifierResult,
-  AutoGateConfig,
-} from "@autogate/core";
+import type { GateEvaluator, GateAction, ClassifierResult, AutoGateConfig } from "@autogate/core";
 import {
   CLASSIFIER_JSON_SCHEMA,
   buildClassifierSystemPrompt,
@@ -111,7 +106,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
 
   constructor(
     private paseoSource: any | (() => any),
-    private options?: PaseoNativeEvaluatorOptions
+    private options?: PaseoNativeEvaluatorOptions,
   ) {}
 
   private async resolvePaseo(): Promise<any> {
@@ -126,7 +121,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
 
   private async resolveProvider(
     paseo: any,
-    runtimeOptions?: Record<string, unknown>
+    runtimeOptions?: Record<string, unknown>,
   ): Promise<string> {
     const explicitProvider =
       (runtimeOptions?.provider as string) ||
@@ -189,7 +184,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
 
   async evaluate(
     action: GateAction,
-    runtimeOptions?: Record<string, unknown>
+    runtimeOptions?: Record<string, unknown>,
   ): Promise<ClassifierResult> {
     const fallback =
       (runtimeOptions?.fallbackEvaluator as GateEvaluator | undefined) ??
@@ -303,15 +298,21 @@ export class PaseoNativeEvaluator implements GateEvaluator {
       try {
         const timeoutOrAbortPromise = new Promise<never>((_, reject) => {
           if (controller.signal.aborted) {
-            reject(controller.signal.reason || new Error(`Classifier evaluation timed out after ${timeoutMs}ms`));
+            reject(
+              controller.signal.reason ||
+                new Error(`Classifier evaluation timed out after ${timeoutMs}ms`),
+            );
             return;
           }
           controller.signal.addEventListener(
             "abort",
             () => {
-              reject(controller.signal.reason || new Error(`Classifier evaluation timed out after ${timeoutMs}ms`));
+              reject(
+                controller.signal.reason ||
+                  new Error(`Classifier evaluation timed out after ${timeoutMs}ms`),
+              );
             },
-            { once: true }
+            { once: true },
           );
         });
 

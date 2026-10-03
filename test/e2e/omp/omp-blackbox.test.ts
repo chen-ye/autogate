@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { MockInferenceProvider } from "../opencode/mock-provider";
 import { DirectApiEvaluator } from "@autogate/core";
-import { createAgentSession, SessionManager, Settings } from "@oh-my-pi/pi-coding-agent";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent";
+import {
+  createAgentSession,
+  SessionManager,
+  Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+  AuthStorage,
+  SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import autoGateOmpExtension, { OmpHarnessAdapter } from "../../../packages/omp/src/index.ts";
@@ -79,7 +86,12 @@ describe("True Black-box OMP E2E Test Suite", () => {
       },
     });
     mockProvider.pushResponse({
-      text: JSON.stringify({ verdict: "ALLOW", reason: "Safe operation", risk_level: "LOW", user_authorization: "HIGH" }),
+      text: JSON.stringify({
+        verdict: "ALLOW",
+        reason: "Safe operation",
+        risk_level: "LOW",
+        user_authorization: "HIGH",
+      }),
     });
     mockProvider.pushResponse({
       text: "Done",
@@ -105,7 +117,7 @@ describe("True Black-box OMP E2E Test Suite", () => {
       sessionManager: SessionManager.inMemory(),
       settings,
       disableExtensionDiscovery: true,
-      extensions: [pi => trackedExtension(pi, { evaluator })],
+      extensions: [(pi) => trackedExtension(pi, { evaluator })],
       toolNames: ["bash"],
       skills: [],
       contextFiles: [],
@@ -114,7 +126,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
 
@@ -122,9 +140,19 @@ describe("True Black-box OMP E2E Test Suite", () => {
       await session.prompt("Run safe command");
       const branch = session.sessionManager.getBranch();
       const hasToolResult = branch.some((m: any) => {
-        const isRes = m.role === "toolResult" || m.type === "toolResult" || m.message?.role === "toolResult" || (m.content && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolResult"));
+        const isRes =
+          m.role === "toolResult" ||
+          m.type === "toolResult" ||
+          m.message?.role === "toolResult" ||
+          (m.content &&
+            Array.isArray(m.content) &&
+            m.content.some((c: any) => c.type === "toolResult"));
         const str = JSON.stringify(m);
-        return isRes && str.includes("pure blackbox allow") && (m.isError === false || m.details?.isError === false || !m.isError);
+        return (
+          isRes &&
+          str.includes("pure blackbox allow") &&
+          (m.isError === false || m.details?.isError === false || !m.isError)
+        );
       });
       expect(hasToolResult).toBe(true);
     } finally {
@@ -140,7 +168,12 @@ describe("True Black-box OMP E2E Test Suite", () => {
       },
     });
     mockProvider.pushResponse({
-      text: JSON.stringify({ verdict: "BLOCK", reason: "Working tree discard protection", risk_level: "HIGH", user_authorization: "LOW" }),
+      text: JSON.stringify({
+        verdict: "BLOCK",
+        reason: "Working tree discard protection",
+        risk_level: "HIGH",
+        user_authorization: "LOW",
+      }),
     });
     mockProvider.pushResponse({
       text: "Done",
@@ -166,7 +199,7 @@ describe("True Black-box OMP E2E Test Suite", () => {
       sessionManager: SessionManager.inMemory(),
       settings,
       disableExtensionDiscovery: true,
-      extensions: [pi => trackedExtension(pi, { evaluator })],
+      extensions: [(pi) => trackedExtension(pi, { evaluator })],
       toolNames: ["bash"],
       skills: [],
       contextFiles: [],
@@ -175,7 +208,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
 
@@ -183,7 +222,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       await session.prompt("Discard working tree");
       const branch = session.sessionManager.getBranch();
       const hasBlockedResult = branch.some((m: any) => {
-        const isRes = m.role === "toolResult" || m.type === "toolResult" || m.message?.role === "toolResult" || (m.content && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolResult"));
+        const isRes =
+          m.role === "toolResult" ||
+          m.type === "toolResult" ||
+          m.message?.role === "toolResult" ||
+          (m.content &&
+            Array.isArray(m.content) &&
+            m.content.some((c: any) => c.type === "toolResult"));
         const str = JSON.stringify(m);
         return isRes && str.includes("SAFE_TRANSFORM_REJECT") && str.includes("git stash");
       });
@@ -210,7 +255,17 @@ describe("True Black-box OMP E2E Test Suite", () => {
     const checkRateLimit = (resOrErr: any, text?: string) => {
       const status = resOrErr?.status;
       const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
-      if (status === 429 || status === 403 || str.includes("429") || str.includes("403") || str.includes("quota") || str.includes("rate limit") || str.includes("rate-limit") || str.includes("limit") || str.includes("forbidden")) {
+      if (
+        status === 429 ||
+        status === 403 ||
+        str.includes("429") ||
+        str.includes("403") ||
+        str.includes("quota") ||
+        str.includes("rate limit") ||
+        str.includes("rate-limit") ||
+        str.includes("limit") ||
+        str.includes("forbidden")
+      ) {
         console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
         return true;
       }
@@ -245,7 +300,7 @@ describe("True Black-box OMP E2E Test Suite", () => {
       await new Promise((r) => setTimeout(r, 2000));
 
       const getRes = await fetch(`${server}/${topic}/json?poll=1`, {
-        headers: { "Authorization": `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
       });
       const getTxt = await getRes.text().catch(() => "");
       if (checkRateLimit(getRes, getTxt)) return;
@@ -256,7 +311,7 @@ describe("True Black-box OMP E2E Test Suite", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ req_id: reqId, reply: "once" }),
       });
@@ -289,7 +344,12 @@ describe("True Black-box OMP E2E Test Suite", () => {
       },
     });
     mockProvider.pushResponse({
-      text: JSON.stringify({ verdict: "UNSURE", reason: "Requires human review", risk_level: "MEDIUM", user_authorization: "LOW" }),
+      text: JSON.stringify({
+        verdict: "UNSURE",
+        reason: "Requires human review",
+        risk_level: "MEDIUM",
+        user_authorization: "LOW",
+      }),
     });
     mockProvider.pushResponse({
       text: "Done",
@@ -315,9 +375,11 @@ describe("True Black-box OMP E2E Test Suite", () => {
       sessionManager: SessionManager.inMemory(),
       settings,
       disableExtensionDiscovery: true,
-      extensions: [pi => {
-        trackedExtension(pi, { evaluator, reviewFallbackMode: "native" });
-      }],
+      extensions: [
+        (pi) => {
+          trackedExtension(pi, { evaluator, reviewFallbackMode: "native" });
+        },
+      ],
       toolNames: ["bash"],
       skills: [],
       contextFiles: [],
@@ -326,7 +388,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
 
@@ -397,7 +465,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
 
@@ -405,9 +479,19 @@ describe("True Black-box OMP E2E Test Suite", () => {
       await session.prompt("Run command with real evaluator");
       const branch = session.sessionManager.getBranch();
       const hasToolResult = branch.some((m: any) => {
-        const isRes = m.role === "toolResult" || m.type === "toolResult" || m.message?.role === "toolResult" || (m.content && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolResult"));
+        const isRes =
+          m.role === "toolResult" ||
+          m.type === "toolResult" ||
+          m.message?.role === "toolResult" ||
+          (m.content &&
+            Array.isArray(m.content) &&
+            m.content.some((c: any) => c.type === "toolResult"));
         const str = JSON.stringify(m);
-        return isRes && str.includes("production evaluator allow") && (m.isError === false || m.details?.isError === false || !m.isError);
+        return (
+          isRes &&
+          str.includes("production evaluator allow") &&
+          (m.isError === false || m.details?.isError === false || !m.isError)
+        );
       });
       expect(hasToolResult).toBe(true);
 
@@ -463,7 +547,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
 
@@ -471,9 +561,20 @@ describe("True Black-box OMP E2E Test Suite", () => {
       await session.prompt("Run dangerous command");
       const branch = session.sessionManager.getBranch();
       const hasBlockedResult = branch.some((m: any) => {
-        const isRes = m.role === "toolResult" || m.type === "toolResult" || m.message?.role === "toolResult" || (m.content && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolResult"));
+        const isRes =
+          m.role === "toolResult" ||
+          m.type === "toolResult" ||
+          m.message?.role === "toolResult" ||
+          (m.content &&
+            Array.isArray(m.content) &&
+            m.content.some((c: any) => c.type === "toolResult"));
         const str = JSON.stringify(m);
-        return isRes && (str.includes("BLOCK") || str.includes("Dangerous root deletion command") || str.includes("SAFE_TRANSFORM_REJECT"));
+        return (
+          isRes &&
+          (str.includes("BLOCK") ||
+            str.includes("Dangerous root deletion command") ||
+            str.includes("SAFE_TRANSFORM_REJECT"))
+        );
       });
       expect(hasBlockedResult).toBe(true);
     } finally {
@@ -515,13 +616,11 @@ describe("True Black-box OMP E2E Test Suite", () => {
       text: "All tools executed successfully",
     });
 
-
     const settings = Settings.isolated({
       "tools.approvalMode": "yolo",
     });
     settings.setModelRole("default", "mock-provider/mock-model");
     settings.setModelRole("smol", "mock-provider/mock-model");
-
 
     const { session } = await createAgentSession({
       cwd: sandboxDir,
@@ -540,14 +639,18 @@ describe("True Black-box OMP E2E Test Suite", () => {
       enableMCP: false,
       enableLsp: false,
       rules: [],
-      workspaceTree: { rootPath: sandboxDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+      workspaceTree: {
+        rootPath: sandboxDir,
+        rendered: "",
+        truncated: false,
+        totalLines: 0,
+        agentsMdFiles: [],
+      },
       skipPythonPreflight: true,
     });
 
-
     try {
       await session.prompt("Run multi-tool workflow");
-
 
       const branch = session.sessionManager.getBranch();
       const hasReadResult = branch.some((m: any) => {
@@ -563,11 +666,9 @@ describe("True Black-box OMP E2E Test Suite", () => {
         return str.includes("multi-tool test");
       });
 
-
       expect(hasReadResult).toBe(true);
       expect(hasTodoResult).toBe(true);
       expect(hasBashResult).toBe(true);
-
 
       const requests = mockProvider.getRequests();
       const evalRequests = requests.filter((r: any) => {

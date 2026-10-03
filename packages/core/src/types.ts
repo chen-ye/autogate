@@ -1,14 +1,14 @@
-export type ClassifierVerdict = "ALLOW" | "BLOCK" | "UNSURE"
-export type ReviewFallbackMode = "native" | "ntfy"
+export type ClassifierVerdict = "ALLOW" | "BLOCK" | "UNSURE";
+export type ReviewFallbackMode = "native" | "ntfy";
 
-export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
-export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH"
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH";
 
 export interface ClassifierResult {
-  verdict: ClassifierVerdict
-  risk_level?: RiskLevel
-  user_authorization?: UserAuthorization
-  reason?: string
+  verdict: ClassifierVerdict;
+  risk_level?: RiskLevel;
+  user_authorization?: UserAuthorization;
+  reason?: string;
 }
 
 export const CLASSIFIER_JSON_SCHEMA = {
@@ -31,61 +31,60 @@ export const CLASSIFIER_JSON_SCHEMA = {
     },
   },
   required: ["risk_level", "user_authorization", "verdict", "reason"],
-} as const
+} as const;
 
 export interface EnvironmentConfig {
-  trustedDomains?: string[]
-  trustedGitRemotes?: string[]
-  trustedPaths?: string[]
+  trustedDomains?: string[];
+  trustedGitRemotes?: string[];
+  trustedPaths?: string[];
 }
 export interface OmpHarnessConfig {
-  reviewFallbackMode?: "native" | "ntfy"
-  evalLogFile?: string
+  reviewFallbackMode?: "native" | "ntfy";
+  evalLogFile?: string;
 }
 
 export interface OpenCodeHarnessConfig {
-  serverUrl?: string
+  serverUrl?: string;
 }
 
 export interface PaseoHarnessConfig {
-  timelineBadges?: boolean
-  notifyOnVerdict?: boolean
+  timelineBadges?: boolean;
+  notifyOnVerdict?: boolean;
   /**
    * Specifies the provider/model string (e.g. "omp", "antigravity") for native evaluation in Paseo.
    */
-  evaluatorProvider?: string
+  evaluatorProvider?: string;
   /**
    * Forces using DirectApiEvaluator instead of Paseo agent creation.
    */
-  useDirectApi?: boolean
+  useDirectApi?: boolean;
 }
 
 export interface AutoGateConfig {
-  autoMode: boolean
-  ntfyTopic: string
-  ntfyServer: string
-  ntfyToken?: string
-  classifierModel: string
-  classifierTimeout?: number
-  consecutiveBlockThreshold?: number
-  notifyOnVerdict?: boolean
-  environment?: EnvironmentConfig
-  serverUrl?: string
+  autoMode: boolean;
+  ntfyTopic: string;
+  ntfyServer: string;
+  ntfyToken?: string;
+  classifierModel: string;
+  classifierTimeout?: number;
+  consecutiveBlockThreshold?: number;
+  notifyOnVerdict?: boolean;
+  environment?: EnvironmentConfig;
+  serverUrl?: string;
   /**
    * @deprecated Kept for backward compatibility. Use config.omp?.reviewFallbackMode or harness-level settings instead.
    */
-  reviewFallbackMode?: ReviewFallbackMode
-  evalLogFile?: string
-  omp?: OmpHarnessConfig
-  opencode?: OpenCodeHarnessConfig
-  paseo?: PaseoHarnessConfig
+  reviewFallbackMode?: ReviewFallbackMode;
+  evalLogFile?: string;
+  omp?: OmpHarnessConfig;
+  opencode?: OpenCodeHarnessConfig;
+  paseo?: PaseoHarnessConfig;
 }
 
-
 export interface BaseAdapter {
-  readonly name: string
-  start?(): Promise<void> | void
-  dispose?(): Promise<void> | void
+  readonly name: string;
+  start?(): Promise<void> | void;
+  dispose?(): Promise<void> | void;
 }
 
 export interface HarnessAdapter extends BaseAdapter {
@@ -93,100 +92,103 @@ export interface HarnessAdapter extends BaseAdapter {
 }
 
 export interface GateAction {
-  id: string
-  harness: string
-  sessionID: string
-  toolName: string
-  commandString?: string
-  targetPath?: string
-  rawArgs?: unknown
-  workspaceRoot: string
-  userPrompt: string
-  subagentPrompt?: string
-  environment?: EnvironmentConfig
-  metadata?: Record<string, unknown>
-  signal?: AbortSignal
+  id: string;
+  harness: string;
+  sessionID: string;
+  toolName: string;
+  commandString?: string;
+  targetPath?: string;
+  rawArgs?: unknown;
+  workspaceRoot: string;
+  userPrompt: string;
+  subagentPrompt?: string;
+  environment?: EnvironmentConfig;
+  metadata?: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 export interface GateDecision {
-  verdict: ClassifierVerdict
-  riskLevel?: RiskLevel
-  userAuthorization?: UserAuthorization
-  reason: string
-  safeTransformAlternative?: string
-  cached?: boolean
-  reply?: "once" | "always" | "reject"
+  verdict: ClassifierVerdict;
+  riskLevel?: RiskLevel;
+  userAuthorization?: UserAuthorization;
+  reason: string;
+  safeTransformAlternative?: string;
+  cached?: boolean;
+  reply?: "once" | "always" | "reject";
 }
 
 export interface ReviewAction {
-  id: string
-  label: string
-  reply: "once" | "always" | "reject"
+  id: string;
+  label: string;
+  reply: "once" | "always" | "reject";
 }
 
 export interface ReviewRequest {
-  id: string
-  title: string
-  message: string
-  priority?: string
-  tags?: string[]
-  actions?: ReviewAction[]
+  id: string;
+  title: string;
+  message: string;
+  priority?: string;
+  tags?: string[];
+  actions?: ReviewAction[];
 }
 
 export interface ReviewResponse {
-  req_id: string
-  reply: "once" | "always" | "reject"
-  source?: string
+  req_id: string;
+  reply: "once" | "always" | "reject";
+  source?: string;
 }
 
 export interface NotifierAdapter extends BaseAdapter {
-  publish(request: ReviewRequest, signal?: AbortSignal): Promise<void>
-  listen(onResponse: (resp: ReviewResponse) => Promise<void>, signal?: AbortSignal): Promise<() => void>
-  updateStatus(requestId: string, status: string, details?: string): Promise<void>
+  publish(request: ReviewRequest, signal?: AbortSignal): Promise<void>;
+  listen(
+    onResponse: (resp: ReviewResponse) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<() => void>;
+  updateStatus(requestId: string, status: string, details?: string): Promise<void>;
 }
 
 export interface GateEvaluator {
-  readonly name: string
-  evaluate(action: GateAction, options?: Record<string, unknown>): Promise<ClassifierResult>
+  readonly name: string;
+  evaluate(action: GateAction, options?: Record<string, unknown>): Promise<ClassifierResult>;
 }
 
 export interface EngineOptions {
-  config?: AutoGateConfig
-  adapter?: NotifierAdapter
-  evaluator?: GateEvaluator
-  workspaceRoot?: string
-  client?: any
-  remoteReviewEnabled?: boolean
+  config?: AutoGateConfig;
+  adapter?: NotifierAdapter;
+  evaluator?: GateEvaluator;
+  workspaceRoot?: string;
+  client?: any;
+  remoteReviewEnabled?: boolean;
 }
 
 // Backward compatibility aliases
-export type NotificationPayload = ReviewRequest
-export type ApprovalResponse = ReviewResponse
-export type RemoteAdapter = NotifierAdapter
-export type NotificationAction = ReviewAction
-export type PermissionEventData = any
+export type NotificationPayload = ReviewRequest;
+export type ApprovalResponse = ReviewResponse;
+export type RemoteAdapter = NotifierAdapter;
+export type NotificationAction = ReviewAction;
+export type PermissionEventData = any;
 
 export interface ClassifyInput {
   // deno-lint-ignore no-explicit-any
-  client: any
-  model?: string
-  request?: PermissionEventData
-  userPrompt?: string
-  subagentPrompt?: string
-  directory?: string
-  actionName?: string
-  actionArgs?: unknown
-  workspaceRoot?: string
-  environment?: EnvironmentConfig
-  config?: any
+  client: any;
+  model?: string;
+  request?: PermissionEventData;
+  userPrompt?: string;
+  subagentPrompt?: string;
+  directory?: string;
+  actionName?: string;
+  actionArgs?: unknown;
+  workspaceRoot?: string;
+  environment?: EnvironmentConfig;
+  config?: any;
 }
 
 export interface BuildClassifierPromptInput {
-  request?: PermissionEventData
-  userPrompt?: string
-  subagentPrompt?: string
-  actionName?: string
-  actionArgs?: unknown
-  workspaceRoot?: string
-  directory?: string
-  environment?: EnvironmentConfig
+  request?: PermissionEventData;
+  userPrompt?: string;
+  subagentPrompt?: string;
+  actionName?: string;
+  actionArgs?: unknown;
+  workspaceRoot?: string;
+  directory?: string;
+  environment?: EnvironmentConfig;
 }

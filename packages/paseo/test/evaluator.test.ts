@@ -46,7 +46,7 @@ class MockServer {
       if (current) {
         this.listeners.set(
           eventName,
-          current.filter((fn) => fn !== listener)
+          current.filter((fn) => fn !== listener),
         );
       }
     };
@@ -221,7 +221,10 @@ describe("PaseoNativeEvaluator", () => {
       } as any;
 
       await evaluator.evaluate(action);
-      assert.strictEqual(capturedOptions.labels?.["autogate.targetAgentId"], "session-from-lower-d");
+      assert.strictEqual(
+        capturedOptions.labels?.["autogate.targetAgentId"],
+        "session-from-lower-d",
+      );
     });
 
     it("locks evaluator agents to modeId 'ask' and omits toolPolicy so Paseo never throws ToolPolicyUnsupportedError", async () => {
@@ -490,7 +493,7 @@ describe("PaseoNativeEvaluator", () => {
 
       assert.strictEqual(
         capturedOptions.config?.provider,
-        "omp/litellm/gemini/gemini-flash-lite-latest"
+        "omp/litellm/gemini/gemini-flash-lite-latest",
       );
     });
 
@@ -590,7 +593,7 @@ describe("PaseoNativeEvaluator", () => {
 
       assert.strictEqual(
         capturedOptions.config?.provider,
-        "omp/litellm/gemini/gemini-flash-lite-latest"
+        "omp/litellm/gemini/gemini-flash-lite-latest",
       );
     });
 
@@ -671,7 +674,7 @@ describe("PaseoNativeEvaluator", () => {
 
       const evaluator = new PaseoNativeEvaluator(mockPaseo);
       const result = await evaluator.evaluate(
-        createMockAction({ commandString: "mkfs.ext4 /dev/sda" })
+        createMockAction({ commandString: "mkfs.ext4 /dev/sda" }),
       );
 
       assert.strictEqual(result.verdict, "BLOCK");
@@ -717,7 +720,7 @@ describe("PaseoNativeEvaluator", () => {
         waitForFinish: async () => ({
           status: "idle",
           lastMessage:
-            "Here is the evaluation result:\n```json\n{\n  \"verdict\": \"ALLOW\",\n  \"risk_level\": \"LOW\",\n  \"user_authorization\": \"HIGH\",\n  \"reason\": \"Fenced code json response\"\n}\n```",
+            'Here is the evaluation result:\n```json\n{\n  "verdict": "ALLOW",\n  "risk_level": "LOW",\n  "user_authorization": "HIGH",\n  "reason": "Fenced code json response"\n}\n```',
         }),
       };
 
@@ -889,7 +892,7 @@ describe("PaseoNativeEvaluator", () => {
                       status: "idle",
                       lastMessage: JSON.stringify({ verdict: "ALLOW", reason: "ok" }),
                     }),
-                  200
+                  200,
                 );
               });
             },

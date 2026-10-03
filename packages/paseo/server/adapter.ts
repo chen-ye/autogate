@@ -72,9 +72,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         process.env.AUTOGATE_INFERENCE_URL ||
         process.env.GEMINI_BASE_URL,
       model:
-        (options?.classifierModel as string) ||
-        config.classifierModel ||
-        "gemini-3.5-flash-lite",
+        (options?.classifierModel as string) || config.classifierModel || "gemini-3.5-flash-lite",
       timeoutMs: config.classifierTimeout,
     });
 
@@ -101,18 +99,12 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
       });
 
     if (this.server && typeof this.server.on === "function") {
-      const unregReq = this.server.on(
-        "agent.permission_requested",
-        this.onPermissionRequested
-      );
+      const unregReq = this.server.on("agent.permission_requested", this.onPermissionRequested);
       if (typeof unregReq === "function") {
         this.unregisterRequested = unregReq;
       }
 
-      const unregRes = this.server.on(
-        "agent.permission_resolved",
-        this.onPermissionResolved
-      );
+      const unregRes = this.server.on("agent.permission_resolved", this.onPermissionResolved);
       if (typeof unregRes === "function") {
         this.unregisterResolved = unregRes;
       }
@@ -149,11 +141,9 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     }
     if (this.ntfyAdapter && typeof this.ntfyAdapter.listen === "function") {
       try {
-        const stop = await this.ntfyAdapter.listen(
-          async (resp: ReviewResponse) => {
-            await this.handleRemoteReply(resp);
-          }
-        );
+        const stop = await this.ntfyAdapter.listen(async (resp: ReviewResponse) => {
+          await this.handleRemoteReply(resp);
+        });
         if (this.isDisposed) {
           try {
             stop();
@@ -174,10 +164,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
   public async handleRemoteReply(resp: ReviewResponse): Promise<void> {
     if (this.isDisposed) return;
     const requestId =
-      resp.req_id ??
-      (resp as any).id ??
-      (resp as any).requestId ??
-      (resp as any).requestID;
+      resp.req_id ?? (resp as any).id ?? (resp as any).requestId ?? (resp as any).requestID;
     if (!requestId) return;
 
     const pending = this.pendingRequests.get(requestId);
@@ -213,10 +200,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     await this.handleRemoteReply(resp);
   }
 
-  private onPermissionRequested = async (
-    event: any,
-    context?: any
-  ): Promise<void> => {
+  private onPermissionRequested = async (event: any, context?: any): Promise<void> => {
     if (this.isDisposed) return;
     try {
       if (context?.paseo) {
@@ -251,7 +235,6 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         return;
       }
 
-
       const action = extractActionFromRequest(event);
       console.log("[AutoGate] onPermissionRequested for:", action.toolName, action.commandString);
       const agent = this.getAgent(event?.agent?.id, event, context);
@@ -260,7 +243,8 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
 
       if (this.config.paseo?.timelineBadges !== false) {
         try {
-          const targetAgent = this.getAgent(event?.agent?.id || action.sessionID, event, context) ?? agent;
+          const targetAgent =
+            this.getAgent(event?.agent?.id || action.sessionID, event, context) ?? agent;
           let timelineAgent = targetAgent;
           if (!timelineAgent?.timeline?.append) {
             const client = context?.paseo ?? this.getPaseoClient();
@@ -290,9 +274,9 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
           }
         } catch {
           // Wrapped in a try/catch so timeline append failures never disrupt permission resolution.
-}
-}
-if (decision.verdict === "ALLOW") {
+        }
+      }
+      if (decision.verdict === "ALLOW") {
         if (agent && typeof agent.respondToPermission === "function") {
           try {
             await agent.respondToPermission({
@@ -336,10 +320,10 @@ if (decision.verdict === "ALLOW") {
             target: action.commandString
               ? [action.commandString]
               : action.targetPath
-              ? [action.targetPath]
-              : action.rawArgs
-              ? [String(action.rawArgs)]
-              : action.toolName,
+                ? [action.targetPath]
+                : action.rawArgs
+                  ? [String(action.rawArgs)]
+                  : action.toolName,
             reason: decision.reason,
             risk_level: decision.riskLevel,
             user_authorization: decision.userAuthorization,
@@ -443,10 +427,7 @@ if (decision.verdict === "ALLOW") {
       this.unregisterRequested = undefined;
     } else if (typeof this.server?.off === "function") {
       try {
-        this.server.off(
-          "agent.permission_requested",
-          this.onPermissionRequested
-        );
+        this.server.off("agent.permission_requested", this.onPermissionRequested);
       } catch {}
     }
 
@@ -457,10 +438,7 @@ if (decision.verdict === "ALLOW") {
       this.unregisterResolved = undefined;
     } else if (typeof this.server?.off === "function") {
       try {
-        this.server.off(
-          "agent.permission_resolved",
-          this.onPermissionResolved
-        );
+        this.server.off("agent.permission_resolved", this.onPermissionResolved);
       } catch {}
     }
 

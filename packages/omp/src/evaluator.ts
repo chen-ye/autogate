@@ -34,10 +34,27 @@ export class OmpNativeEvaluator implements GateEvaluator {
     arg1?: (() => any) | any | Record<string, any>,
     arg2?: string | any | Record<string, any>,
     arg3?: string | number | Record<string, any>,
-    arg4?: number | Record<string, any>
+    arg4?: number | Record<string, any>,
   ) {
-    this.evalLogFile = (arg1 as any)?.evalLogFile ?? (arg2 as any)?.evalLogFile ?? (arg3 as any)?.evalLogFile ?? (arg4 as any)?.evalLogFile;
-    if (typeof arg1 === "object" && arg1 !== null && !Array.isArray(arg1) && typeof (arg1 as any).evaluate !== "function" && !(arg1 as any).api && !(arg1 as any).id && typeof arg1 !== "function" && ("classifierTimeout" in arg1 || "model" in arg1 || "fallbackModel" in arg1 || "logger" in arg1 || "evalLogFile" in arg1)) {
+    this.evalLogFile =
+      (arg1 as any)?.evalLogFile ??
+      (arg2 as any)?.evalLogFile ??
+      (arg3 as any)?.evalLogFile ??
+      (arg4 as any)?.evalLogFile;
+    if (
+      typeof arg1 === "object" &&
+      arg1 !== null &&
+      !Array.isArray(arg1) &&
+      typeof (arg1 as any).evaluate !== "function" &&
+      !(arg1 as any).api &&
+      !(arg1 as any).id &&
+      typeof arg1 !== "function" &&
+      ("classifierTimeout" in arg1 ||
+        "model" in arg1 ||
+        "fallbackModel" in arg1 ||
+        "logger" in arg1 ||
+        "evalLogFile" in arg1)
+    ) {
       this.fallbackModel = (arg1 as any).model ?? (arg1 as any).fallbackModel;
       this.fallbackApiKey = (arg1 as any).apiKey ?? (arg1 as any).fallbackApiKey;
       this.fallbackSessionId = (arg1 as any).sessionId ?? (arg1 as any).fallbackSessionId;
@@ -95,14 +112,19 @@ export class OmpNativeEvaluator implements GateEvaluator {
   }
 
   private async appendEvalLog(entry: Record<string, any>): Promise<void> {
-    const targetFile = this.evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
+    const targetFile =
+      this.evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
     try {
       await fs.mkdir(path.dirname(targetFile), { recursive: true });
       await fs.appendFile(targetFile, JSON.stringify(entry) + "\n", "utf8");
     } catch {}
   }
 
-  private log(level: "debug" | "info" | "warn" | "error", message: string, data?: Record<string, any>) {
+  private log(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    data?: Record<string, any>,
+  ) {
     const logFn = this.logger?.[level] ?? console[level] ?? console.log;
     try {
       logFn.call(this.logger ?? console, message, data);
@@ -161,7 +183,8 @@ export class OmpNativeEvaluator implements GateEvaluator {
       ctx = this.getCtx?.() || this.currentCtx;
       try {
         if (ctx?.models?.resolve) {
-          model = ctx.models.resolve("@smol") || ctx.models.resolve("default") || ctx.model || model;
+          model =
+            ctx.models.resolve("@smol") || ctx.models.resolve("default") || ctx.model || model;
         } else if (ctx?.model) {
           model = ctx.model || model;
         }
@@ -186,16 +209,18 @@ export class OmpNativeEvaluator implements GateEvaluator {
       let apiKey = this.fallbackApiKey;
       try {
         if (ctx?.modelRegistry?.getApiKey && model) {
-          const resolvedKey = await ctx.modelRegistry.getApiKey(model, sessionId)
-          if (resolvedKey) apiKey = resolvedKey
-        } else if (ctx?.model?.apiKey) {
-          apiKey = ctx.modelRegistry.getApiKey(model, sessionId) || apiKey;
+          const resolvedKey = await ctx.modelRegistry.getApiKey(model, sessionId);
+          if (resolvedKey) apiKey = resolvedKey;
         } else if (ctx?.model?.apiKey) {
           apiKey = ctx.model.apiKey || apiKey;
         }
       } catch {}
 
-      apiKey = apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AUTOGATE_API_KEY;
+      apiKey =
+        apiKey ||
+        process.env.GEMINI_API_KEY ||
+        process.env.GOOGLE_API_KEY ||
+        process.env.AUTOGATE_API_KEY;
 
       this.log("debug", "[AutoGate OMP Evaluator] Resolved API key", {
         provider: model?.provider,
@@ -235,7 +260,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
             maxTokens: 1024,
             signal: combinedSignal,
             toolChoice: { type: "function", name: "classify_result" },
-          }
+          },
         );
         lastResponse = response;
         if (timeoutSignal.aborted) {
@@ -271,7 +296,10 @@ export class OmpNativeEvaluator implements GateEvaluator {
         }
         const toolCall = Array.isArray(response.content)
           ? response.content.find(
-              (c: any) => c && c.type === "toolCall" && (c.name === "classify_result" || c.function?.name === "classify_result")
+              (c: any) =>
+                c &&
+                c.type === "toolCall" &&
+                (c.name === "classify_result" || c.function?.name === "classify_result"),
             )
           : undefined;
 
@@ -286,12 +314,22 @@ export class OmpNativeEvaluator implements GateEvaluator {
           }
 
           if (args && typeof args === "object") {
-            const verdictRaw = String(args.verdict ?? "").toUpperCase().trim();
+            const verdictRaw = String(args.verdict ?? "")
+              .toUpperCase()
+              .trim();
             const reason = typeof args.reason === "string" ? args.reason : undefined;
-            const riskRaw = String(args.risk_level ?? "").toUpperCase().trim();
-            const authRaw = String(args.user_authorization ?? "").toUpperCase().trim();
-            const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw) ? (riskRaw as any) : undefined;
-            const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw) ? (authRaw as any) : undefined;
+            const riskRaw = String(args.risk_level ?? "")
+              .toUpperCase()
+              .trim();
+            const authRaw = String(args.user_authorization ?? "")
+              .toUpperCase()
+              .trim();
+            const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw)
+              ? (riskRaw as any)
+              : undefined;
+            const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw)
+              ? (authRaw as any)
+              : undefined;
 
             if (verdictRaw === "ALLOW" || verdictRaw === "BLOCK" || verdictRaw === "UNSURE") {
               validResult = {
@@ -305,23 +343,38 @@ export class OmpNativeEvaluator implements GateEvaluator {
           }
         }
 
-        this.log("warn", "[AutoGate OMP Evaluator] Model did not invoke classify_result tool call; re-prompting", { attempt });
+        this.log(
+          "warn",
+          "[AutoGate OMP Evaluator] Model did not invoke classify_result tool call; re-prompting",
+          { attempt },
+        );
         messages.push(response);
         messages.push({
           role: "user",
-          content: "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.",
+          content:
+            "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.",
           timestamp: Date.now(),
         });
       }
       const durationMs = Math.round(performance.now() - startTime);
       const rawThinking = Array.isArray(lastResponse?.content)
         ? lastResponse.content
-            .filter((c: any) => c && (c.type === "thinking" || c.type === "reasoning" || c.type === "reasoning_text"))
+            .filter(
+              (c: any) =>
+                c &&
+                (c.type === "thinking" || c.type === "reasoning" || c.type === "reasoning_text"),
+            )
             .map((c: any) => c.thinking ?? c.text ?? c.reasoning ?? c.reasoning_content)
             .filter(Boolean)
             .join("\n") || undefined
         : undefined;
-      const thinking = rawThinking || lastResponse?.reasoning_content || lastResponse?.reasoning || lastResponse?.reasoningContent || (lastResponse as any)?.thinking || undefined;
+      const thinking =
+        rawThinking ||
+        lastResponse?.reasoning_content ||
+        lastResponse?.reasoning ||
+        lastResponse?.reasoningContent ||
+        (lastResponse as any)?.thinking ||
+        undefined;
 
       reasoningTokens =
         lastResponse?.reasoningTokens ??

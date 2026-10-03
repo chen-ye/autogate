@@ -1,101 +1,105 @@
-import { Server } from "bun"
+import { Server } from "bun";
 
 export interface MockResponse {
-  text?: string
-  content?: Array<Record<string, unknown>>
+  text?: string;
+  content?: Array<Record<string, unknown>>;
   toolCall?: {
-    name: string
-    input: Record<string, unknown> | string
-  }
-  thinking?: string
-  reasoningTokens?: number
-  delayMs?: number
-  status?: number
+    name: string;
+    input: Record<string, unknown> | string;
+  };
+  thinking?: string;
+  reasoningTokens?: number;
+  delayMs?: number;
+  status?: number;
 }
 
 export interface RecordedRequest {
-  url: string
-  method: string
-  headers: Record<string, string>
-  body: unknown
-  timestamp: number
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: unknown;
+  timestamp: number;
 }
 
 export class MockInferenceProvider {
-  private server: ReturnType<typeof Bun.serve>
-  private responseQueue: MockResponse[] = []
-  private requests: RecordedRequest[] = []
+  private server: ReturnType<typeof Bun.serve>;
+  private responseQueue: MockResponse[] = [];
+  private requests: RecordedRequest[] = [];
 
   constructor(port = 0) {
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port,
       fetch: async (req) => {
-        return this.handleRequest(req)
+        return this.handleRequest(req);
       },
-    })
+    });
   }
 
   get port(): number {
-    return this.server.port
+    return this.server.port;
   }
 
   get url(): string {
-    return `http://127.0.0.1:${this.server.port}`
+    return `http://127.0.0.1:${this.server.port}`;
   }
 
   get baseUrl(): string {
-    return this.url
+    return this.url;
   }
 
   public enqueueText(text: string): void {
-    this.responseQueue.push({ text })
+    this.responseQueue.push({ text });
   }
 
-  public enqueueToolCall(name: string, input: Record<string, unknown> | string, text?: string): void {
-    this.responseQueue.push({ toolCall: { name, input }, text })
+  public enqueueToolCall(
+    name: string,
+    input: Record<string, unknown> | string,
+    text?: string,
+  ): void {
+    this.responseQueue.push({ toolCall: { name, input }, text });
   }
 
   public enqueueResponse(response: MockResponse): void {
-    this.responseQueue.push(response)
+    this.responseQueue.push(response);
   }
 
   public pushResponse(response: MockResponse): void {
-    this.responseQueue.push(response)
+    this.responseQueue.push(response);
   }
 
   public getRecordedRequests(): RecordedRequest[] {
-    return this.requests
+    return this.requests;
   }
 
   public clear(): void {
-    this.requests = []
-    this.responseQueue = []
+    this.requests = [];
+    this.responseQueue = [];
   }
 
   public async close(): Promise<void> {
-    await this.server.stop(true)
+    await this.server.stop(true);
   }
 
   public async handleRequest(req: Request, preParsedBody?: unknown): Promise<Response> {
-    const urlObj = new URL(req.url)
-    const path = urlObj.pathname
-    const method = req.method
+    const urlObj = new URL(req.url);
+    const path = urlObj.pathname;
+    const method = req.method;
 
-    const headers: Record<string, string> = {}
+    const headers: Record<string, string> = {};
     req.headers.forEach((val, key) => {
-      headers[key] = val
-    })
+      headers[key] = val;
+    });
 
-    let body: unknown = preParsedBody ?? null
+    let body: unknown = preParsedBody ?? null;
     if (body === null && req.body) {
       try {
-        const text = await req.text()
+        const text = await req.text();
         if (text) {
           try {
-            body = JSON.parse(text)
+            body = JSON.parse(text);
           } catch {
-            body = text
+            body = text;
           }
         }
       } catch {}
@@ -106,7 +110,7 @@ export class MockInferenceProvider {
       headers,
       body,
       timestamp: Date.now(),
-    })
+    });
     if (method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -115,7 +119,7 @@ export class MockInferenceProvider {
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
           "Access-Control-Allow-Headers": "*",
         },
-      })
+      });
     }
 
     if (path === "/v1/models" || path === "/models") {
@@ -132,38 +136,41 @@ export class MockInferenceProvider {
         {
           status: 200,
           headers: { "Content-Type": "application/json" },
-        }
-      )
+        },
+      );
     }
 
     if (this.responseQueue.length === 0) {
       return new Response(JSON.stringify({ error: "No mock responses queued" }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
-      })
+      });
     }
 
-    const mockRes = this.responseQueue.shift()!
+    const mockRes = this.responseQueue.shift()!;
     if (mockRes.delayMs && mockRes.delayMs > 0) {
-      await Bun.sleep(mockRes.delayMs)
+      await Bun.sleep(mockRes.delayMs);
     }
-    const status = mockRes.status ?? 200
+    const status = mockRes.status ?? 200;
 
     if (path.includes("generateContent")) {
       const isGeminiStreaming =
-        path.includes("streamGenerateContent") || (typeof body === "object" && body !== null && (body as Record<string, unknown>).stream === true)
-      const parts: Array<Record<string, unknown>> = []
+        path.includes("streamGenerateContent") ||
+        (typeof body === "object" &&
+          body !== null &&
+          (body as Record<string, unknown>).stream === true);
+      const parts: Array<Record<string, unknown>> = [];
       if (mockRes.toolCall) {
         parts.push({
           functionCall: {
             name: mockRes.toolCall.name,
             args: mockRes.toolCall.input,
           },
-        })
+        });
       } else {
         parts.push({
           text: mockRes.text ?? "",
-        })
+        });
       }
 
       const geminiResp = {
@@ -182,42 +189,51 @@ export class MockInferenceProvider {
           candidatesTokenCount: 10,
           totalTokenCount: 20,
         },
-      }
+      };
 
       if (isGeminiStreaming) {
         const stream = new ReadableStream({
           start(controller) {
-            const encoder = new TextEncoder()
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(geminiResp)}\n\n`)
-            )
-            controller.close()
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(geminiResp)}\n\n`));
+            controller.close();
           },
-        })
+        });
         return new Response(stream, {
           status,
           headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
+            Connection: "keep-alive",
           },
-        })
+        });
       } else {
         return new Response(JSON.stringify(geminiResp), {
           status,
           headers: { "Content-Type": "application/json" },
-        })
+        });
       }
     }
 
-    const isStreaming = (typeof body === "object" && body !== null && (body as Record<string, unknown>).stream === true) || path.includes("stream")
-    const message: Record<string, unknown> = { role: "assistant" }
+    const isStreaming =
+      (typeof body === "object" &&
+        body !== null &&
+        (body as Record<string, unknown>).stream === true) ||
+      path.includes("stream");
+    const message: Record<string, unknown> = { role: "assistant" };
     if (mockRes.content) {
-      message.content = mockRes.content
+      message.content = mockRes.content;
     } else if (mockRes.toolCall) {
-      message.content = mockRes.thinking ? [{ type: "thinking", thinking: mockRes.thinking }] : null
+      message.content = mockRes.thinking
+        ? [{ type: "thinking", thinking: mockRes.thinking }]
+        : null;
     } else {
-      message.content = mockRes.thinking ? [{ type: "thinking", thinking: mockRes.thinking }, { type: "text", text: mockRes.text ?? "" }] : (mockRes.text ?? "")
+      message.content = mockRes.thinking
+        ? [
+            { type: "thinking", thinking: mockRes.thinking },
+            { type: "text", text: mockRes.text ?? "" },
+          ]
+        : (mockRes.text ?? "");
     }
     if (mockRes.toolCall) {
       message.tool_calls = [
@@ -232,12 +248,12 @@ export class MockInferenceProvider {
                 : JSON.stringify(mockRes.toolCall.input),
           },
         },
-      ]
+      ];
     }
     if (mockRes.thinking) {
-      message.reasoning_content = mockRes.thinking
-      message.reasoning = mockRes.thinking
-      message.reasoningContent = mockRes.thinking
+      message.reasoning_content = mockRes.thinking;
+      message.reasoning = mockRes.thinking;
+      message.reasoningContent = mockRes.thinking;
     }
 
     if (isStreaming) {
@@ -268,7 +284,7 @@ export class MockInferenceProvider {
             finish_reason: null,
           },
         ],
-      }
+      };
       const doneChunk = {
         id: chunkObj.id,
         object: "chat.completion.chunk",
@@ -281,28 +297,24 @@ export class MockInferenceProvider {
             finish_reason: mockRes.toolCall ? "tool_calls" : "stop",
           },
         ],
-      }
+      };
       const stream = new ReadableStream({
         start(controller) {
-          const encoder = new TextEncoder()
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(chunkObj)}\n\n`)
-          )
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(doneChunk)}\n\n`)
-          )
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"))
-          controller.close()
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunkObj)}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneChunk)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
         },
-      })
+      });
       return new Response(stream, {
         status,
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          Connection: "keep-alive",
         },
-      })
+      });
     } else {
       const completionObj = {
         id: "chatcmpl-" + Math.random().toString(36).slice(2),
@@ -320,33 +332,37 @@ export class MockInferenceProvider {
           prompt_tokens: 10,
           completion_tokens: 10,
           total_tokens: 20,
-          ...(typeof mockRes.reasoningTokens === "number" ? {
-            reasoning_tokens: mockRes.reasoningTokens,
-            completion_tokens_details: { reasoning_tokens: mockRes.reasoningTokens },
-          } : {}),
+          ...(typeof mockRes.reasoningTokens === "number"
+            ? {
+                reasoning_tokens: mockRes.reasoningTokens,
+                completion_tokens_details: { reasoning_tokens: mockRes.reasoningTokens },
+              }
+            : {}),
         },
-        ...(typeof mockRes.reasoningTokens === "number" ? { reasoningTokens: mockRes.reasoningTokens } : {}),
-      }
+        ...(typeof mockRes.reasoningTokens === "number"
+          ? { reasoningTokens: mockRes.reasoningTokens }
+          : {}),
+      };
       return new Response(JSON.stringify(completionObj), {
         status,
         headers: { "Content-Type": "application/json" },
-      })
+      });
     }
   }
 
   public getNextResponse(): MockResponse | undefined {
-    return this.responseQueue.shift()
+    return this.responseQueue.shift();
   }
 
   getRequests(): RecordedRequest[] {
-    return this.requests
+    return this.requests;
   }
 
   clearRequests(): void {
-    this.requests = []
+    this.requests = [];
   }
 
   async stop(): Promise<void> {
-    await this.server.stop(true)
+    await this.server.stop(true);
   }
 }

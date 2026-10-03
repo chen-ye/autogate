@@ -6,13 +6,18 @@
   ],
   "type": "module",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "bunx oxlint packages test",
+    "format": "bunx oxfmt --write packages test",
+    "format:check": "bunx oxfmt --check packages test"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.8.0",
     "@oh-my-pi/pi-coding-agent": "link:../oh-my-pi/packages/coding-agent",
-    "@types/node": "^22.20.2",
     "@opencode/cli": "2.0.21",
-    "@opencode/cli-linux-x64": "2.0.21"
+    "@opencode/cli-linux-x64": "2.0.21",
+    "@types/node": "^22.20.2",
+    "oxfmt": "^0.71.0",
+    "oxlint": "^1.86.0"
   }
 }

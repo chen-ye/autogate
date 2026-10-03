@@ -7,11 +7,11 @@ describe("OMP Live Gate E2E Test Suite (Zero Mocks)", () => {
   let engine: AutoGateCoreEngine;
 
   beforeEach(() => {
-ntfyAdapter = new NtfyAdapter({
-server: "https://ntfy.sh",
+    ntfyAdapter = new NtfyAdapter({
+      server: "https://ntfy.sh",
       topic: topic,
       token: "***REMOVED***",
-});
+    });
     engine = new AutoGateCoreEngine({
       config: {
         autoMode: true,
@@ -39,15 +39,22 @@ server: "https://ntfy.sh",
             user_authorization = "LOW";
             reason = "Working tree discard protection";
           }
-          return new Response(JSON.stringify({
-            candidates: [{
-              content: {
-                parts: [{
-                  text: JSON.stringify({ risk_level, user_authorization, verdict, reason })
-                }],
-              },
-            }],
-          }), { status: 200, headers: { "Content-Type": "application/json" } });
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: JSON.stringify({ risk_level, user_authorization, verdict, reason }),
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
         },
       }),
     });
@@ -126,7 +133,17 @@ server: "https://ntfy.sh",
     const checkRateLimit = (resOrErr: any, text?: string) => {
       const status = resOrErr?.status;
       const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
-      if (status === 429 || status === 403 || str.includes("429") || str.includes("403") || str.includes("quota") || str.includes("rate limit") || str.includes("rate-limit") || str.includes("limit") || str.includes("forbidden")) {
+      if (
+        status === 429 ||
+        status === 403 ||
+        str.includes("429") ||
+        str.includes("403") ||
+        str.includes("quota") ||
+        str.includes("rate limit") ||
+        str.includes("rate-limit") ||
+        str.includes("limit") ||
+        str.includes("forbidden")
+      ) {
         console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
         if (unsubscribe) unsubscribe();
         return true;
@@ -162,7 +179,7 @@ server: "https://ntfy.sh",
       await new Promise((r) => setTimeout(r, 2000));
 
       const getRes = await fetch(`https://ntfy.sh/${topic}/json?poll=1`, {
-        headers: { "Authorization": "Bearer ***REMOVED***" }
+        headers: { Authorization: "Bearer ***REMOVED***" },
       });
       const getTxt = await getRes.text().catch(() => "");
       if (checkRateLimit(getRes, getTxt)) return;
@@ -173,7 +190,7 @@ server: "https://ntfy.sh",
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer ***REMOVED***"
+          Authorization: "Bearer ***REMOVED***",
         },
         body: JSON.stringify({ req_id: reqId, reply: "once" }),
       });

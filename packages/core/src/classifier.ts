@@ -1,5 +1,5 @@
-import fs from "fs"
-import path from "path"
+import fs from "fs";
+import path from "path";
 import type {
   ClassifierVerdict,
   ClassifierResult,
@@ -8,97 +8,122 @@ import type {
   UserAuthorization,
   EnvironmentConfig,
   BuildClassifierPromptInput,
-} from "./types"
-import { probeTargetContext } from "./prober"
+} from "./types";
+import { probeTargetContext } from "./prober";
 
 export function formatUserTranscript(userPrompt?: string): string {
   if (!userPrompt || !userPrompt.trim()) {
-    return "*(No conversation transcript available)*"
+    return "*(No conversation transcript available)*";
   }
-  return userPrompt.trim()
+  return userPrompt.trim();
 }
 
 export function formatActionDetails(actionName: string, actionArgs: unknown): string {
-  if (!actionArgs) return ""
+  if (!actionArgs) return "";
 
-  let commandStr: string | null = null
-  let directory: string | null = null
-  let pathStr: string | null = null
+  let commandStr: string | null = null;
+  let directory: string | null = null;
+  let pathStr: string | null = null;
 
   if (typeof actionArgs === "string") {
-    commandStr = actionArgs
-    pathStr = actionArgs
+    commandStr = actionArgs;
+    pathStr = actionArgs;
   } else if (Array.isArray(actionArgs)) {
     if (actionArgs.length > 0) {
-      const joined = actionArgs.filter((a) => typeof a === "string").join(" ")
-      commandStr = joined
-      pathStr = joined
+      const joined = actionArgs.filter((a) => typeof a === "string").join(" ");
+      commandStr = joined;
+      pathStr = joined;
     }
   } else if (typeof actionArgs === "object" && actionArgs !== null) {
-    const obj = actionArgs as Record<string, unknown>
+    const obj = actionArgs as Record<string, unknown>;
     if (typeof obj.command === "string") {
-      commandStr = obj.command
+      commandStr = obj.command;
     } else if (typeof obj.cmd === "string") {
-      commandStr = obj.cmd
+      commandStr = obj.cmd;
     } else if (typeof obj.code === "string") {
-      commandStr = obj.code
+      commandStr = obj.code;
     }
 
     if (typeof obj.path === "string" && obj.path.trim()) {
-      pathStr = obj.path.trim()
+      pathStr = obj.path.trim();
     } else if (typeof obj.filePath === "string" && obj.filePath.trim()) {
-      pathStr = obj.filePath.trim()
+      pathStr = obj.filePath.trim();
     } else if (typeof obj.file === "string" && obj.file.trim()) {
-      pathStr = obj.file.trim()
+      pathStr = obj.file.trim();
     }
-    if (Array.isArray(obj.patterns) && obj.patterns.length > 0 && typeof obj.patterns[0] === "string") {
-      const patternsJoined = obj.patterns.join(" ")
-      commandStr = commandStr ?? patternsJoined
-      pathStr = pathStr ?? patternsJoined
+    if (
+      Array.isArray(obj.patterns) &&
+      obj.patterns.length > 0 &&
+      typeof obj.patterns[0] === "string"
+    ) {
+      const patternsJoined = obj.patterns.join(" ");
+      commandStr = commandStr ?? patternsJoined;
+      pathStr = pathStr ?? patternsJoined;
     }
-    if (!pathStr && typeof (obj.metadata as any)?.filepath === "string" && (obj.metadata as any).filepath.trim()) {
-      pathStr = (obj.metadata as any).filepath.trim()
+    if (
+      !pathStr &&
+      typeof (obj.metadata as any)?.filepath === "string" &&
+      (obj.metadata as any).filepath.trim()
+    ) {
+      pathStr = (obj.metadata as any).filepath.trim();
     }
     if (typeof obj.directory === "string") {
-      directory = obj.directory
+      directory = obj.directory;
     } else if (typeof (obj.metadata as any)?.directory === "string") {
-      directory = (obj.metadata as any).directory
+      directory = (obj.metadata as any).directory;
     }
   }
 
   if (actionName === "external_directory") {
-    const target = pathStr || directory || commandStr || (typeof actionArgs === "object" ? JSON.stringify(actionArgs) : String(actionArgs))
-    return `- **Requested External Directory**: \`${target.trim()}\``
+    const target =
+      pathStr ||
+      directory ||
+      commandStr ||
+      (typeof actionArgs === "object" ? JSON.stringify(actionArgs) : String(actionArgs));
+    return `- **Requested External Directory**: \`${target.trim()}\``;
   }
 
-  if (actionName.startsWith("fs:") || actionName === "read" || actionName === "edit" || actionName === "write") {
-    const target = pathStr || commandStr || directory || (typeof actionArgs === "object" ? JSON.stringify(actionArgs) : String(actionArgs))
-    let details = `- **Target Path / Patterns**: \`${target.trim()}\``
+  if (
+    actionName.startsWith("fs:") ||
+    actionName === "read" ||
+    actionName === "edit" ||
+    actionName === "write"
+  ) {
+    const target =
+      pathStr ||
+      commandStr ||
+      directory ||
+      (typeof actionArgs === "object" ? JSON.stringify(actionArgs) : String(actionArgs));
+    let details = `- **Target Path / Patterns**: \`${target.trim()}\``;
     if (directory && directory !== target.trim()) {
-      details += `\n- **Target Directory**: \`${directory}\``
+      details += `\n- **Target Directory**: \`${directory}\``;
     }
-    return details
+    return details;
   }
 
   if (actionName === "eval") {
-    const lang = (actionArgs as any)?.language || (typeof actionArgs === "object" && actionArgs !== null && (actionArgs as any)?.lang) || "javascript"
-    const code = commandStr || (typeof (actionArgs as any)?.code === "string" ? (actionArgs as any).code : "")
+    const lang =
+      (actionArgs as any)?.language ||
+      (typeof actionArgs === "object" && actionArgs !== null && (actionArgs as any)?.lang) ||
+      "javascript";
+    const code =
+      commandStr || (typeof (actionArgs as any)?.code === "string" ? (actionArgs as any).code : "");
     if (code) {
-      return `- **Eval Code (${lang})**:\n\`\`\`${lang}\n${code.trim()}\n\`\`\``
+      return `- **Eval Code (${lang})**:\n\`\`\`${lang}\n${code.trim()}\n\`\`\``;
     }
   }
 
   if (actionName === "bash" || actionName === "shell:run") {
     if (commandStr) {
-      let details = `- **Command**:\n\`\`\`bash\n${commandStr.trim()}\n\`\`\``
+      let details = `- **Command**:\n\`\`\`bash\n${commandStr.trim()}\n\`\`\``;
       if (directory) {
-        details += `\n- **Target Directory**: \`${directory}\``
+        details += `\n- **Target Directory**: \`${directory}\``;
       }
-      return details
+      return details;
     }
   }
 
-  return `- **Action Arguments**:\n\`\`\`json\n${JSON.stringify(actionArgs, null, 2)}\n\`\`\``
+  return `- **Action Arguments**:\n\`\`\`json\n${JSON.stringify(actionArgs, null, 2)}\n\`\`\``;
 }
 
 export function stripOrchestratorMetaRules(text: string): string {
@@ -108,43 +133,48 @@ export function stripOrchestratorMetaRules(text: string): string {
     .replace(/<session-context>[\s\S]*?<\/session-context>/gi, "")
     .replace(/<orchestrator-rule>[\s\S]*?<\/orchestrator-rule>/gi, "")
     .replace(/<system-directive>[\s\S]*?<\/system-directive>/gi, "")
-    .replace(/<[a-zA-Z0-9_-]+-(?:instruction|directive|rule)>[\s\S]*?<\/[a-zA-Z0-9_-]+-(?:instruction|directive|rule)>/gi, "")
+    .replace(
+      /<[a-zA-Z0-9_-]+-(?:instruction|directive|rule)>[\s\S]*?<\/[a-zA-Z0-9_-]+-(?:instruction|directive|rule)>/gi,
+      "",
+    )
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<[^>]+>/g, "")
-    .trim()
+    .trim();
 }
 
 export function sanitizeUserPrompt(rawPrompt?: string): string {
-  if (!rawPrompt) return ""
-  let prompt = rawPrompt.trim()
+  if (!rawPrompt) return "";
+  let prompt = rawPrompt.trim();
   if (/<auto-slash-command[^>]*>/i.test(prompt) || prompt.includes("<auto-slash-command>")) {
-    const reqMatch = prompt.match(/<user-request>([\s\S]*?)<\/user-request>/i)
-    let req = reqMatch && reqMatch[1] ? stripOrchestratorMetaRules(reqMatch[1]) : ""
+    const reqMatch = prompt.match(/<user-request>([\s\S]*?)<\/user-request>/i);
+    let req = reqMatch && reqMatch[1] ? stripOrchestratorMetaRules(reqMatch[1]) : "";
     if (req.length > 0) {
-      return `Execute /start-work: ${req}`
+      return `Execute /start-work: ${req}`;
     }
-    const planMatch = prompt.match(/(?:\*\*Plan\*\*|Plan):\s*([^\n\r]+)/i)
+    const planMatch = prompt.match(/(?:\*\*Plan\*\*|Plan):\s*([^\n\r]+)/i);
     if (planMatch && planMatch[1]) {
-      const plan = stripOrchestratorMetaRules(planMatch[1].trim().replace(/^["'`]|["'`]$/g, ""))
+      const plan = stripOrchestratorMetaRules(planMatch[1].trim().replace(/^["'`]|["'`]$/g, ""));
       if (plan.length > 0) {
-        return `Execute plan: ${plan}`
+        return `Execute plan: ${plan}`;
       }
     }
-    const cleaned = stripOrchestratorMetaRules(prompt)
-    return cleaned || "Execute slash command"
+    const cleaned = stripOrchestratorMetaRules(prompt);
+    return cleaned || "Execute slash command";
   }
   if (prompt.includes("## Environment Trust Boundaries:") || prompt.includes("## Context:")) {
-    const match = prompt.match(/(?:Conversation Transcript[^\n]*|User's Recent Intent[^\n]*):?\s*(?:>\s*|"?)([\s\S]*?)(?:### Proposed Action|- \*\*Proposed Action|$)/i)
+    const match = prompt.match(
+      /(?:Conversation Transcript[^\n]*|User's Recent Intent[^\n]*):?\s*(?:>\s*|"?)([\s\S]*?)(?:### Proposed Action|- \*\*Proposed Action|$)/i,
+    );
     if (match && match[1]) {
-      prompt = match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim()
+      prompt = match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
       if (prompt.includes("## Environment Trust Boundaries:")) {
-        return sanitizeUserPrompt(prompt)
+        return sanitizeUserPrompt(prompt);
       }
-      return prompt
+      return prompt;
     }
-    return ""
+    return "";
   }
-  return prompt
+  return prompt;
 }
 
 /**
@@ -152,75 +182,77 @@ export function sanitizeUserPrompt(rawPrompt?: string): string {
  * so the classifier inspects real-world impact rather than the outer wrapper.
  */
 export function deobfuscatePayload(actionName: string, actionArgs: unknown): string | null {
-  if (!actionArgs) return null
+  if (!actionArgs) return null;
 
-  let cmd = ""
+  let cmd = "";
   if (typeof actionArgs === "string") {
-    cmd = actionArgs
+    cmd = actionArgs;
   } else if (Array.isArray(actionArgs)) {
-    cmd = actionArgs.filter((a) => typeof a === "string").join(" ")
+    cmd = actionArgs.filter((a) => typeof a === "string").join(" ");
   } else if (typeof actionArgs === "object") {
-    const obj = actionArgs as Record<string, unknown>
+    const obj = actionArgs as Record<string, unknown>;
     if (typeof obj.command === "string") {
-      cmd = obj.command
+      cmd = obj.command;
     } else if (Array.isArray(obj.patterns)) {
-      cmd = obj.patterns.join(" ")
+      cmd = obj.patterns.join(" ");
     } else if (typeof obj.cmd === "string") {
-      cmd = obj.cmd
+      cmd = obj.cmd;
     }
   }
 
-  if (!cmd.trim()) return null
+  if (!cmd.trim()) return null;
 
-  const findings: string[] = []
+  const findings: string[] = [];
 
   // 1. Detect base64 encoded pipes (e.g. echo "..." | base64 -d | sh)
-  const b64PipeMatch = cmd.match(/echo\s+["']?([A-Za-z0-9+/=]{4,})["']?\s*\|\s*(?:base64\s+(?:-d|--decode))\s*\|\s*(?:ba|z|da|k|tc)?sh/i)
+  const b64PipeMatch = cmd.match(
+    /echo\s+["']?([A-Za-z0-9+/=]{4,})["']?\s*\|\s*(?:base64\s+(?:-d|--decode))\s*\|\s*(?:ba|z|da|k|tc)?sh/i,
+  );
   if (b64PipeMatch && b64PipeMatch[1]) {
     try {
-      const decoded = Buffer.from(b64PipeMatch[1], "base64").toString("utf8")
-      findings.push(`Decoded base64 shell pipeline: "${decoded.trim()}"`)
+      const decoded = Buffer.from(b64PipeMatch[1], "base64").toString("utf8");
+      findings.push(`Decoded base64 shell pipeline: "${decoded.trim()}"`);
     } catch {}
   }
 
   // 2. Detect Python base64 exec (e.g. exec(base64.b64decode('...')))
-  const pyB64Match = cmd.match(/b64decode\s*\(\s*["']([A-Za-z0-9+/=]{4,})["']\s*\)/i)
+  const pyB64Match = cmd.match(/b64decode\s*\(\s*["']([A-Za-z0-9+/=]{4,})["']\s*\)/i);
   if (pyB64Match && pyB64Match[1]) {
     try {
-      const decoded = Buffer.from(pyB64Match[1], "base64").toString("utf8")
-      findings.push(`Decoded Python base64 exec payload: "${decoded.trim()}"`)
+      const decoded = Buffer.from(pyB64Match[1], "base64").toString("utf8");
+      findings.push(`Decoded Python base64 exec payload: "${decoded.trim()}"`);
     } catch {}
   }
 
   // 3. Detect wrapper sub-shells: (bash|sh|zsh) -c "..."
-  const shellWrapMatch = cmd.match(/(?:ba|z|da)?sh\s+-c\s+["']([^"']+)["']/i)
+  const shellWrapMatch = cmd.match(/(?:ba|z|da)?sh\s+-c\s+["']([^"']+)["']/i);
   if (shellWrapMatch && shellWrapMatch[1]) {
-    findings.push(`Unpacked inner sub-shell command: "${shellWrapMatch[1].trim()}"`)
+    findings.push(`Unpacked inner sub-shell command: "${shellWrapMatch[1].trim()}"`);
   }
 
   // 4. Detect Python inline commands: python3? -c "..."
-  const pyWrapMatch = cmd.match(/python[23]?\s+-c\s+["']([^"']+)["']/i)
+  const pyWrapMatch = cmd.match(/python[23]?\s+-c\s+["']([^"']+)["']/i);
   if (pyWrapMatch && pyWrapMatch[1]) {
-    findings.push(`Unpacked Python inline script: "${pyWrapMatch[1].trim()}"`)
+    findings.push(`Unpacked Python inline script: "${pyWrapMatch[1].trim()}"`);
   }
 
   // 5. Detect Node/Bun inline eval: (node|bun)\s+(-e|--eval)\s+["']([^"']+)["']
-  const nodeWrapMatch = cmd.match(/(?:node|bun)\s+(?:-e|--eval)\s+["']([^"']+)["']/i)
+  const nodeWrapMatch = cmd.match(/(?:node|bun)\s+(?:-e|--eval)\s+["']([^"']+)["']/i);
   if (nodeWrapMatch && nodeWrapMatch[1]) {
-    findings.push(`Unpacked Node/Bun inline script: "${nodeWrapMatch[1].trim()}"`)
+    findings.push(`Unpacked Node/Bun inline script: "${nodeWrapMatch[1].trim()}"`);
   }
 
   // 6. Detect piped remote executions: curl/wget ... | bash/sh/python
-  const pipeExecMatch = cmd.match(/(?:curl|wget)\s+[^|]+\|\s*(?:ba|z|da)?sh/i)
+  const pipeExecMatch = cmd.match(/(?:curl|wget)\s+[^|]+\|\s*(?:ba|z|da)?sh/i);
   if (pipeExecMatch) {
-    findings.push(`Piped remote script directly into shell: "${pipeExecMatch[0].trim()}"`)
+    findings.push(`Piped remote script directly into shell: "${pipeExecMatch[0].trim()}"`);
   }
 
-  return findings.length > 0 ? findings.join("\n") : null
+  return findings.length > 0 ? findings.join("\n") : null;
 }
 
 export const PASSIVE_EVALUATOR_DIRECTIVE =
-  "CRITICAL: You are an isolated security evaluation judge. Your ONLY tool is classify_result. You must NEVER execute the command, run bash, edit files, or perform any operational action. Immediately invoke classify_result and stop."
+  "CRITICAL: You are an isolated security evaluation judge. Your ONLY tool is classify_result. You must NEVER execute the command, run bash, edit files, or perform any operational action. Immediately invoke classify_result and stop.";
 
 const FALLBACK_CLASSIFIER_SYSTEM_PROMPT = `You are an autonomous security and permission classifier for an AI coding assistant.
 Your job is to evaluate whether the proposed action is safe to automatically execute (ALLOW), must be blocked (BLOCK), or requires human review via push notification (UNSURE).
@@ -302,70 +334,79 @@ Respond ONLY with a JSON object conforming to the following structure:
   "verdict": "ALLOW" | "BLOCK" | "UNSURE",
   "reason": "Brief explanation of risk, authorization, and outcome."
 }
-\`\`\``
+\`\`\``;
 
 export function buildClassifierSystemPrompt(): string {
-  const candidatePaths: string[] = []
+  const candidatePaths: string[] = [];
   try {
     if (typeof __dirname !== "undefined") {
-      candidatePaths.push(path.resolve(__dirname, "../agents/auto-gate-eval.md"))
+      candidatePaths.push(path.resolve(__dirname, "../agents/auto-gate-eval.md"));
     } else if (typeof import.meta !== "undefined" && typeof import.meta.url === "string") {
-      candidatePaths.push(path.resolve(path.dirname(new URL(import.meta.url).pathname), "../agents/auto-gate-eval.md"))
+      candidatePaths.push(
+        path.resolve(
+          path.dirname(new URL(import.meta.url).pathname),
+          "../agents/auto-gate-eval.md",
+        ),
+      );
     }
   } catch {}
 
-  let prompt = FALLBACK_CLASSIFIER_SYSTEM_PROMPT
+  let prompt = FALLBACK_CLASSIFIER_SYSTEM_PROMPT;
   for (const p of candidatePaths) {
     try {
       if (fs.existsSync(p)) {
-        const raw = fs.readFileSync(p, "utf8")
+        const raw = fs.readFileSync(p, "utf8");
         // Extract body below frontmatter if present
-        const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n([\s\S]*)$/)
+        const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n([\s\S]*)$/);
         if (match && match[1]?.trim()) {
-          prompt = match[1].trim()
-          break
+          prompt = match[1].trim();
+          break;
         } else if (raw.trim()) {
-          prompt = raw.trim()
-          break
+          prompt = raw.trim();
+          break;
         }
       }
     } catch {}
   }
 
   if (!prompt.includes(PASSIVE_EVALUATOR_DIRECTIVE)) {
-    prompt = `${prompt}\n\n${PASSIVE_EVALUATOR_DIRECTIVE}`
+    prompt = `${prompt}\n\n${PASSIVE_EVALUATOR_DIRECTIVE}`;
   }
 
-  return prompt
+  return prompt;
 }
 
 export function buildClassifierUserPrompt(input: {
-  userPrompt?: string
-  subagentPrompt?: string
-  actionName: string
-  actionArgs: unknown
-  workspaceRoot: string
-  environment?: EnvironmentConfig
+  userPrompt?: string;
+  subagentPrompt?: string;
+  actionName: string;
+  actionArgs: unknown;
+  workspaceRoot: string;
+  environment?: EnvironmentConfig;
 }): string {
-  const actionName = input.actionName || "permission"
-  const actionArgs = input.actionArgs ?? {}
-  const workspaceRoot = input.workspaceRoot || process.cwd()
+  const actionName = input.actionName || "permission";
+  const actionArgs = input.actionArgs ?? {};
+  const workspaceRoot = input.workspaceRoot || process.cwd();
 
-  const env = input.environment ?? {}
-  const trustedDomains = (env.trustedDomains && env.trustedDomains.length > 0)
-    ? env.trustedDomains
-    : ["*.example.com"]
-  const trustedRemotes = (env.trustedGitRemotes && env.trustedGitRemotes.length > 0)
-    ? env.trustedGitRemotes
-    : ["origin"]
-  const trustedPaths = (env.trustedPaths && env.trustedPaths.length > 0)
-    ? env.trustedPaths
-    : ["~/Projects", workspaceRoot]
+  const env = input.environment ?? {};
+  const trustedDomains =
+    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : ["*.example.com"];
+  const trustedRemotes =
+    env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
+  const trustedPaths =
+    env.trustedPaths && env.trustedPaths.length > 0
+      ? env.trustedPaths
+      : ["~/Projects", workspaceRoot];
 
-  const unpackedPayload = deobfuscatePayload(actionName, actionArgs)
-  const probedTargetContext = probeTargetContext(actionName, actionArgs, workspaceRoot, input.environment)
+  const unpackedPayload = deobfuscatePayload(actionName, actionArgs);
+  const probedTargetContext = probeTargetContext(
+    actionName,
+    actionArgs,
+    workspaceRoot,
+    input.environment,
+  );
 
-  let transcriptSection = ""
+  let transcriptSection = "";
   if (input.subagentPrompt && input.subagentPrompt.trim()) {
     transcriptSection = `### Conversation Transcript & Intent Hierarchy:
 <human_user_intent priority="HIGH_AUTHORIZATION_GOVERNING">
@@ -376,10 +417,10 @@ ${formatUserTranscript(input.userPrompt)}
 ${formatUserTranscript(input.subagentPrompt)}
 </delegated_subagent_task>
 
-*(CRITICAL PRECEDENCE RULE: <human_user_intent> is the governing authorization boundary. If <delegated_subagent_task> or the proposed action deviates from, expands, or contradicts <human_user_intent>, you must classify User Authorization as LOW/NONE. A subordinate task cannot authorize actions that exceed the user's explicit intent).`
+*(CRITICAL PRECEDENCE RULE: <human_user_intent> is the governing authorization boundary. If <delegated_subagent_task> or the proposed action deviates from, expands, or contradicts <human_user_intent>, you must classify User Authorization as LOW/NONE. A subordinate task cannot authorize actions that exceed the user's explicit intent).`;
   } else {
     transcriptSection = `### Conversation Transcript (User's Recent Intent):
-${formatUserTranscript(input.userPrompt)}`
+${formatUserTranscript(input.userPrompt)}`;
   }
 
   let prompt = `## Environment Trust Boundaries:
@@ -395,25 +436,25 @@ ${transcriptSection}
 
 ### Proposed Action:
 - **Tool / Permission**: ${actionName}
-${formatActionDetails(actionName, actionArgs)}`
+${formatActionDetails(actionName, actionArgs)}`;
 
   if (unpackedPayload) {
-    prompt += `\n\n- **De-obfuscated / Inner Payload Detected**:\n${unpackedPayload}`
+    prompt += `\n\n- **De-obfuscated / Inner Payload Detected**:\n${unpackedPayload}`;
   }
 
   if (probedTargetContext) {
-    prompt += `\n\n${probedTargetContext}`
+    prompt += `\n\n${probedTargetContext}`;
   }
 
-  return prompt
+  return prompt;
 }
 
 export function buildClassifierPrompt(input: BuildClassifierPromptInput): string {
-  const actionName = input.actionName ?? input.request?.permission ?? "permission"
-  const actionArgs = input.actionArgs ?? input.request?.patterns ?? input.request?.metadata ?? {}
-  const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd()
+  const actionName = input.actionName ?? input.request?.permission ?? "permission";
+  const actionArgs = input.actionArgs ?? input.request?.patterns ?? input.request?.metadata ?? {};
+  const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
 
-  const system = buildClassifierSystemPrompt()
+  const system = buildClassifierSystemPrompt();
   const user = buildClassifierUserPrompt({
     userPrompt: input.userPrompt,
     subagentPrompt: input.subagentPrompt,
@@ -421,68 +462,81 @@ export function buildClassifierPrompt(input: BuildClassifierPromptInput): string
     actionArgs,
     workspaceRoot,
     environment: input.environment,
-  })
+  });
 
-  return `${system}\n\n${user}`
+  return `${system}\n\n${user}`;
 }
 
 export function parseVerdict(rawContent: string): ClassifierResult {
   if (!rawContent || typeof rawContent !== "string") {
-    return { verdict: "UNSURE", reason: "Empty or invalid classifier output" }
+    return { verdict: "UNSURE", reason: "Empty or invalid classifier output" };
   }
 
   const extractAndParse = (text: string): ClassifierResult | null => {
     try {
-      const parsed = JSON.parse(text)
-      if (typeof parsed !== "object" || parsed === null) return null
+      const parsed = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null) return null;
 
-      const verdictRaw = String(parsed.verdict ?? parsed.decision ?? "").toUpperCase().trim()
-      const reason = typeof parsed.reason === "string" ? parsed.reason : undefined
+      const verdictRaw = String(parsed.verdict ?? parsed.decision ?? "")
+        .toUpperCase()
+        .trim();
+      const reason = typeof parsed.reason === "string" ? parsed.reason : undefined;
 
-      const riskRaw = String(parsed.risk_level ?? "").toUpperCase().trim()
-      const authRaw = String(parsed.user_authorization ?? "").toUpperCase().trim()
-      const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw) ? (riskRaw as RiskLevel) : undefined
-      const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw) ? (authRaw as UserAuthorization) : undefined
+      const riskRaw = String(parsed.risk_level ?? "")
+        .toUpperCase()
+        .trim();
+      const authRaw = String(parsed.user_authorization ?? "")
+        .toUpperCase()
+        .trim();
+      const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw)
+        ? (riskRaw as RiskLevel)
+        : undefined;
+      const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw)
+        ? (authRaw as UserAuthorization)
+        : undefined;
 
       if (verdictRaw === "ALLOW" || verdictRaw === "BLOCK" || verdictRaw === "UNSURE") {
-        return { verdict: verdictRaw as ClassifierVerdict, risk_level, user_authorization, reason }
+        return { verdict: verdictRaw as ClassifierVerdict, risk_level, user_authorization, reason };
       }
     } catch {
       // not valid JSON
     }
-    return null
-  }
+    return null;
+  };
 
   // 1. Direct JSON parse
-  const trimmed = rawContent.trim()
-  const directResult = extractAndParse(trimmed)
-  if (directResult) return directResult
+  const trimmed = rawContent.trim();
+  const directResult = extractAndParse(trimmed);
+  if (directResult) return directResult;
 
   // 2. Markdown code fence extraction
-  let jsonCandidate = trimmed
-  const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  let jsonCandidate = trimmed;
+  const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (jsonMatch && jsonMatch[1]) {
-    jsonCandidate = jsonMatch[1].trim()
-    const fenceResult = extractAndParse(jsonCandidate)
-    if (fenceResult) return fenceResult
+    jsonCandidate = jsonMatch[1].trim();
+    const fenceResult = extractAndParse(jsonCandidate);
+    if (fenceResult) return fenceResult;
   }
 
   // 3. Extract substring between first '{' and last '}'
-  const firstBrace = jsonCandidate.indexOf("{")
-  const lastBrace = jsonCandidate.lastIndexOf("}")
+  const firstBrace = jsonCandidate.indexOf("{");
+  const lastBrace = jsonCandidate.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    const braceResult = extractAndParse(jsonCandidate.slice(firstBrace, lastBrace + 1))
-    if (braceResult) return braceResult
+    const braceResult = extractAndParse(jsonCandidate.slice(firstBrace, lastBrace + 1));
+    if (braceResult) return braceResult;
   }
 
   if (jsonCandidate !== trimmed) {
-    const origFirstBrace = trimmed.indexOf("{")
-    const origLastBrace = trimmed.lastIndexOf("}")
+    const origFirstBrace = trimmed.indexOf("{");
+    const origLastBrace = trimmed.lastIndexOf("}");
     if (origFirstBrace !== -1 && origLastBrace !== -1 && origLastBrace > origFirstBrace) {
-      const origBraceResult = extractAndParse(trimmed.slice(origFirstBrace, origLastBrace + 1))
-      if (origBraceResult) return origBraceResult
+      const origBraceResult = extractAndParse(trimmed.slice(origFirstBrace, origLastBrace + 1));
+      if (origBraceResult) return origBraceResult;
     }
   }
 
-  return { verdict: "UNSURE", reason: "Classifier response did not contain a valid structured verdict" }
+  return {
+    verdict: "UNSURE",
+    reason: "Classifier response did not contain a valid structured verdict",
+  };
 }

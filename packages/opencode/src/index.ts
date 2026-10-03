@@ -1,49 +1,52 @@
-import * as fs from "fs"
-import * as path from "path"
-import * as os from "os"
-import { fileURLToPath } from "url"
-import { tool, type Hooks, type PluginInput } from "@opencode-ai/plugin"
-import type { UserMessage, Part } from "@opencode-ai/sdk"
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { fileURLToPath } from "url";
+import { tool, type Hooks, type PluginInput } from "@opencode-ai/plugin";
+import type { UserMessage, Part } from "@opencode-ai/sdk";
 import {
-loadConfig,
-NtfyAdapter,
-AutoGateCoreEngine,
-recordEscalationIntent,
-type HarnessAdapter,
-type PermissionEventData,
+  loadConfig,
+  NtfyAdapter,
+  AutoGateCoreEngine,
+  recordEscalationIntent,
+  type HarnessAdapter,
+  type PermissionEventData,
   type GateAction,
-} from "@autogate/core"
+} from "@autogate/core";
 import {
-OpenCodeSessionEvaluator,
-isEvaluationSession,
-recordEvaluationVerdict,
-evaluationSessions,
-} from "./evaluator.js"
+  OpenCodeSessionEvaluator,
+  isEvaluationSession,
+  recordEvaluationVerdict,
+  evaluationSessions,
+} from "./evaluator.js";
 
 export function isEventForWorkspace(event: any, workspaceDir?: string): boolean {
-  if (!workspaceDir) return true
-  const normalizedWs = path.resolve(workspaceDir)
+  if (!workspaceDir) return true;
+  const normalizedWs = path.resolve(workspaceDir);
 
   // 1. Authoritative workspace directory in OpenCode v2 events
-  if (typeof event?.location?.directory === "string" && event.location.directory.trim().length > 0) {
-    return path.resolve(event.location.directory) === normalizedWs
+  if (
+    typeof event?.location?.directory === "string" &&
+    event.location.directory.trim().length > 0
+  ) {
+    return path.resolve(event.location.directory) === normalizedWs;
   }
 
   // 2. Fall back to event data directory metadata
-  const eventData = event?.properties || event?.data
+  const eventData = event?.properties || event?.data;
   const dataDir =
     typeof eventData?.metadata?.directory === "string"
       ? eventData.metadata.directory
       : typeof eventData?.directory === "string"
-      ? eventData.directory
-      : undefined
+        ? eventData.directory
+        : undefined;
 
   if (!dataDir) {
-    return true
+    return true;
   }
 
-  const resolvedDataDir = path.resolve(dataDir)
-  return resolvedDataDir === normalizedWs || resolvedDataDir.startsWith(normalizedWs + path.sep)
+  const resolvedDataDir = path.resolve(dataDir);
+  return resolvedDataDir === normalizedWs || resolvedDataDir.startsWith(normalizedWs + path.sep);
 }
 
 export {
@@ -51,70 +54,70 @@ export {
   isEvaluationSession,
   recordEvaluationVerdict,
   evaluationSessions,
-}
+};
 
 export function ensureAgentInstalled(): void {
   try {
-    const homeDir = os.homedir()
-    const agentsDir = path.join(homeDir, ".config", "opencode", "agents")
-    const targetFile = path.join(agentsDir, "auto-gate-eval.md")
-    const __dirname = path.dirname(fileURLToPath(import.meta.url))
-    const pluginAgentFile = path.resolve(__dirname, "../../core/agents/auto-gate-eval.md")
+    const homeDir = os.homedir();
+    const agentsDir = path.join(homeDir, ".config", "opencode", "agents");
+    const targetFile = path.join(agentsDir, "auto-gate-eval.md");
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const pluginAgentFile = path.resolve(__dirname, "../../core/agents/auto-gate-eval.md");
 
     if (!fs.existsSync(pluginAgentFile)) {
-      return
+      return;
     }
 
     if (!fs.existsSync(agentsDir)) {
-      fs.mkdirSync(agentsDir, { recursive: true })
+      fs.mkdirSync(agentsDir, { recursive: true });
     }
 
     try {
-      const stats = fs.lstatSync(targetFile)
+      const stats = fs.lstatSync(targetFile);
       if (stats.isSymbolicLink()) {
-        const currentLink = fs.readlinkSync(targetFile)
+        const currentLink = fs.readlinkSync(targetFile);
         if (path.resolve(path.dirname(targetFile), currentLink) === pluginAgentFile) {
-          return
+          return;
         }
-        fs.unlinkSync(targetFile)
+        fs.unlinkSync(targetFile);
       } else {
-        fs.unlinkSync(targetFile)
+        fs.unlinkSync(targetFile);
       }
     } catch (e: any) {
       if (e?.code !== "ENOENT") {
-        return
+        return;
       }
     }
 
-    fs.symlinkSync(pluginAgentFile, targetFile)
+    fs.symlinkSync(pluginAgentFile, targetFile);
   } catch {
     // Non-fatal if filesystem is readonly or symlink fails in test harnesses
   }
 }
 
 export class OpenCodeHarnessAdapter implements HarnessAdapter {
-  readonly name = "opencode-harness"
-  private engine: AutoGateCoreEngine
-  private stopListener?: () => void
-  private ctx: PluginInput
-  readonly serverUrl: string
+  readonly name = "opencode-harness";
+  private engine: AutoGateCoreEngine;
+  private stopListener?: () => void;
+  private ctx: PluginInput;
+  readonly serverUrl: string;
 
   constructor(ctx: PluginInput, options?: Record<string, unknown>) {
-    this.ctx = ctx
-    ensureAgentInstalled()
-    const config = loadConfig(options)
-    const serverUrl = config.opencode?.serverUrl || config.serverUrl || "http://localhost:4096"
-    this.serverUrl = serverUrl
-    config.serverUrl = serverUrl
+    this.ctx = ctx;
+    ensureAgentInstalled();
+    const config = loadConfig(options);
+    const serverUrl = config.opencode?.serverUrl || config.serverUrl || "http://localhost:4096";
+    this.serverUrl = serverUrl;
+    config.serverUrl = serverUrl;
     const adapter = new NtfyAdapter({
       server: config.ntfyServer,
       topic: config.ntfyTopic,
       token: config.ntfyToken,
-    })
+    });
 
-    const workspaceRoot = ctx.directory || ctx.worktree || process.cwd()
+    const workspaceRoot = ctx.directory || ctx.worktree || process.cwd();
 
-    const client = ctx.client || (ctx as any)
+    const client = ctx.client || (ctx as any);
     this.engine = new AutoGateCoreEngine({
       config,
       client,
@@ -122,48 +125,49 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       evaluator: new OpenCodeSessionEvaluator(client, config),
       workspaceRoot,
       remoteReviewEnabled: true,
-    })
+    });
   }
 
   async start(): Promise<void> {
-    this.stopListener = await this.engine.start()
+    this.stopListener = await this.engine.start();
   }
 
   async dispose(): Promise<void> {
-    await this.engine.stop()
+    await this.engine.stop();
     if (this.stopListener) {
-      this.stopListener()
-      this.stopListener = undefined
+      this.stopListener();
+      this.stopListener = undefined;
     }
   }
 
   getEngine(): AutoGateCoreEngine {
-    return this.engine
+    return this.engine;
   }
 
   async handlePermissionAsked(request: PermissionEventData): Promise<void> {
-    const workspaceRoot = this.ctx.directory || this.ctx.worktree || process.cwd()
-    const requestDir = (request?.metadata?.directory || request?.directory) as string | undefined
+    const workspaceRoot = this.ctx.directory || this.ctx.worktree || process.cwd();
+    const requestDir = (request?.metadata?.directory || request?.directory) as string | undefined;
     if (requestDir && (this.ctx.directory || this.ctx.worktree)) {
-      const explicitWs = this.ctx.directory || this.ctx.worktree
-      const normalizedReq = path.resolve(requestDir)
-      const normalizedWs = path.resolve(explicitWs)
+      const explicitWs = this.ctx.directory || this.ctx.worktree;
+      const normalizedReq = path.resolve(requestDir);
+      const normalizedWs = path.resolve(explicitWs);
       if (normalizedReq !== normalizedWs && !normalizedReq.startsWith(normalizedWs + path.sep)) {
-        return
+        return;
       }
     }
     const commandString =
       typeof request.metadata?.command === "string"
         ? request.metadata.command
-        : Array.isArray((request as any).resources) && typeof (request as any).resources[0] === "string"
-        ? (request as any).resources[0]
-        : undefined
+        : Array.isArray((request as any).resources) &&
+            typeof (request as any).resources[0] === "string"
+          ? (request as any).resources[0]
+          : undefined;
 
     const toolName =
       request.permission ||
       (request as any).action ||
       (request as any).source?.type ||
-      "permission"
+      "permission";
 
     const action: GateAction = {
       id: request.id || Math.random().toString(36).slice(2),
@@ -171,17 +175,18 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       sessionID: request.sessionID || "",
       toolName,
       commandString,
-      targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
+      targetPath:
+        typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
       rawArgs: request.patterns || (request as any).resources || request.metadata,
       workspaceRoot: (request.metadata?.directory as string) || workspaceRoot,
       userPrompt: this.engine.getUserPrompt(request.sessionID),
       environment: (this.engine as any).config?.environment,
       metadata: request.metadata,
-    }
-    const decision = await this.engine.evaluate(action)
-    const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject")
-    const targetDir = (request.metadata?.directory as string) || workspaceRoot
-    await this.replyPermission(request.id, replyVal, request.sessionID, decision.reason, targetDir)
+    };
+    const decision = await this.engine.evaluate(action);
+    const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
+    const targetDir = (request.metadata?.directory as string) || workspaceRoot;
+    await this.replyPermission(request.id, replyVal, request.sessionID, decision.reason, targetDir);
   }
 
   private async replyPermission(
@@ -189,9 +194,9 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     reply: "once" | "always" | "reject",
     sessionID?: string,
     message?: string,
-    directory?: string
+    directory?: string,
   ): Promise<void> {
-    const ctxAny = this.ctx as any
+    const ctxAny = this.ctx as any;
     if (ctxAny.permission && typeof ctxAny.permission.reply === "function") {
       try {
         await ctxAny.permission.reply({
@@ -200,83 +205,93 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
           decision: reply,
           reply,
           message,
-        })
-        return
+        });
+        return;
       } catch {}
     }
 
-    const serverUrl = this.serverUrl || "http://localhost:4096"
-    const password = process.env.OPENCODE_SERVER_PASSWORD || ""
-    const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
-    const workspaceRoot = this.ctx.directory || this.ctx.worktree
-    const targetDir = directory || workspaceRoot
+    const serverUrl = this.serverUrl || "http://localhost:4096";
+    const password = process.env.OPENCODE_SERVER_PASSWORD || "";
+    const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64");
+    const workspaceRoot = this.ctx.directory || this.ctx.worktree;
+    const targetDir = directory || workspaceRoot;
     const urls = [
-      sessionID ? `${serverUrl}/api/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply` : undefined,
-      sessionID ? `${serverUrl}/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply` : undefined,
+      sessionID
+        ? `${serverUrl}/api/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply`
+        : undefined,
+      sessionID
+        ? `${serverUrl}/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply`
+        : undefined,
       `${serverUrl}/api/permission/${encodeURIComponent(requestID)}/reply`,
       `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply`,
-    ].filter(Boolean) as string[]
+    ].filter(Boolean) as string[];
     for (const u of urls) {
-      const fullUrl = `${u}${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
+      const fullUrl = `${u}${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`;
       try {
         const res = await fetch(fullUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": authHeader,
+            Authorization: authHeader,
           },
           body: JSON.stringify({ decision: reply, reply, message }),
           signal: AbortSignal.timeout(5000),
-        })
+        });
         if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
-          return
+          return;
         }
       } catch {}
     }
 
-    const client = this.ctx.client
-    if (!client) return
+    const client = this.ctx.client;
+    if (!client) return;
     if (typeof client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
       try {
         const res = await client.postSessionIdPermissionsPermissionId({
           path: { id: sessionID, permissionID: requestID },
           body: { response: reply },
           query: targetDir ? { directory: targetDir } : undefined,
-})
-if (!res?.error && res?.response?.ok !== false) return
-} catch {}
-}
+        });
+        if (!res?.error && res?.response?.ok !== false) return;
+      } catch {}
+    }
     if (typeof (client as any)?.permission?.reply === "function") {
       try {
         const res = await (client as any).permission.reply({
           path: { requestID },
           body: { reply, message },
           query: targetDir ? { directory: targetDir } : undefined,
-        })
-        if (!res?.error && res?.response?.ok !== false) return
+        });
+        if (!res?.error && res?.response?.ok !== false) return;
       } catch {}
     }
   }
 
-  async handlePermissionReplied(data: { requestID?: string; id?: string; reply?: string }): Promise<void> {
-    this.engine.handlePermissionReplied(data)
+  async handlePermissionReplied(data: {
+    requestID?: string;
+    id?: string;
+    reply?: string;
+  }): Promise<void> {
+    this.engine.handlePermissionReplied(data);
   }
 
   clearTurnCache(sessionID: string): void {
-    this.engine.clearTurnCache(sessionID)
+    this.engine.clearTurnCache(sessionID);
   }
 }
 
 export async function AutoGatePlugin(
   ctx: PluginInput,
-  options?: Record<string, unknown>
+  options?: Record<string, unknown>,
 ): Promise<Hooks> {
-  const adapter = new OpenCodeHarnessAdapter(ctx, options)
-  const engine = adapter.getEngine()
-  await adapter.start()
+  const adapter = new OpenCodeHarnessAdapter(ctx, options);
+  const engine = adapter.getEngine();
+  await adapter.start();
 
-  const config = loadConfig(options)
-  console.log(`AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`)
+  const config = loadConfig(options);
+  console.log(
+    `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
+  );
   try {
     await ctx.client.app.log({
       body: {
@@ -284,13 +299,14 @@ export async function AutoGatePlugin(
         level: "info",
         message: `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
       },
-    })
+    });
   } catch {}
 
   const hooks: Hooks = {
     tool: {
       classify_result: tool({
-        description: "Report the security classification result for the agent action (internal evaluation tool)",
+        description:
+          "Report the security classification result for the agent action (internal evaluation tool)",
         args: {
           risk_level: tool.schema.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
           user_authorization: tool.schema.enum(["NONE", "LOW", "MEDIUM", "HIGH"]),
@@ -299,132 +315,149 @@ export async function AutoGatePlugin(
         },
         async execute(args: any, context: any) {
           if (!isEvaluationSession(context.sessionID)) {
-            throw new Error("classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.")
+            throw new Error(
+              "classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.",
+            );
           }
           recordEvaluationVerdict(context.sessionID, {
             verdict: args.verdict,
             risk_level: args.risk_level,
             user_authorization: args.user_authorization,
             reason: args.reason,
-          })
-          ctx.client?.session?.abort?.({ path: { id: context.sessionID } }).catch(() => {})
+          });
+          ctx.client?.session?.abort?.({ path: { id: context.sessionID } }).catch(() => {});
           return {
             output: JSON.stringify(args),
-          }
+          };
         },
       }),
       escalate_permission: tool({
-        description: "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
+        description:
+          "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
         args: {
-          action: tool.schema.string().describe("The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')"),
-          reason: tool.schema.string().describe("Why the safe alternative or automated transform cannot be used and human review is required"),
+          action: tool.schema
+            .string()
+            .describe(
+              "The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')",
+            ),
+          reason: tool.schema
+            .string()
+            .describe(
+              "Why the safe alternative or automated transform cannot be used and human review is required",
+            ),
         },
         async execute(args: any, context: any) {
-          recordEscalationIntent(context.sessionID, args.action, args.reason)
+          recordEscalationIntent(context.sessionID, args.action, args.reason);
           return {
             output: `Manual verification intent registered for '${args.action}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
-          }
+          };
         },
       }),
     },
 
     dispose: async () => {
-      await adapter.dispose()
+      await adapter.dispose();
     },
 
     "chat.message": async (
       input: { sessionID: string; messageID?: string },
-      output: { message?: UserMessage; parts?: Part[] }
+      output: { message?: UserMessage; parts?: Part[] },
     ) => {
-      if (!output || !Array.isArray(output.parts)) return
-      if (output.message && output.message.role && output.message.role !== "user") return
+      if (!output || !Array.isArray(output.parts)) return;
+      if (output.message && output.message.role && output.message.role !== "user") return;
 
       const textParts = output.parts
-        .filter((p): p is Part & { type: "text"; text: string } => p !== null && typeof p === "object" && p.type === "text" && typeof p.text === "string")
+        .filter(
+          (p): p is Part & { type: "text"; text: string } =>
+            p !== null && typeof p === "object" && p.type === "text" && typeof p.text === "string",
+        )
         .map((p) => p.text)
         .join("\n")
-        .trim()
+        .trim();
 
-      if (input?.sessionID && isEvaluationSession(input.sessionID)) return
+      if (input?.sessionID && isEvaluationSession(input.sessionID)) return;
       if (
         textParts.includes("## Environment Trust Boundaries:") ||
         textParts.includes("## Context:") ||
         textParts.includes("### Conversation Transcript") ||
         textParts.startsWith("[auto-gate-eval]")
       ) {
-        return
+        return;
       }
       if (textParts && input?.sessionID) {
-        engine.setUserPrompt(input.sessionID, textParts)
+        engine.setUserPrompt(input.sessionID, textParts);
       } else if (textParts) {
-        engine.setUserPrompt(textParts)
+        engine.setUserPrompt(textParts);
       }
 
-      const trimmed = textParts.trim().toLowerCase()
+      const trimmed = textParts.trim().toLowerCase();
       if (trimmed.startsWith("/automode") || trimmed.startsWith("automode")) {
-        const parts = trimmed.split(/\s+/)
-        const arg = parts[1] || ""
+        const parts = trimmed.split(/\s+/);
+        const arg = parts[1] || "";
         if (arg === "off" || arg === "disable" || arg === "false" || arg === "0") {
-          engine.setEnabled(false)
+          engine.setEnabled(false);
         } else if (arg === "on" || arg === "enable" || arg === "true" || arg === "1") {
-          engine.setEnabled(true)
+          engine.setEnabled(true);
         } else if (arg === "toggle") {
-          engine.setEnabled(!engine.isEnabled())
+          engine.setEnabled(!engine.isEnabled());
         }
       }
     },
 
     event: async (input: { event: any }) => {
-      const { event } = input
-      if (!event || !event.type) return
+      const { event } = input;
+      if (!event || !event.type) return;
 
-      const workspaceDir = ctx.directory || ctx.worktree
+      const workspaceDir = ctx.directory || ctx.worktree;
       if (workspaceDir && !isEventForWorkspace(event, workspaceDir)) {
-        return
+        return;
       }
 
       if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
-        const eventData = event.properties || event.data
+        const eventData = event.properties || event.data;
         if (eventData) {
-          await adapter.handlePermissionAsked(eventData)
+          await adapter.handlePermissionAsked(eventData);
         }
       } else if (event.type === "permission.replied" || event.type === "permission.v2.replied") {
-        const eventData = event.properties || event.data
+        const eventData = event.properties || event.data;
         if (eventData) {
-          await adapter.handlePermissionReplied(eventData)
+          await adapter.handlePermissionReplied(eventData);
         }
       } else if (
         event.type === "session.idle" ||
-        (event.type === "session.status" && (event.properties?.status === "idle" || event.data?.status === "idle"))
+        (event.type === "session.status" &&
+          (event.properties?.status === "idle" || event.data?.status === "idle"))
       ) {
-        const sessionID = event.properties?.sessionID || event.data?.sessionID
+        const sessionID = event.properties?.sessionID || event.data?.sessionID;
         if (sessionID) {
-          adapter.clearTurnCache(sessionID)
+          adapter.clearTurnCache(sessionID);
         }
       }
     },
 
     "command.execute.before": async (
       input: { command: string; sessionID: string; arguments: string },
-      output: { parts: Part[] }
+      output: { parts: Part[] },
     ) => {
       if (input.command === "automode" || input.command === "auto-mode") {
-        const arg = (input.arguments || "").trim().toLowerCase()
+        const arg = (input.arguments || "").trim().toLowerCase();
 
-        let msg = ""
+        let msg = "";
         if (arg === "off" || arg === "disable" || arg === "false" || arg === "0") {
-          engine.setEnabled(false)
-          msg = "Auto Mode is now DISABLED (all requests route to ntfy)."
+          engine.setEnabled(false);
+          msg = "Auto Mode is now DISABLED (all requests route to ntfy).";
         } else if (arg === "on" || arg === "enable" || arg === "true" || arg === "1") {
-          engine.setEnabled(true)
-          msg = "Auto Mode is now ENABLED (classifier active)."
+          engine.setEnabled(true);
+          msg = "Auto Mode is now ENABLED (classifier active).";
         } else if (arg === "status" || !arg) {
-          const status = engine.isEnabled() ? "ENABLED (classifier active)" : "DISABLED (routing to remote)"
-          msg = `Auto Mode status: ${status}`
+          const status = engine.isEnabled()
+            ? "ENABLED (classifier active)"
+            : "DISABLED (routing to remote)";
+          msg = `Auto Mode status: ${status}`;
         } else {
-          const nextState = !engine.isEnabled()
-          engine.setEnabled(nextState)
-          msg = `Auto Mode toggled to: ${nextState ? "ENABLED" : "DISABLED"}`
+          const nextState = !engine.isEnabled();
+          engine.setEnabled(nextState);
+          msg = `Auto Mode toggled to: ${nextState ? "ENABLED" : "DISABLED"}`;
         }
 
         output.parts = [
@@ -432,22 +465,24 @@ export async function AutoGatePlugin(
             type: "text",
             text: `[SYSTEM DIRECTIVE]: The user executed /automode. Output ONLY this exact single line and nothing else:\n[auto-gate] ${msg}`,
           } as Part,
-        ]
+        ];
       }
     },
-  }
+  };
 
-  return hooks
+  return hooks;
 }
 
 export const plugin = {
   id: "auto-gate",
   async setup(ctx: any) {
-    const adapter = new OpenCodeHarnessAdapter(ctx, ctx.options)
-    await adapter.start()
+    const adapter = new OpenCodeHarnessAdapter(ctx, ctx.options);
+    await adapter.start();
 
-    const config = loadConfig(ctx.options)
-    console.log(`AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`)
+    const config = loadConfig(ctx.options);
+    console.log(
+      `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
+    );
 
     // Register tools via ctx.tool.transform if available
     if (ctx.tool && typeof ctx.tool.transform === "function") {
@@ -455,7 +490,8 @@ export const plugin = {
         editor.add({
           name: "classify_result",
           options: { codemode: false },
-          description: "Report the security classification result for the agent action (internal evaluation tool)",
+          description:
+            "Report the security classification result for the agent action (internal evaluation tool)",
           input: {
             type: "object",
             properties: {
@@ -468,83 +504,98 @@ export const plugin = {
           },
           async execute(args: any, context: any) {
             if (!isEvaluationSession(context.sessionID)) {
-              throw new Error("classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.")
+              throw new Error(
+                "classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.",
+              );
             }
             recordEvaluationVerdict(context.sessionID, {
               verdict: args.verdict,
               risk_level: args.risk_level,
               user_authorization: args.user_authorization,
               reason: args.reason,
-            })
-            ctx.session?.interrupt?.(context.sessionID).catch(() => {})
+            });
+            ctx.session?.interrupt?.(context.sessionID).catch(() => {});
             return {
               content: JSON.stringify(args),
-            }
+            };
           },
-        })
+        });
 
         editor.add({
           name: "escalate_permission",
           options: { codemode: false },
-          description: "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
+          description:
+            "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
           input: {
             type: "object",
             properties: {
-              action: { type: "string", description: "The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')" },
-              reason: { type: "string", description: "Why the safe alternative or automated transform cannot be used and human review is required" },
+              action: {
+                type: "string",
+                description:
+                  "The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')",
+              },
+              reason: {
+                type: "string",
+                description:
+                  "Why the safe alternative or automated transform cannot be used and human review is required",
+              },
             },
             required: ["action", "reason"],
           },
           async execute(args: any, context: any) {
-            recordEscalationIntent(context.sessionID, args.action, args.reason)
+            recordEscalationIntent(context.sessionID, args.action, args.reason);
             return {
               content: `Manual verification intent registered for '${args.action}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
-            }
+            };
           },
-        })
-      })
+        });
+      });
     }
 
     // Subscribe to events
     if (ctx.event && typeof ctx.event.subscribe === "function") {
-      const controller = new AbortController()
-      ;(async () => {
+      const controller = new AbortController();
+      (async () => {
         try {
           for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-            const workspaceDir = ctx.directory || ctx.worktree
+            const workspaceDir = ctx.directory || ctx.worktree;
             if (workspaceDir && !isEventForWorkspace(event, workspaceDir)) {
-              continue
+              continue;
             }
 
             if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
-              const eventData = event.properties || event.data
+              const eventData = event.properties || event.data;
               if (eventData) {
-                await adapter.handlePermissionAsked(eventData)
+                await adapter.handlePermissionAsked(eventData);
               }
-            } else if (event.type === "permission.replied" || event.type === "permission.v2.replied") {
-              const eventData = event.properties || event.data
+            } else if (
+              event.type === "permission.replied" ||
+              event.type === "permission.v2.replied"
+            ) {
+              const eventData = event.properties || event.data;
               if (eventData) {
-                await adapter.handlePermissionReplied(eventData)
+                await adapter.handlePermissionReplied(eventData);
               }
             } else if (
               event.type === "session.idle" ||
-              (event.type === "session.status" && (event.properties?.status === "idle" || event.data?.status === "idle"))
+              (event.type === "session.status" &&
+                (event.properties?.status === "idle" || event.data?.status === "idle"))
             ) {
-              const sessionID = event.properties?.sessionID || event.data?.sessionID
+              const sessionID = event.properties?.sessionID || event.data?.sessionID;
               if (sessionID) {
-                adapter.clearTurnCache(sessionID)
+                adapter.clearTurnCache(sessionID);
               }
             }
           }
         } catch {}
-      })()
+      })();
     }
 
     return async () => {
-      await adapter.dispose()
-    }
+      await adapter.dispose();
+    };
   },
   server: AutoGatePlugin,
-}
+};
 
-export default plugin
+export default plugin;

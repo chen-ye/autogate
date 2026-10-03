@@ -31,7 +31,7 @@ class MockServer {
       if (current) {
         this.listeners.set(
           eventName,
-          current.filter((fn) => fn !== listener)
+          current.filter((fn) => fn !== listener),
         );
       }
     };
@@ -43,7 +43,7 @@ class MockServer {
     if (current) {
       this.listeners.set(
         eventName,
-        current.filter((fn) => fn !== listener)
+        current.filter((fn) => fn !== listener),
       );
     }
   }
@@ -88,7 +88,7 @@ class MockNotifierAdapter implements NotifierAdapter {
 
   async listen(
     onResponse: (resp: ReviewResponse) => Promise<void>,
-    _signal?: AbortSignal
+    _signal?: AbortSignal,
   ): Promise<() => void> {
     this.listenCalled = true;
     this.listenerCallback = onResponse;
@@ -140,20 +140,14 @@ describe("PaseoHarnessAdapter", () => {
     const adapterDisabled = new PaseoHarnessAdapter(server, {
       paseo: { notifyOnVerdict: false },
     });
-    assert.strictEqual(
-      (adapterDisabled.getEngine() as any).config.notifyOnVerdict,
-      false
-    );
+    assert.strictEqual((adapterDisabled.getEngine() as any).config.notifyOnVerdict, false);
 
     // Explicitly set paseo.notifyOnVerdict = true
     const adapterEnabled = new PaseoHarnessAdapter(server, {
       notifyOnVerdict: false,
       paseo: { notifyOnVerdict: true },
     });
-    assert.strictEqual(
-      (adapterEnabled.getEngine() as any).config.notifyOnVerdict,
-      true
-    );
+    assert.strictEqual((adapterEnabled.getEngine() as any).config.notifyOnVerdict, true);
   });
 
   it("handles ALLOW: calls agent.respondToPermission with behavior allow and does NOT track pending", async () => {
@@ -328,7 +322,7 @@ describe("PaseoHarnessAdapter", () => {
     assert.strictEqual(evalAgentWithLabel.responses[0].response.behavior, "deny");
     assert.strictEqual(
       evalAgentWithLabel.responses[0].response.message,
-      "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools."
+      "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools.",
     );
     assert.strictEqual(mockEvaluator.evaluatedActions.length, 0);
 
@@ -352,7 +346,7 @@ describe("PaseoHarnessAdapter", () => {
     assert.strictEqual(evalAgentWithTitle.responses[0].response.behavior, "deny");
     assert.strictEqual(
       evalAgentWithTitle.responses[0].response.message,
-      "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools."
+      "AutoGate Security: Evaluator sessions are strictly forbidden from executing tools.",
     );
     assert.strictEqual(mockEvaluator.evaluatedActions.length, 0);
   });

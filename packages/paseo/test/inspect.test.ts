@@ -213,7 +213,7 @@ describe("Paseo Permission Request Inspector", () => {
         extractActionFromRequest({
           agent: { id: undefined, cwd: null },
           request: { id: null, input: undefined },
-        })
+        }),
       );
 
       const nullAction = extractActionFromRequest(null as any);
@@ -227,4 +227,3 @@ describe("Paseo Permission Request Inspector", () => {
     });
   });
 });
-

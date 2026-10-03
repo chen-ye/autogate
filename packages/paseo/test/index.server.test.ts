@@ -32,7 +32,7 @@ class MockServer {
       if (current) {
         this.listeners.set(
           eventName,
-          current.filter((fn) => fn !== listener)
+          current.filter((fn) => fn !== listener),
         );
       }
     };
@@ -44,7 +44,7 @@ class MockServer {
     if (current) {
       this.listeners.set(
         eventName,
-        current.filter((fn) => fn !== listener)
+        current.filter((fn) => fn !== listener),
       );
     }
   }
@@ -63,7 +63,7 @@ class MockNotifier implements NotifierAdapter {
 
   async listen(
     _onResponse: (resp: ReviewResponse) => Promise<void>,
-    _signal?: AbortSignal
+    _signal?: AbortSignal,
   ): Promise<() => void> {
     this.listenCalled = true;
     return () => {

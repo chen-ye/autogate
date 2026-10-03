@@ -254,10 +254,12 @@ export function extractActionFromRequest(event: { agent?: any; request?: any }):
   const targetPath = extractTargetPath(rawArgs, request);
 
   // Formats clean GateAction payload
-  const id = typeof request?.id === "string" ? request.id : request?.id != null ? String(request.id) : "";
-  const sessionID = typeof agent?.id === "string" ? agent.id : agent?.id != null ? String(agent.id) : "";
+  const id =
+    typeof request?.id === "string" ? request.id : request?.id != null ? String(request.id) : "";
+  const sessionID =
+    typeof agent?.id === "string" ? agent.id : agent?.id != null ? String(agent.id) : "";
   const toolName = extractToolName(request);
-  const workspaceRoot = (typeof agent?.cwd === "string" && agent.cwd) ? agent.cwd : process.cwd();
+  const workspaceRoot = typeof agent?.cwd === "string" && agent.cwd ? agent.cwd : process.cwd();
 
   // Truncation Guard: Truncate large stringified arguments to 4096 bytes (4KB)
   if (typeof rawArgs === "string") {

@@ -8,15 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "types": [
-      "node"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src/**/*",
-    "server/**/*",
-    "test/**/*",
-    "*.ts",
-    "*.json"
-  ]
+  "include": ["src/**/*", "server/**/*", "test/**/*", "*.ts", "*.json"]
 }
