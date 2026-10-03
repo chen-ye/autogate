@@ -260,7 +260,11 @@ export class OmpNativeEvaluator implements GateEvaluator {
           {
             systemPrompt: [systemPrompt],
             messages,
-            tools: [CLASSIFY_RESULT_TOOL as any],
+            tools: [
+              CLASSIFY_RESULT_TOOL as unknown as NonNullable<
+                Parameters<typeof completeSimple>[1]["tools"]
+              >[number],
+            ],
           },
           {
             apiKey,
