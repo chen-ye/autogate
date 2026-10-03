@@ -39,18 +39,77 @@ export function recordEscalationIntent(sessionID: string, action: string, reason
   });
 }
 
+function getRequestPermission(request: PermissionEventData | GateAction): string {
+  if ("toolName" in request && typeof request.toolName === "string" && request.toolName) {
+    return request.toolName;
+  }
+  if ("permission" in request && typeof request.permission === "string" && request.permission) {
+    return request.permission;
+  }
+  if ("action" in request && typeof request.action === "string" && request.action) {
+    return request.action;
+  }
+  return "";
+}
+
+function getRequestCommandString(
+  request: PermissionEventData | GateAction,
+  overrideCmd?: string,
+): string {
+  if (typeof overrideCmd === "string" && overrideCmd.trim().length > 0) {
+    return overrideCmd.trim();
+  }
+  if (typeof request.commandString === "string" && request.commandString.trim().length > 0) {
+    return request.commandString.trim();
+  }
+  const meta = request.metadata;
+  if (meta && typeof meta === "object") {
+    if (typeof meta.command === "string" && meta.command.trim().length > 0) {
+      return meta.command.trim();
+    }
+    if (typeof meta.cmd === "string" && meta.cmd.trim().length > 0) {
+      return meta.cmd.trim();
+    }
+    if (Array.isArray(meta.patterns) && meta.patterns.length > 0) {
+      return meta.patterns.filter((p): p is string => typeof p === "string").join(" ");
+    }
+  }
+  if ("resources" in request && Array.isArray(request.resources) && request.resources.length > 0) {
+    return request.resources.filter((r): r is string => typeof r === "string").join(" ");
+  }
+  if ("patterns" in request && Array.isArray(request.patterns) && request.patterns.length > 0) {
+    return request.patterns.filter((p): p is string => typeof p === "string").join(" ");
+  }
+  if ("rawArgs" in request && Array.isArray(request.rawArgs) && request.rawArgs.length > 0) {
+    return request.rawArgs.filter((a): a is string => typeof a === "string").join(" ");
+  }
+  if (typeof request.targetPath === "string") {
+    return request.targetPath.trim();
+  }
+  return "";
+}
+
+function getRequestSessionID(request: PermissionEventData | GateAction): string {
+  return typeof request.sessionID === "string" ? request.sessionID : "";
+}
+
+function getRequestPatterns(request: PermissionEventData | GateAction): string {
+  if ("patterns" in request && Array.isArray(request.patterns) && request.patterns.length > 0) {
+    return request.patterns.map(String).join(",");
+  }
+  return getRequestCommandString(request);
+}
+
 export function getActionKey(request: PermissionEventData | GateAction): string {
-  const perm = (request as any).permission ?? (request as any).toolName ?? "";
-  const patterns = Array.isArray((request as any).patterns)
-    ? (request as any).patterns.join(",")
-    : (request as any).commandString || (request as any).targetPath || "";
-  const sessionID = (request as any).sessionID || "";
+  const perm = getRequestPermission(request);
+  const patterns = getRequestPatterns(request);
+  const sessionID = getRequestSessionID(request);
   return `${sessionID}:${perm}:${patterns}`;
 }
 
 function matchesAction(
   entryAction: string,
-  request: PermissionEventData,
+  request: PermissionEventData | GateAction,
   commandString: string,
 ): boolean {
   const normEntry = entryAction
@@ -66,7 +125,7 @@ function matchesAction(
     }
   }
 
-  if (Array.isArray(request.patterns)) {
+  if ("patterns" in request && Array.isArray(request.patterns)) {
     for (const pat of request.patterns) {
       const normPat = String(pat)
         .trim()
@@ -80,10 +139,11 @@ function matchesAction(
     }
   }
 
+  const meta = request.metadata;
   const filepath =
-    (typeof request.metadata?.filepath === "string" ? request.metadata.filepath : "") ||
-    (typeof request.metadata?.path === "string" ? request.metadata.path : "") ||
-    (typeof request.metadata?.file === "string" ? request.metadata.file : "");
+    (typeof meta?.filepath === "string" ? meta.filepath : "") ||
+    (typeof meta?.path === "string" ? meta.path : "") ||
+    (typeof meta?.file === "string" ? meta.file : "");
 
   if (filepath) {
     const normFp = filepath
@@ -104,23 +164,18 @@ export function checkAndConsumeEscalation(
 ): string | null {
   sweepExpiredState();
 
-  const perm = (request as any).permission ?? (request as any).toolName ?? "";
-  const commandString =
-    (request as any).commandString ||
-    (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
-    (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
-    (Array.isArray((request as any).resources) ? (request as any).resources.join(" ") : "") ||
-    (Array.isArray((request as any).patterns) ? (request as any).patterns.join(" ") : "") ||
-    (typeof (request as any).targetPath === "string" ? (request as any).targetPath : "");
+  const perm = getRequestPermission(request);
+  const commandString = getRequestCommandString(request);
 
   const isBash = perm === "bash" || perm === "shell:run" || perm === "shell";
   if (isBash && commandString.includes("AUTOGATE_ESCALATE=1")) {
     return "Escalated via AUTOGATE_ESCALATE=1 environment variable";
   }
 
-  const sessionCandidates = [(request as any).sessionID, parentSessionID].filter(
-    Boolean,
-  ) as string[];
+  const sessionID = getRequestSessionID(request);
+  const sessionCandidates = [sessionID, parentSessionID].filter(
+    (s): s is string => typeof s === "string" && s.length > 0,
+  );
   for (const sid of sessionCandidates) {
     const entry = sharedExplicitEscalations.get(sid);
     if (entry) {
@@ -146,10 +201,11 @@ export function checkAndConsumeEscalation(
     }
   }
 
-  if (parentSessionID && parentSessionID !== (request as any).sessionID) {
-    const parentPatterns = Array.isArray((request as any).patterns)
-      ? (request as any).patterns.join(",")
-      : commandString;
+  if (parentSessionID && parentSessionID !== sessionID) {
+    const parentPatterns =
+      "patterns" in request && Array.isArray(request.patterns)
+        ? request.patterns.map(String).join(",")
+        : commandString;
     const parentActionKey = `${parentSessionID}:${perm}:${parentPatterns}`;
     const parentRejected = sharedRecentlyRejected.get(parentActionKey);
     if (parentRejected) {
@@ -171,16 +227,7 @@ export function isTransformableAction(
   request: PermissionEventData | GateAction,
   commandString?: string,
 ): boolean {
-  const cmd = (
-    commandString ||
-    (request as any).commandString ||
-    (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
-    (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
-    (Array.isArray((request as any).patterns) ? (request as any).patterns.join(" ") : "") ||
-    (Array.isArray((request as any).metadata?.patterns)
-      ? ((request as any).metadata.patterns as any[]).join(" ")
-      : "")
-  ).trim();
+  const cmd = getRequestCommandString(request, commandString);
 
   if (!cmd) return false;
 
@@ -269,16 +316,16 @@ export class AutoGateCoreEngine {
     ) {
       const opts = optionsOrConfig as AutoGateEngineOptions;
       this.config = opts.config;
-      this.remoteAdapter = opts.adapter ?? (opts as any).remoteAdapter ?? createDummyAdapter();
+      this.remoteAdapter = opts.adapter ?? createDummyAdapter();
       this.evaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.config);
-      this.workspaceRoot = opts.workspaceRoot ?? (opts.config as any)?.workspaceRoot;
+      this.workspaceRoot = opts.workspaceRoot ?? this.config.environment?.trustedPaths?.[0];
       remoteReviewOption = opts.remoteReviewEnabled;
     } else {
       this.config = (optionsOrConfig as AutoGateConfig) || { autoMode: false };
       this.remoteAdapter = remoteAdapter ?? createDummyAdapter();
       this.evaluator = evaluator ?? new DefaultGateEvaluator(this.config);
     }
-    this.workspaceRoot = this.workspaceRoot || (this.config as any)?.workspaceRoot;
+    this.workspaceRoot = this.workspaceRoot || this.config.environment?.trustedPaths?.[0];
     this.enabled = this.config.autoMode;
     this.consecutiveBlockThreshold = this.config.consecutiveBlockThreshold ?? 3;
     this.reviewFallbackMode = this.config.reviewFallbackMode ?? "ntfy";
@@ -467,9 +514,11 @@ export class AutoGateCoreEngine {
       action.commandString ||
       (typeof action.metadata?.command === "string" ? action.metadata.command : "") ||
       (Array.isArray(action.metadata?.patterns)
-        ? (action.metadata.patterns as any[]).join(" ")
+        ? action.metadata.patterns.filter((p): p is string => typeof p === "string").join(" ")
         : "") ||
-      (Array.isArray(action.rawArgs) ? (action.rawArgs as any[]).join(" ") : "");
+      (Array.isArray(action.rawArgs)
+        ? action.rawArgs.filter((a): a is string => typeof a === "string").join(" ")
+        : "");
     const actionKey = `${action.toolName}:${commandString || action.targetPath || JSON.stringify(action.rawArgs || "")}`;
 
     if (this.turnDecisionCache.get(sid)?.has(actionKey)) {
@@ -497,87 +546,91 @@ export class AutoGateCoreEngine {
       verdictResult = { verdict: "UNSURE", reason: `Classifier error: ${err}` };
     }
 
-    // 6. On ALLOW: caches action, resets consecutive blocks, optional info notification, returns GateDecision.
-    if (verdictResult.verdict === "ALLOW") {
-      let sessionCache = this.turnDecisionCache.get(sid);
-      if (!sessionCache) {
-        sessionCache = new Set();
-        this.turnDecisionCache.set(sid, sessionCache);
+    // 6. Handle verdict with compile-time exhaustiveness checking.
+    switch (verdictResult.verdict) {
+      case "ALLOW": {
+        let sessionCache = this.turnDecisionCache.get(sid);
+        if (!sessionCache) {
+          sessionCache = new Set();
+          this.turnDecisionCache.set(sid, sessionCache);
+        }
+        sessionCache.add(actionKey);
+        this.resetConsecutiveBlocks();
+        if (this.config.notifyOnVerdict !== false) {
+          this.sendInformationalNotification(
+            action,
+            "ALLOW",
+            verdictResult.reason,
+            verdictResult.risk_level,
+            verdictResult.user_authorization,
+          ).catch(() => {});
+        }
+        return {
+          verdict: "ALLOW",
+          riskLevel: verdictResult.risk_level,
+          userAuthorization: verdictResult.user_authorization,
+          reason: verdictResult.reason || "Allowed by AutoGate classifier policy",
+          cached: false,
+        };
       }
-      sessionCache.add(actionKey);
-      this.resetConsecutiveBlocks();
-      if (this.config.notifyOnVerdict !== false) {
-        this.sendInformationalNotification(
+      case "BLOCK": {
+        this.consecutiveBlocks++;
+        const baseReason = verdictResult.reason || "Blocked by AutoGate classifier policy";
+        const regActionKey = getActionKey(action);
+        sweepExpiredState();
+
+        let message = baseReason;
+        if (isTransformableAction(action, commandString)) {
+          message = `[SAFE_TRANSFORM_REJECT]: ${baseReason}. Safe alternative: use 'npx trash-cli' instead of permanent 'rm', or 'git stash' before checkout/restore. To insist on manual review, call 'escalate_permission' tool, use AUTOGATE_ESCALATE=1 (for shell), or re-issue the exact action within 60s.`;
+        }
+
+        sharedRecentlyRejected.set(regActionKey, {
+          timestamp: Date.now(),
+          reason: message,
+        });
+
+        if (this.config.notifyOnVerdict !== false) {
+          this.sendInformationalNotification(
+            action,
+            "BLOCK",
+            message,
+            verdictResult.risk_level,
+            verdictResult.user_authorization,
+          ).catch(() => {});
+        }
+
+        return {
+          verdict: "BLOCK",
+          riskLevel: verdictResult.risk_level,
+          userAuthorization: verdictResult.user_authorization,
+          reason: message,
+          safeTransformAlternative: isTransformableAction(action, commandString)
+            ? message
+            : undefined,
+        };
+      }
+      case "UNSURE": {
+        if (!this.remoteReviewEnabled) {
+          return {
+            verdict: "UNSURE",
+            reason: verdictResult.reason || "Manual review required (local harness fallback)",
+            riskLevel: verdictResult.risk_level,
+            userAuthorization: verdictResult.user_authorization,
+          };
+        }
+        return this.requestReview(
           action,
-          "ALLOW",
           verdictResult.reason,
+          false,
           verdictResult.risk_level,
           verdictResult.user_authorization,
-        ).catch(() => {});
+        );
       }
-      return {
-        verdict: "ALLOW",
-        riskLevel: verdictResult.risk_level,
-        userAuthorization: verdictResult.user_authorization,
-        reason: verdictResult.reason || "Allowed by AutoGate classifier policy",
-        cached: false,
-      };
-    }
-
-    // 7. On BLOCK: increments consecutive blocks, checks `isTransformableAction`, records in `sharedRecentlyRejected`, optional info notification, returns GateDecision.
-    if (verdictResult.verdict === "BLOCK") {
-      this.consecutiveBlocks++;
-      const baseReason = verdictResult.reason ?? "Blocked by AutoGate classifier policy";
-      const regActionKey = getActionKey(action);
-      sweepExpiredState();
-
-      let message = baseReason;
-      if (isTransformableAction(action, commandString)) {
-        message = `[SAFE_TRANSFORM_REJECT]: ${baseReason}. Safe alternative: use 'npx trash-cli' instead of permanent 'rm', or 'git stash' before checkout/restore. To insist on manual review, call 'escalate_permission' tool, use AUTOGATE_ESCALATE=1 (for shell), or re-issue the exact action within 60s.`;
+      default: {
+        const _exhaustive: never = verdictResult;
+        return _exhaustive;
       }
-
-      sharedRecentlyRejected.set(regActionKey, {
-        timestamp: Date.now(),
-        reason: message,
-      });
-
-      if (this.config.notifyOnVerdict !== false) {
-        this.sendInformationalNotification(
-          action,
-          "BLOCK",
-          message,
-          verdictResult.risk_level,
-          verdictResult.user_authorization,
-        ).catch(() => {});
-      }
-
-      return {
-        verdict: "BLOCK",
-        riskLevel: verdictResult.risk_level,
-        userAuthorization: verdictResult.user_authorization,
-        reason: message,
-        safeTransformAlternative: isTransformableAction(action, commandString)
-          ? message
-          : undefined,
-      };
     }
-
-    // 8. On UNSURE: calls `requestReview(action, reason, isCircuitBreaker, riskLevel, userAuth)` and awaits in-flight resolver or timeout.
-    if (!this.remoteReviewEnabled) {
-      return {
-        verdict: "UNSURE",
-        reason: verdictResult.reason ?? "Manual review required (local harness fallback)",
-        riskLevel: verdictResult.risk_level,
-        userAuthorization: verdictResult.user_authorization,
-      };
-    }
-    return this.requestReview(
-      action,
-      verdictResult.reason,
-      false,
-      verdictResult.risk_level,
-      verdictResult.user_authorization,
-    );
   }
 
   public async requestReview(
@@ -683,7 +736,7 @@ export class AutoGateCoreEngine {
       console.error("Failed to publish notification to remote adapter:", err);
     }
 
-    const timeoutMs = (this.config as any)?.reviewTimeout ?? 300000;
+    const timeoutMs = this.config.reviewTimeout ?? 300000;
     const timeoutPromise = new Promise<GateDecision>((resolve) => {
       timeoutTimer = setTimeout(() => {
         const entry = this.inFlightRequests.get(action.id);
@@ -704,7 +757,7 @@ export class AutoGateCoreEngine {
   }
 
   public resolveReviewResponse(resp: ReviewResponse): void {
-    const reqID = resp.req_id ?? (resp as any).id;
+    const reqID = resp.req_id ?? resp.id;
     if (!reqID) return;
 
     const entry = this.inFlightRequests.get(reqID);

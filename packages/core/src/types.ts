@@ -115,6 +115,7 @@ export interface AutoGateConfig {
   classifierTimeout?: number;
   consecutiveBlockThreshold?: number;
   notifyOnVerdict?: boolean;
+  reviewTimeout?: number;
   environment?: EnvironmentConfig;
   serverUrl?: string;
   /**
@@ -230,6 +231,7 @@ export interface ReviewRequest {
 
 export interface ReviewResponse {
   req_id: string;
+  id?: string;
   reply: "once" | "always" | "reject";
   source?: string;
 }
@@ -262,14 +264,29 @@ export type ApprovalResponse = ReviewResponse;
 export type RemoteAdapter = NotifierAdapter;
 export type NotificationAction = ReviewAction;
 export interface PermissionEventData {
-  [key: string]: any;
+  id?: string;
+  harness?: string;
+  sessionID?: string;
   permission?: string;
   toolName?: string;
+  action?: string;
+  source?: { type?: string };
+  directory?: string;
   patterns?: unknown[];
-  metadata?: Record<string, any>;
+  resources?: unknown[];
   commandString?: string;
   targetPath?: string;
-  sessionID?: string;
+  metadata?: {
+    directory?: string;
+    filepath?: string;
+    path?: string;
+    file?: string;
+    command?: string;
+    cmd?: string;
+    patterns?: unknown[];
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
 }
 
 export interface ClassifyInput {
