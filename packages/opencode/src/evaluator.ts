@@ -17,6 +17,8 @@ import {
   parseVerdict,
 } from "@autogate/core";
 import { resolveServerPassword } from "./index.js";
+import type { OpenCodeClassifyInput, OpenCodeSessionClient } from "./types.js";
+export type { OpenCodeClassifyInput, OpenCodeSessionClient };
 
 export interface EvaluationAuditEntry {
   timestamp: number;
@@ -329,10 +331,6 @@ export function resetCachedEvaluationAgent(): void {
   cachedEvalAgent = undefined;
 }
 
-export interface OpenCodeClassifyInput extends ClassifyInput {
-  client?: any;
-}
-
 export async function classifyRequest(input: OpenCodeClassifyInput): Promise<ClassifierResult> {
   // Entry
   const sandboxDir = ensureSandboxDirectory();
@@ -344,7 +342,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
 
   const evalAgent = await resolveEvaluationAgent(input.client);
   const evalTitle = `[auto-gate-eval] ${actionName}`;
-  let sessionRes: any;
+  let sessionRes: { data?: { id?: string }; id?: string } | undefined;
   if (typeof input.client?.session?.create === "function") {
     try {
       sessionRes = await input.client.session.create({
@@ -359,7 +357,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       });
     } catch {}
 
-    if (!sessionRes?.data?.id && !(sessionRes as any)?.id) {
+    if (!sessionRes?.data?.id && !sessionRes?.id) {
       try {
         sessionRes = await input.client.session.create({
           body: {
@@ -370,23 +368,23 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           title: evalTitle,
           directory: sandboxDir,
           agent: evalAgent,
-        });
+        } as any);
       } catch {}
     }
 
-    if (!sessionRes?.data?.id && !(sessionRes as any)?.id) {
+    if (!sessionRes?.data?.id && !sessionRes?.id) {
       try {
         sessionRes = await input.client.session.create({
           title: evalTitle,
           agent: evalAgent,
           body: { title: evalTitle, agent: evalAgent },
-        });
+        } as any);
       } catch {}
     }
   }
 
   // Fallback to direct HTTP API if client method was unavailable or did not return an ID
-  if (!sessionRes?.data?.id && !(sessionRes as any)?.id) {
+  if (!sessionRes?.data?.id && !sessionRes?.id) {
     const serverUrl =
       (input.config as any)?.serverUrl ||
       (input.client as any)?.serverUrl ||
@@ -651,7 +649,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
 export class OpenCodeSessionEvaluator implements GateEvaluator {
   readonly name = "opencode-session-evaluator";
   constructor(
-    private client: any,
+    private client: OpenCodeSessionClient | any,
     private config?: AutoGateConfig,
   ) {}
   async evaluate(action: GateAction): Promise<ClassifierResult> {

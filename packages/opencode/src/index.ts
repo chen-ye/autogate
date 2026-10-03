@@ -19,6 +19,8 @@ import {
   recordEvaluationVerdict,
   evaluationSessions,
 } from "./evaluator.js";
+import { OpenCodePromptResolver } from "./prompt-resolver.js";
+import type { OpenCodeSessionClient } from "./types.js";
 
 export function isEventForWorkspace(event: any, workspaceDir?: string): boolean {
   if (!workspaceDir) return true;
@@ -126,6 +128,7 @@ export function resolveServerPassword(configDir?: string): string {
 export class OpenCodeHarnessAdapter implements HarnessAdapter {
   readonly name = "opencode-harness";
   private engine: AutoGateCoreEngine;
+  private promptResolver: OpenCodePromptResolver;
   private stopListener?: () => void;
   private ctx: PluginInput;
   readonly serverUrl: string;
@@ -145,7 +148,8 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
 
     const workspaceRoot = ctx.directory || ctx.worktree || process.cwd();
 
-    const client = ctx.client || (ctx as any);
+    const client = (ctx.client || (ctx as any)) as OpenCodeSessionClient;
+    this.promptResolver = new OpenCodePromptResolver(client);
     this.engine = new AutoGateCoreEngine({
       config,
       adapter,
@@ -196,24 +200,46 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       (request as any).source?.type ||
       "permission";
 
+    const sessionID = (request.sessionID as string) || "";
+    const resolvedPrompts = await this.promptResolver.resolveSessionPrompts(
+      sessionID,
+      undefined,
+      this.engine.getUserPrompt(sessionID),
+    );
+
+    const parentID = this.promptResolver.getParentSessionID(sessionID);
+    if (parentID) {
+      this.engine.setSessionParent(sessionID, parentID);
+    }
+    if (resolvedPrompts.userPrompt) {
+      this.engine.setUserPrompt(sessionID, resolvedPrompts.userPrompt);
+    }
+
     const action: GateAction = {
-      id: request.id || Math.random().toString(36).slice(2),
-      harness: request.harness || "opencode",
-      sessionID: request.sessionID || "",
+      id: (request.id as string) || Math.random().toString(36).slice(2),
+      harness: (request.harness as string) || "opencode",
+      sessionID,
       toolName,
       commandString,
       targetPath:
         typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
       rawArgs: request.patterns || (request as any).resources || request.metadata,
       workspaceRoot: (request.metadata?.directory as string) || workspaceRoot,
-      userPrompt: this.engine.getUserPrompt(request.sessionID),
+      userPrompt: resolvedPrompts.userPrompt,
+      subagentPrompt: resolvedPrompts.subagentPrompt,
       environment: (this.engine as any).config?.environment,
       metadata: request.metadata,
     };
     const decision = await this.engine.evaluate(action);
     const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
     const targetDir = (request.metadata?.directory as string) || workspaceRoot;
-    await this.replyPermission(request.id, replyVal, request.sessionID, decision.reason, targetDir);
+    await this.replyPermission(
+      request.id as string,
+      replyVal,
+      sessionID,
+      decision.reason,
+      targetDir,
+    );
   }
 
   private async replyPermission(
