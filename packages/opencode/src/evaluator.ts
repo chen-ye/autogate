@@ -546,25 +546,32 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         }, timeoutMs);
       });
 
-      const promptPromise = client.session.prompt({
-        path: { id: sessionID },
-        agent: evalAgent,
-        body: {
+      const promptPromise = client.session
+        .prompt({
+          path: { id: sessionID },
           agent: evalAgent,
-          model: {
-            providerID: modelRef.providerID,
-            modelID: modelRef.modelID,
-          },
-          tools: { ...EVAL_SESSION_TOOLS },
-          system: systemPrompt,
-          parts: [
-            {
-              type: "text",
-              text: userPromptText,
+          body: {
+            agent: evalAgent,
+            model: {
+              providerID: modelRef.providerID,
+              modelID: modelRef.modelID,
             },
-          ],
-        },
-      });
+            tools: { ...EVAL_SESSION_TOOLS },
+            system: systemPrompt,
+            parts: [
+              {
+                type: "text",
+                text: userPromptText,
+              },
+            ],
+          },
+        })
+        .then(async (res) => {
+          if (typeof client.session.wait === "function") {
+            await client.session.wait({ path: { id: sessionID, sessionID } }).catch(() => {});
+          }
+          return res;
+        });
 
       promptPromise
         .then(async (promptRes) => {
@@ -620,6 +627,12 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
                     },
                   ],
                 },
+              })
+              .then(async (res) => {
+                if (typeof client.session.wait === "function") {
+                  await client.session.wait({ path: { id: sessionID, sessionID } }).catch(() => {});
+                }
+                return res;
               })
               .catch(() => null);
             if (repromptRes) {

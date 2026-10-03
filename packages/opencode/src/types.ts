@@ -29,6 +29,7 @@ export interface OpenCodeSessionClient {
     update?(options: Record<string, unknown>): Promise<unknown>;
     delete?(options: Record<string, unknown>): Promise<unknown>;
     abort?(options: { path: { id?: string } }): Promise<unknown>;
+    wait?(options: { path: { id?: string; sessionID?: string } }): Promise<unknown>;
   };
   app?: {
     log(options: { body: { service: string; level: string; message: string } }): Promise<unknown>;
