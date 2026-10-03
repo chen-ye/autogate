@@ -20,6 +20,32 @@ recordEvaluationVerdict,
 evaluationSessions,
 } from "./evaluator.js"
 
+export function isEventForWorkspace(event: any, workspaceDir?: string): boolean {
+  if (!workspaceDir) return true
+  const normalizedWs = path.resolve(workspaceDir)
+
+  // 1. Authoritative workspace directory in OpenCode v2 events
+  if (typeof event?.location?.directory === "string" && event.location.directory.trim().length > 0) {
+    return path.resolve(event.location.directory) === normalizedWs
+  }
+
+  // 2. Fall back to event data directory metadata
+  const eventData = event?.properties || event?.data
+  const dataDir =
+    typeof eventData?.metadata?.directory === "string"
+      ? eventData.metadata.directory
+      : typeof eventData?.directory === "string"
+      ? eventData.directory
+      : undefined
+
+  if (!dataDir) {
+    return true
+  }
+
+  const resolvedDataDir = path.resolve(dataDir)
+  return resolvedDataDir === normalizedWs || resolvedDataDir.startsWith(normalizedWs + path.sep)
+}
+
 export {
   OpenCodeSessionEvaluator,
   isEvaluationSession,
@@ -88,11 +114,12 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
 
     const workspaceRoot = ctx.directory || ctx.worktree || process.cwd()
 
+    const client = ctx.client || (ctx as any)
     this.engine = new AutoGateCoreEngine({
       config,
-      client: ctx.client,
+      client,
       adapter,
-      evaluator: new OpenCodeSessionEvaluator(ctx.client, config),
+      evaluator: new OpenCodeSessionEvaluator(client, config),
       workspaceRoot,
       remoteReviewEnabled: true,
     })
@@ -116,14 +143,36 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
 
   async handlePermissionAsked(request: PermissionEventData): Promise<void> {
     const workspaceRoot = this.ctx.directory || this.ctx.worktree || process.cwd()
+    const requestDir = (request?.metadata?.directory || request?.directory) as string | undefined
+    if (requestDir && (this.ctx.directory || this.ctx.worktree)) {
+      const explicitWs = this.ctx.directory || this.ctx.worktree
+      const normalizedReq = path.resolve(requestDir)
+      const normalizedWs = path.resolve(explicitWs)
+      if (normalizedReq !== normalizedWs && !normalizedReq.startsWith(normalizedWs + path.sep)) {
+        return
+      }
+    }
+    const commandString =
+      typeof request.metadata?.command === "string"
+        ? request.metadata.command
+        : Array.isArray((request as any).resources) && typeof (request as any).resources[0] === "string"
+        ? (request as any).resources[0]
+        : undefined
+
+    const toolName =
+      request.permission ||
+      (request as any).action ||
+      (request as any).source?.type ||
+      "permission"
+
     const action: GateAction = {
       id: request.id || Math.random().toString(36).slice(2),
       harness: request.harness || "opencode",
       sessionID: request.sessionID || "",
-      toolName: request.permission || "permission",
-      commandString: typeof request.metadata?.command === "string" ? request.metadata.command : undefined,
+      toolName,
+      commandString,
       targetPath: typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
-      rawArgs: request.patterns || request.metadata,
+      rawArgs: request.patterns || (request as any).resources || request.metadata,
       workspaceRoot: (request.metadata?.directory as string) || workspaceRoot,
       userPrompt: this.engine.getUserPrompt(request.sessionID),
       environment: (this.engine as any).config?.environment,
@@ -142,43 +191,64 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     message?: string,
     directory?: string
   ): Promise<void> {
+    const ctxAny = this.ctx as any
+    if (ctxAny.permission && typeof ctxAny.permission.reply === "function") {
+      try {
+        await ctxAny.permission.reply({
+          sessionID: sessionID || "",
+          requestID,
+          decision: reply,
+          reply,
+          message,
+        })
+        return
+      } catch {}
+    }
+
     const serverUrl = this.serverUrl || "http://localhost:4096"
     const password = process.env.OPENCODE_SERVER_PASSWORD || ""
     const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
     const workspaceRoot = this.ctx.directory || this.ctx.worktree
     const targetDir = directory || workspaceRoot
-    const url = `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
-
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": authHeader,
-        },
-        body: JSON.stringify({ reply, message }),
-        signal: AbortSignal.timeout(5000),
-      })
-      if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
-        return
-      }
-    } catch (err) {}
+    const urls = [
+      sessionID ? `${serverUrl}/api/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply` : undefined,
+      sessionID ? `${serverUrl}/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply` : undefined,
+      `${serverUrl}/api/permission/${encodeURIComponent(requestID)}/reply`,
+      `${serverUrl}/permission/${encodeURIComponent(requestID)}/reply`,
+    ].filter(Boolean) as string[]
+    for (const u of urls) {
+      const fullUrl = `${u}${targetDir ? `?directory=${encodeURIComponent(targetDir)}` : ""}`
+      try {
+        const res = await fetch(fullUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": authHeader,
+          },
+          body: JSON.stringify({ decision: reply, reply, message }),
+          signal: AbortSignal.timeout(5000),
+        })
+        if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
+          return
+        }
+      } catch {}
+    }
 
     const client = this.ctx.client
     if (!client) return
-if (typeof client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
+    if (typeof client?.postSessionIdPermissionsPermissionId === "function" && sessionID) {
       try {
         const res = await client.postSessionIdPermissionsPermissionId({
           path: { id: sessionID, permissionID: requestID },
-          body: { response: reply, message },
+          body: { response: reply },
           query: targetDir ? { directory: targetDir } : undefined,
 })
 if (!res?.error && res?.response?.ok !== false) return
 } catch {}
 }
-    if (typeof client?.permission?.reply === "function") {
+    if (typeof (client as any)?.permission?.reply === "function") {
       try {
-        const res = await client.permission.reply({
+        const res = await (client as any).permission.reply({
           path: { requestID },
           body: { reply, message },
           query: targetDir ? { directory: targetDir } : undefined,
@@ -308,6 +378,11 @@ export async function AutoGatePlugin(
       const { event } = input
       if (!event || !event.type) return
 
+      const workspaceDir = ctx.directory || ctx.worktree
+      if (workspaceDir && !isEventForWorkspace(event, workspaceDir)) {
+        return
+      }
+
       if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
         const eventData = event.properties || event.data
         if (eventData) {
@@ -369,7 +444,6 @@ export const plugin = {
   id: "auto-gate",
   async setup(ctx: any) {
     const adapter = new OpenCodeHarnessAdapter(ctx, ctx.options)
-    const engine = adapter.getEngine()
     await adapter.start()
 
     const config = loadConfig(ctx.options)
@@ -380,6 +454,7 @@ export const plugin = {
       await ctx.tool.transform((editor: any) => {
         editor.add({
           name: "classify_result",
+          options: { codemode: false },
           description: "Report the security classification result for the agent action (internal evaluation tool)",
           input: {
             type: "object",
@@ -410,6 +485,7 @@ export const plugin = {
 
         editor.add({
           name: "escalate_permission",
+          options: { codemode: false },
           description: "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
           input: {
             type: "object",
@@ -435,6 +511,11 @@ export const plugin = {
       ;(async () => {
         try {
           for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+            const workspaceDir = ctx.directory || ctx.worktree
+            if (workspaceDir && !isEventForWorkspace(event, workspaceDir)) {
+              continue
+            }
+
             if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
               const eventData = event.properties || event.data
               if (eventData) {

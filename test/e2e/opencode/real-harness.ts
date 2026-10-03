@@ -2,7 +2,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import * as crypto from "crypto"
-import { execSync } from "child_process"
+import { execSync, spawn } from "child_process"
 import { fileURLToPath } from "url"
 import {
   createOpencodeServer,
@@ -308,7 +308,7 @@ this.mockProvider = new MockInferenceProvider(0)
     this.serverPort = allocatedPort
     this.url = `http://127.0.0.1:${allocatedPort}`
 
-    const pluginPath = path.resolve(process.cwd(), "packages/opencode/src/index.ts")
+    const pluginPath = path.resolve(process.cwd(), "packages/opencode")
     const pluginConfig = {
       ntfyServer: this.ntfyServer,
       ntfyTopic: this.ntfyTopic,
@@ -319,10 +319,29 @@ this.mockProvider = new MockInferenceProvider(0)
       ...(options?.pluginConfig || {}),
     }
     const pluginEntry = [[pluginPath, pluginConfig]]
+    const localNodeModules = path.resolve(process.cwd(), "node_modules")
+    try {
+      fs.symlinkSync(localNodeModules, path.join(this.workspaceDir, "node_modules"), "dir")
+    } catch {}
+
+    const v2PluginPath = path.resolve(process.cwd(), "packages/opencode")
+    const v2PluginConfig = {
+      ntfyServer: this.ntfyServer,
+      ntfyTopic: this.ntfyTopic,
+      ntfyToken: this.ntfyToken,
+      serverUrl: this.url,
+      classifierModel: "mock-provider/mock-model",
+      autoMode: true,
+      ...(options?.pluginConfig || {}),
+    }
     const opencodeConfig = {
-      plugin: pluginEntry,
-      db: ":memory:",
+      plugins: [{ package: v2PluginPath, options: v2PluginConfig }],
+      plugin: [[v2PluginPath, v2PluginConfig]],
       model: "mock-provider/mock-model",
+      permissions: [
+        { action: "shell", resource: "*", effect: "ask" },
+        { action: "read", resource: "*", effect: "allow" },
+      ],
       permission: {
         "*": "ask",
       },
@@ -341,31 +360,108 @@ this.mockProvider = new MockInferenceProvider(0)
           },
         },
       },
+      providers: {
+        "mock-provider": {
+          name: "Mock Provider",
+          package: "aisdk:@ai-sdk/openai-compatible",
+          settings: {
+            baseURL: `${this.mockProvider.url}/v1`,
+            apiKey: "mock-api-key",
+          },
+          models: {
+            "mock-model": {
+              name: "Mock Model",
+            },
+          },
+        },
+      },
       ...(options?.opencodeConfig || {}),
     }
 
-    // 4. Inject environment variables
-    process.env.SERVER_URL = this.url
+    fs.writeFileSync(
+      path.join(this.workspaceDir, "opencode.json"),
+      JSON.stringify(opencodeConfig, null, 2),
+      "utf8"
+    )
+
+    const testConfigDir = path.join(this.workspaceDir, ".config", "opencode")
+    fs.mkdirSync(testConfigDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(testConfigDir, "opencode.json"),
+      JSON.stringify(opencodeConfig, null, 2),
+      "utf8"
+    )
+
+    const localBinDir = path.resolve(process.cwd(), "node_modules/.bin")
+    process.env.PATH = `${localBinDir}:${process.env.PATH}`
+    process.env.NODE_PATH = localNodeModules
     process.env.OPENCODE_SERVER_PASSWORD = this.serverPassword
     process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(opencodeConfig)
-    process.env.XDG_CONFIG_HOME = path.join(this.workspaceDir, ".config")
-    process.env.XDG_DATA_HOME = path.join(this.workspaceDir, ".local", "share")
-    process.env.XDG_STATE_HOME = path.join(this.workspaceDir, ".local", "state")
-    process.env.XDG_CACHE_HOME = path.join(this.workspaceDir, ".cache")
+    delete process.env.OPENCODE_CONFIG_DIR
+    delete process.env.OPENCODE_DB
 
-    // 5. Spawn real opencode serve binary via @opencode-ai/sdk
-    this.server = await createOpencodeServer({
-      port: allocatedPort,
-      config: opencodeConfig as any,
-      timeout: options?.timeout ?? 20000,
+    const binary = path.resolve(process.cwd(), "node_modules/.bin/opencode")
+    const serverTimeout = options?.timeout ?? 20000
+    const serverProc = spawn(binary, ["serve", "--hostname=127.0.0.1", `--port=${allocatedPort}`], {
+      cwd: this.workspaceDir,
+      env: {
+        ...process.env,
+        OPENCODE_PRINT_LOGS: "1",
+        OPENCODE_LOG_LEVEL: "DEBUG",
+        OPENCODE_CONFIG_DIR: testConfigDir,
+        OPENCODE_DB: path.join(this.workspaceDir, "test.db"),
+        OPENCODE_SERVER_PASSWORD: this.serverPassword,
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeConfig),
+        XDG_CONFIG_HOME: path.join(this.workspaceDir, ".config"),
+        XDG_DATA_HOME: path.join(this.workspaceDir, ".local", "share"),
+        XDG_STATE_HOME: path.join(this.workspaceDir, ".local", "state"),
+        XDG_CACHE_HOME: path.join(this.workspaceDir, ".cache"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
     })
-    this.url = this.server.url
-    try {
-      const urlObj = new URL(this.server.url)
-      this.serverPort = parseInt(urlObj.port, 10)
-      this.serverPid = this.findServerPid(this.serverPort)
-    } catch {}
-    // 6. Instantiate typed client with Basic Auth
+
+    const serverUrl = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        try { serverProc.kill("SIGTERM"); } catch {}
+        reject(new Error(`Timeout waiting for OpenCode server to start after ${serverTimeout}ms`))
+      }, serverTimeout)
+
+      let output = ""
+      serverProc.stdout?.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8")
+        const match = output.match(/listening on\s+(https?:\/\/[^\s]+)/)
+        if (match) {
+          clearTimeout(timer)
+          resolve(match[1])
+        }
+      })
+      serverProc.stderr?.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8")
+      })
+      serverProc.on("exit", (code) => {
+        clearTimeout(timer)
+        reject(new Error(`OpenCode server exited with code ${code}. Output:\n${output}`))
+      })
+    })
+
+    this.server = {
+      url: serverUrl,
+      close() {
+        try { serverProc.kill("SIGTERM"); } catch {}
+      }
+    }
+    if (process.env.DEBUG_TEST_SERVER) {
+      serverProc.stdout?.on("data", (chunk: Buffer) => {
+        console.log("[OpenCode STDOUT]", chunk.toString("utf8"))
+      })
+      serverProc.stderr?.on("data", (chunk: Buffer) => {
+        console.log("[OpenCode STDERR]", chunk.toString("utf8"))
+      })
+    }
+    this.url = serverUrl
+    this.serverPort = allocatedPort
+    this.serverPid = serverProc.pid
+
     this.client = createOpencodeClient({
       baseUrl: this.server.url,
       headers: {
@@ -716,7 +812,27 @@ reader.releaseLock()
     }
   }
 
-  public async createSession(options?: { title?: string }): Promise<any> {
+  public async createSession(options?: { title?: string; model?: any; agent?: string }): Promise<any> {
+    try {
+      const res = await fetch(`${this.url}/api/session`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: this.authHeader,
+        },
+        body: JSON.stringify({
+          title: options?.title || "Test Session",
+          model: options?.model || { providerID: "mock-provider", id: "mock-model" },
+          agent: options?.agent,
+        }),
+      })
+      if (res.ok) {
+        const json: any = await res.json()
+        const data = json.data ?? json
+        return { data: { id: data.id || data.sessionID, ...data }, ...data, id: data.id || data.sessionID }
+      }
+    } catch {}
+
     return await this.client.session.create({
       body: { title: options?.title || "Test Session" },
       query: { directory: this.workspaceDir },
@@ -742,16 +858,50 @@ reader.releaseLock()
         }
       }
     }
-return await this.client.session.prompt({
-path: { id: sessionID },
-query: { directory: this.workspaceDir },
-body: {
-parts: [{ type: "text", text: userText }],
-agent: options?.agent,
-model: options?.model,
-},
-})
-}
+    try {
+      const res = await fetch(`${this.url}/api/session/${sessionID}/prompt`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: this.authHeader,
+        },
+        body: JSON.stringify({
+          prompt: { text: userText },
+          text: userText,
+          agent: options?.agent,
+          model: options?.model,
+        }),
+      })
+      if (res.ok) {
+        return { response: { ok: true }, data: await res.json() }
+      }
+    } catch {}
+
+    return await this.client.session.prompt({
+      path: { id: sessionID },
+      query: { directory: this.workspaceDir },
+      body: {
+        parts: [{ type: "text", text: userText }],
+        agent: options?.agent,
+        model: options?.model,
+      },
+    })
+  }
+
+  public async getSessionMessages(sessionID: string): Promise<any[]> {
+    try {
+      const res = await fetch(`${this.url}/api/session/${sessionID}/message`, {
+        headers: { Authorization: this.authHeader },
+      })
+      if (res.ok) {
+        const json: any = await res.json()
+        return json.data ?? (Array.isArray(json) ? json : [])
+      }
+    } catch {}
+
+    const res: any = await this.client.session.messages({ path: { id: sessionID } }).catch(() => null)
+    return res?.data || []
+  }
 
   public findServerPid(port: number): number | undefined {
     for (let attempt = 0; attempt < 3; attempt++) {

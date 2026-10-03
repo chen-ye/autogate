@@ -11,6 +11,8 @@
   "devDependencies": {
     "@getpaseo/client": "^0.8.0",
     "@oh-my-pi/pi-coding-agent": "link:../oh-my-pi/packages/coding-agent",
-    "@types/node": "^22.20.2"
+    "@types/node": "^22.20.2",
+    "@opencode/cli": "2.0.21",
+    "@opencode/cli-linux-x64": "2.0.21"
   }
 }

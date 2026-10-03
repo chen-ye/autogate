@@ -90,10 +90,11 @@ export function checkAndConsumeEscalation(request: PermissionEventData | GateAct
     (request as any).commandString ||
     (typeof request.metadata?.command === "string" ? request.metadata.command : "") ||
     (typeof request.metadata?.cmd === "string" ? request.metadata.cmd : "") ||
+    (Array.isArray((request as any).resources) ? (request as any).resources.join(" ") : "") ||
     (Array.isArray((request as any).patterns) ? (request as any).patterns.join(" ") : "") ||
     (typeof (request as any).targetPath === "string" ? (request as any).targetPath : "")
 
-  const isBash = perm === "bash" || perm === "shell:run"
+  const isBash = perm === "bash" || perm === "shell:run" || perm === "shell"
   if (isBash && commandString.includes("AUTOGATE_ESCALATE=1")) {
     return "Escalated via AUTOGATE_ESCALATE=1 environment variable"
   }

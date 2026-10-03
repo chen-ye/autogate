@@ -17,6 +17,32 @@ import {
   parseVerdict,
 } from "@autogate/core"
 
+export interface EvaluationAuditEntry {
+  timestamp: number
+  sessionID: string
+  toolName: string
+  commandString: string
+  userPrompt: string
+  reasoning?: string
+  verdict: ClassifierVerdict
+  risk_level?: RiskLevel
+  user_authorization?: UserAuthorization
+  durationMs: number
+}
+
+export function logEvaluationDecision(entry: EvaluationAuditEntry, logFilePath?: string): void {
+  try {
+    const filePath = logFilePath ?? path.join(os.homedir(), ".config", "autogate", "logs", "evals.jsonl")
+    const dir = path.dirname(filePath)
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+    fs.appendFileSync(filePath, JSON.stringify(entry) + "\n", "utf8")
+  } catch (err) {
+    console.warn("[AutoGate] Failed to write evaluation audit log:", err)
+  }
+}
+
 export const evaluationSessions = new Set<string>()
 export const evaluationResolvers = new Map<string, (res: ClassifierResult) => void>()
 
@@ -103,6 +129,8 @@ export const PASSIVE_EVALUATOR_DIRECTIVE =
   "CRITICAL: You are an isolated security evaluation judge. Your ONLY tool is classify_result. You must NEVER execute the command, run bash, edit files, or perform any operational action. Immediately invoke classify_result and stop."
 
 export const EVAL_SESSION_TOOLS = {
+  subagent: false,
+  shell: false,
   task: false,
   read: false,
   glob: false,
@@ -225,8 +253,10 @@ export async function extractVerdictFromSession(
         ? msgsRes
         : Array.isArray(msgsRes?.data)
           ? msgsRes.data
-          : Array.isArray(msgsRes?.data?.messages)
-            ? msgsRes.data.messages
+          : Array.isArray(msgsRes?.data?.data)
+            ? msgsRes.data.data
+            : Array.isArray(msgsRes?.data?.messages)
+              ? msgsRes.data.messages
             : Array.isArray(msgsRes?.messages)
               ? msgsRes.messages
               : []
@@ -250,12 +280,12 @@ export async function extractVerdictFromSession(
 
   return null
 }
-
 export function resetCachedEvaluationAgent(): void {
   cachedEvalAgent = undefined
 }
 
 export async function classifyRequest(input: ClassifyInput): Promise<ClassifierResult> {
+  // Entry
   const sandboxDir = ensureSandboxDirectory()
   const userPrompt = input.userPrompt ?? ""
   const subagentPrompt = input.subagentPrompt
@@ -291,104 +321,171 @@ export async function classifyRequest(input: ClassifyInput): Promise<ClassifierR
     environment: input.environment,
   })
 
+  const startTime = Date.now()
+  let capturedReasoning: string | undefined
   let verdictResult: ClassifierResult | undefined
+
   try {
-    const timeoutMs = (input.config as any)?.classifierTimeout ?? 45000
-    let timeoutId: any
-    const verdictPromise = new Promise<ClassifierResult>((resolve) => {
-      registerEvaluationSession(sessionID, resolve)
-    })
-
-    const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
-      timeoutId = setTimeout(() => {
-        try {
-          const maybePromise = input.client?.session?.abort?.({ path: { id: sessionID } })
-          if (maybePromise && typeof (maybePromise as any).catch === "function") {
-            (maybePromise as any).catch(() => {})
-          }
-        } catch {}
-        resolve({
-          verdict: "UNSURE",
-          reason: `Classifier evaluation timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+    const generateTextFn = input.client?.generate?.text ?? input.client?.ctx?.generate?.text
+    if (typeof generateTextFn === "function") {
+      try {
+        const fullPrompt = `${systemPrompt}\n\n${userPromptText}`
+        const genRes = await generateTextFn({
+          prompt: fullPrompt,
+          model: {
+            providerID: modelRef.providerID,
+            id: modelRef.modelID,
+          },
         })
-      }, timeoutMs)
-    })
-
-    const promptPromise = input.client.session.prompt({
-      path: { id: sessionID },
-      agent: evalAgent,
-      body: {
-        agent: evalAgent,
-        model: {
-          providerID: modelRef.providerID,
-          modelID: modelRef.modelID,
-        },
-        tools: { ...EVAL_SESSION_TOOLS },
-        system: systemPrompt,
-        parts: [
-          {
-            type: "text",
-            text: userPromptText,
-          },
-        ],
-      },
-    })
-
-    promptPromise.then(async (promptRes: any) => {
-      if (!promptRes) return
-
-      const parts = promptRes?.data?.parts ?? (promptRes as any)?.parts ?? []
-      const verdict = await extractVerdictFromSession(input.client, sessionID, parts)
-      if (verdict) {
-        recordEvaluationVerdict(sessionID, verdict)
-        return
-      }
-
-      let attempts = 0
-      const maxRetries = 2
-      while (attempts < maxRetries) {
-        attempts++
-        const repromptRes = await input.client.session.prompt({
-          path: { id: sessionID },
-          agent: evalAgent,
-          body: {
-            agent: evalAgent,
-            model: {
-              providerID: modelRef.providerID,
-              modelID: modelRef.modelID,
-            },
-            tools: { ...EVAL_SESSION_TOOLS },
-            system: systemPrompt,
-            parts: [
-              {
-                type: "text",
-                text: "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }. If tool calling is unavailable, output a single JSON object conforming to the schema.",
+        const responseText = genRes?.text ?? genRes?.content ?? (typeof genRes === "string" ? genRes : "")
+        capturedReasoning = genRes?.reasoning ?? genRes?.thinking ?? genRes?.metadata?.reasoning
+        if (responseText) {
+          const parsed = parseVerdict(responseText)
+          if (parsed && parsed.reason !== "Classifier response did not contain a valid structured verdict" && parsed.reason !== "Empty or invalid classifier output") {
+            verdictResult = parsed
+          } else {
+            const retryRes = await generateTextFn({
+              prompt: `${fullPrompt}\n\nYour previous response was malformed JSON or invalid verdict. You must output a single JSON object with keys: risk_level, user_authorization, verdict, reason.`,
+              model: {
+                providerID: modelRef.providerID,
+                id: modelRef.modelID,
               },
-            ],
-          },
-        }).catch(() => null)
-        if (repromptRes) {
-          const repromptParts = repromptRes.data?.parts ?? (repromptRes as any)?.parts ?? []
-          const repromptVerdict = await extractVerdictFromSession(input.client, sessionID, repromptParts)
-          if (repromptVerdict) {
-            recordEvaluationVerdict(sessionID, repromptVerdict)
-            return
+            })
+            const retryText = retryRes?.text ?? retryRes?.content ?? (typeof retryRes === "string" ? retryRes : "")
+            if (retryRes?.reasoning || retryRes?.thinking) {
+              capturedReasoning = retryRes.reasoning ?? retryRes.thinking
+            }
+            if (retryText) {
+              const retryParsed = parseVerdict(retryText)
+              if (retryParsed && retryParsed.reason !== "Classifier response did not contain a valid structured verdict" && retryParsed.reason !== "Empty or invalid classifier output") {
+                verdictResult = retryParsed
+              }
+            }
           }
         }
+      } catch (err) {
+        // Fall back to session prompt path if generate.text throws or fails
       }
+    }
 
-      recordEvaluationVerdict(sessionID, {
-        verdict: "UNSURE",
-        reason: "Classifier failed to call classify_result tool or produce structured JSON after retries",
+    if (!verdictResult) {
+      const timeoutMs = (input.config as any)?.classifierTimeout ?? 45000
+      let timeoutId: any
+      const verdictPromise = new Promise<ClassifierResult>((resolve) => {
+        registerEvaluationSession(sessionID, resolve)
       })
-    }).catch(() => {})
 
-    verdictResult = await Promise.race([verdictPromise, timeoutPromise])
-    if (timeoutId) clearTimeout(timeoutId)
+      const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
+        timeoutId = setTimeout(() => {
+          try {
+            const maybePromise = input.client?.session?.abort?.({ path: { id: sessionID } })
+            if (maybePromise && typeof (maybePromise as any).catch === "function") {
+              (maybePromise as any).catch(() => {})
+            }
+          } catch {}
+          resolve({
+            verdict: "UNSURE",
+            reason: `Classifier evaluation timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+          })
+        }, timeoutMs)
+      })
+
+      const promptPromise = input.client.session.prompt({
+        path: { id: sessionID },
+        agent: evalAgent,
+        body: {
+          agent: evalAgent,
+          model: {
+            providerID: modelRef.providerID,
+            modelID: modelRef.modelID,
+          },
+          tools: { ...EVAL_SESSION_TOOLS },
+          system: systemPrompt,
+          parts: [
+            {
+              type: "text",
+              text: userPromptText,
+            },
+          ],
+        },
+      })
+
+      promptPromise.then(async (promptRes: any) => {
+        if (!promptRes) return
+        if (promptRes?.data?.reasoning || promptRes?.reasoning || promptRes?.data?.thinking || promptRes?.thinking) {
+          capturedReasoning = promptRes?.data?.reasoning ?? promptRes?.reasoning ?? promptRes?.data?.thinking ?? promptRes?.thinking
+        }
+        const parts = promptRes?.data?.parts ?? (promptRes as any)?.parts ?? []
+        const verdict = await extractVerdictFromSession(input.client, sessionID, parts)
+        if (verdict) {
+          recordEvaluationVerdict(sessionID, verdict)
+          return
+        }
+
+        let attempts = 0
+        const maxRetries = 2
+        while (attempts < maxRetries) {
+          attempts++
+          const repromptRes = await input.client.session.prompt({
+            path: { id: sessionID },
+            agent: evalAgent,
+            body: {
+              agent: evalAgent,
+              model: {
+                providerID: modelRef.providerID,
+                modelID: modelRef.modelID,
+              },
+              tools: { ...EVAL_SESSION_TOOLS },
+              system: systemPrompt,
+              parts: [
+                {
+                  type: "text",
+                  text: "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }. If tool calling is unavailable, output a single JSON object conforming to the schema.",
+                },
+              ],
+            },
+          }).catch(() => null)
+          if (repromptRes) {
+            if (repromptRes?.data?.reasoning || repromptRes?.reasoning || repromptRes?.data?.thinking || repromptRes?.thinking) {
+              capturedReasoning = repromptRes?.data?.reasoning ?? repromptRes?.reasoning ?? repromptRes?.data?.thinking ?? repromptRes?.thinking
+            }
+            const repromptParts = repromptRes.data?.parts ?? (repromptRes as any)?.parts ?? []
+            const repromptVerdict = await extractVerdictFromSession(input.client, sessionID, repromptParts)
+            if (repromptVerdict) {
+              recordEvaluationVerdict(sessionID, repromptVerdict)
+              return
+            }
+          }
+        }
+
+        recordEvaluationVerdict(sessionID, {
+          verdict: "UNSURE",
+          reason: "Classifier failed to call classify_result tool or produce structured JSON after retries",
+        })
+      }).catch(() => {})
+
+      verdictResult = await Promise.race([verdictPromise, timeoutPromise])
+      if (timeoutId) clearTimeout(timeoutId)
+    }
+
     return verdictResult
   } finally {
     clearEvaluationSession(sessionID)
-    await archiveEvaluationSession(input.client, sessionID, actionName, verdictResult?.verdict ?? "UNKNOWN")
+    const durationMs = Date.now() - startTime
+    const finalVerdict = verdictResult?.verdict ?? "UNKNOWN"
+    await archiveEvaluationSession(input.client, sessionID, actionName, finalVerdict)
+    logEvaluationDecision({
+      timestamp: Date.now(),
+      sessionID,
+      toolName: actionName,
+      commandString: typeof actionArgs === "string" ? actionArgs : JSON.stringify(actionArgs),
+      userPrompt,
+      reasoning: capturedReasoning ?? verdictResult?.reason,
+      verdict: finalVerdict as ClassifierVerdict,
+      risk_level: verdictResult?.risk_level,
+      user_authorization: verdictResult?.user_authorization,
+      durationMs,
+    }, (input.config as any)?.evalLogFile)
   }
 }
 

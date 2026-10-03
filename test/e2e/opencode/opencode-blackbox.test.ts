@@ -19,7 +19,7 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
 
     harness.mockProvider.pushResponse({
       toolCall: {
-        name: "bash",
+        name: "shell",
         input: { command: "echo 'opencode blackbox allow'" },
       },
     })
@@ -37,17 +37,30 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
 
     const promptRes = await harness.promptSession(sessionID, "Run safe check")
     expect(promptRes.response?.ok).toBe(true)
+    const startTime = Date.now()
+    let messages: any[] = []
+    let shellTool: any
+    while (Date.now() - startTime < 20000) {
+      messages = await harness.getSessionMessages(sessionID)
+      const toolParts = messages
+        .filter((m: any) => m.type === "assistant" || m.role === "assistant" || m.info?.role === "assistant")
+        .flatMap((m: any) => m.content || m.parts || [])
+        .filter((p: any) => p.type === "tool")
+      shellTool = toolParts.find((p: any) => {
+        const isShellOrBash = p.tool === "shell" || p.name === "shell" || p.tool === "bash" || p.name === "bash"
+        const hasCmd = p.state?.input?.command?.includes("echo 'opencode blackbox allow'")
+        return (isShellOrBash || hasCmd) && (p.state?.status === "completed" || p.state?.status === "error")
+      })
+      if (shellTool) {
+        break
+      }
+      await new Promise((r) => setTimeout(r, 300))
+    }
 
-    const messagesRes = await harness.client.session.messages({ path: { id: sessionID } })
-    const messages = messagesRes.data || []
-    const toolParts = messages.flatMap((m: any) => m.parts || []).filter((p: any) => p.type === "tool")
-    expect(toolParts.length).toBeGreaterThan(0)
-    const bashTool = toolParts.find(
-      (p: any) => p.tool === "bash" || p.state?.input?.command?.includes("echo 'opencode blackbox allow'")
-    )
-    expect(bashTool).toBeDefined()
-    expect(bashTool.state?.status).toBe("completed")
-    expect(bashTool.state?.output).toContain("opencode blackbox allow")
+    expect(shellTool).toBeDefined()
+    expect(shellTool.state?.status).toBe("completed")
+    const output = shellTool.state?.output || shellTool.state?.content?.[0]?.text || ""
+    expect(output).toContain("opencode blackbox allow")
   }, 30000)
 
   it("Test 2 (Black-box BLOCK): Blocks destructive git checkout via client.session.prompt and returns SAFE_TRANSFORM_REJECT", async () => {
@@ -57,7 +70,7 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
 
     harness.mockProvider.pushResponse({
       toolCall: {
-        name: "bash",
+        name: "shell",
         input: { command: "git checkout ." },
       },
     })
@@ -76,17 +89,31 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
     const promptRes = await harness.promptSession(sessionID, "Discard working tree")
     expect(promptRes.response?.ok).toBe(true)
 
-    const messagesRes = await harness.client.session.messages({ path: { id: sessionID } })
-    const messages = messagesRes.data || []
-    const toolParts = messages.flatMap((m: any) => m.parts || []).filter((p: any) => p.type === "tool")
-    expect(toolParts.length).toBeGreaterThan(0)
-    const bashTool = toolParts.find(
-      (p: any) => p.tool === "bash" || p.state?.input?.command?.includes("git checkout .")
-    )
-    expect(bashTool).toBeDefined()
-    expect(bashTool.state?.status).toBe("error")
-    expect(bashTool.state?.error).toContain("SAFE_TRANSFORM_REJECT")
-    expect(bashTool.state?.error).toContain("git stash")
+    const startTime = Date.now()
+    let messages: any[] = []
+    let shellTool: any
+    while (Date.now() - startTime < 20000) {
+      messages = await harness.getSessionMessages(sessionID)
+      const toolParts = messages
+        .filter((m: any) => m.type === "assistant" || m.role === "assistant" || m.info?.role === "assistant")
+        .flatMap((m: any) => m.content || m.parts || [])
+        .filter((p: any) => p.type === "tool")
+      shellTool = toolParts.find((p: any) => {
+        const isShellOrBash = p.tool === "shell" || p.name === "shell" || p.tool === "bash" || p.name === "bash"
+        const hasCmd = p.state?.input?.command?.includes("git checkout .")
+        return (isShellOrBash || hasCmd) && (p.state?.status === "completed" || p.state?.status === "error")
+      })
+      if (shellTool) {
+        break
+      }
+      await new Promise((r) => setTimeout(r, 300))
+    }
+
+    expect(shellTool).toBeDefined()
+    expect(shellTool.state?.status).toBe("error")
+    const errStr = typeof shellTool.state?.error === "string" ? shellTool.state.error : JSON.stringify(shellTool.state?.error || "")
+    expect(errStr).toContain("SAFE_TRANSFORM_REJECT")
+    expect(errStr).toContain("git stash")
   }, 30000)
 
   it("Test 3 (Black-box Live ntfy.sh Review): Unwhitelisted command prompts for review on live ntfy.sh and unblocks upon approval", async () => {
@@ -126,7 +153,7 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
 
       harness.mockProvider.pushResponse({
         toolCall: {
-          name: "bash",
+          name: "shell",
           input: { command: "git push --force origin main" },
         },
       })
@@ -182,9 +209,25 @@ describe("OpenCode Pure Black-box E2E Test Suite", () => {
       const promptRes = await promptPromise
       expect(promptRes.response?.ok).toBe(true)
 
-      const messagesRes = await harness.client.session.messages({ path: { id: sessionID } })
-      const messages = messagesRes.data || []
-      const toolParts = messages.flatMap((m: any) => m.parts || []).filter((p: any) => p.type === "tool")
+      const startTime = Date.now()
+      let messages: any[] = []
+      let toolParts: any[] = []
+      while (Date.now() - startTime < 20000) {
+        messages = await harness.getSessionMessages(sessionID)
+        toolParts = messages
+          .filter((m: any) => m.type === "assistant" || m.role === "assistant" || m.info?.role === "assistant")
+          .flatMap((m: any) => m.content || m.parts || [])
+          .filter((p: any) => p.type === "tool")
+        const shellTool = toolParts.find((p: any) => {
+          const isShellOrBash = p.tool === "shell" || p.name === "shell" || p.tool === "bash" || p.name === "bash"
+          const hasCmd = p.state?.input?.command?.includes("git push --force")
+          return (isShellOrBash || hasCmd) && (p.state?.status === "completed" || p.state?.status === "error")
+        })
+        if (shellTool) {
+          break
+        }
+        await new Promise((r) => setTimeout(r, 300))
+      }
       expect(toolParts.length).toBeGreaterThan(0)
     } catch (err: any) {
       if (checkRateLimit(err) || harness?.isRateLimited) {

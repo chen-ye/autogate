@@ -385,9 +385,11 @@ describe("AutoGate E2E: Mobile Approval Roundtrip (RealOpenCodeHarness)", () => 
 
   it("Terminal sync: Phone tap dispatches to OpenCode server with generated Basic Auth when action targets permission reply endpoint", async () => {
     harness = await createRealOpenCodeHarness()
+    const session = await harness.createSession({ title: "Terminal Sync Session" })
+    const sessionID = session.data.id
 
     const permId = `per_sync_${Date.now()}`
-    const actionsHeader = `http, Approve, ${harness.url}/permission/${permId}/reply, body='{"reply": "once"}', method=POST`
+    const actionsHeader = `http, Approve, ${harness.url}/api/session/${sessionID}/permission/${permId}/reply, body='{"decision": "once", "reply": "once"}', method=POST`
 
     try {
       await harness.simulatePhoneTap(permId, "once", undefined, { actionsHeader })
@@ -399,7 +401,7 @@ describe("AutoGate E2E: Mobile Approval Roundtrip (RealOpenCodeHarness)", () => 
     }
 
     // Relative URL resolution test
-    const relativeActionsHeader = `http, Approve, /permission/${permId}/reply, body='{"reply": "once"}', method=POST`
+    const relativeActionsHeader = `http, Approve, /api/session/${sessionID}/permission/${permId}/reply, body='{"decision": "once", "reply": "once"}', method=POST`
     try {
       await harness.simulatePhoneTap(permId, "once", undefined, { actionsHeader: relativeActionsHeader })
     } catch (err: any) {
