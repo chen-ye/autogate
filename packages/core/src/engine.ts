@@ -723,12 +723,19 @@ export class AutoGateCoreEngine {
         this.resetConsecutiveBlocks();
       }
 
-      const verdict = resp.reply === "reject" ? "BLOCK" : "ALLOW";
-      entry.resolve({
-        verdict,
-        reply: resp.reply,
-        reason: `Answered remotely via ${resp.reply}`,
-      });
+      if (resp.reply === "reject") {
+        entry.resolve({
+          verdict: "BLOCK",
+          reply: "reject",
+          reason: `Answered remotely via reject`,
+        });
+      } else {
+        entry.resolve({
+          verdict: "ALLOW",
+          reply: resp.reply,
+          reason: `Answered remotely via ${resp.reply}`,
+        });
+      }
     }
   }
 

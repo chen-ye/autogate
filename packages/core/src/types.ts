@@ -4,12 +4,25 @@ export type ReviewFallbackMode = "native" | "ntfy";
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH";
 
-export interface ClassifierResult {
-  verdict: ClassifierVerdict;
-  risk_level?: RiskLevel;
-  user_authorization?: UserAuthorization;
-  reason?: string;
-}
+export type ClassifierResult =
+  | {
+      readonly verdict: "ALLOW";
+      readonly reason: string;
+      readonly risk_level?: RiskLevel;
+      readonly user_authorization?: UserAuthorization;
+    }
+  | {
+      readonly verdict: "BLOCK";
+      readonly reason: string;
+      readonly risk_level?: RiskLevel;
+      readonly user_authorization?: UserAuthorization;
+    }
+  | {
+      readonly verdict: "UNSURE";
+      readonly reason: string;
+      readonly risk_level?: RiskLevel;
+      readonly user_authorization?: UserAuthorization;
+    };
 
 export const CLASSIFIER_JSON_SCHEMA = {
   type: "object",
@@ -106,15 +119,34 @@ export interface GateAction {
   metadata?: Record<string, unknown>;
   signal?: AbortSignal;
 }
-export interface GateDecision {
-  verdict: ClassifierVerdict;
-  riskLevel?: RiskLevel;
-  userAuthorization?: UserAuthorization;
-  reason: string;
-  safeTransformAlternative?: string;
-  cached?: boolean;
-  reply?: "once" | "always" | "reject";
-}
+export type GateDecision =
+  | {
+      readonly verdict: "ALLOW";
+      readonly reason: string;
+      readonly riskLevel?: RiskLevel;
+      readonly userAuthorization?: UserAuthorization;
+      readonly cached?: boolean;
+      readonly reply?: "once" | "always";
+      readonly safeTransformAlternative?: never;
+    }
+  | {
+      readonly verdict: "BLOCK";
+      readonly reason: string;
+      readonly riskLevel?: RiskLevel;
+      readonly userAuthorization?: UserAuthorization;
+      readonly safeTransformAlternative?: string;
+      readonly cached?: false;
+      readonly reply?: "reject";
+    }
+  | {
+      readonly verdict: "UNSURE";
+      readonly reason: string;
+      readonly riskLevel?: RiskLevel;
+      readonly userAuthorization?: UserAuthorization;
+      readonly reply?: "once" | "always" | "reject";
+      readonly cached?: false;
+      readonly safeTransformAlternative?: never;
+    };
 
 export interface ReviewAction {
   id: string;
