@@ -1,11 +1,18 @@
 import type { GateEvaluator, GateAction, ClassifierResult } from "@autogate/core";
-import { buildClassifierSystemPrompt, buildClassifierUserPrompt } from "@autogate/core";
+import {
+  buildClassifierSystemPrompt,
+  buildClassifierUserPrompt,
+  isClassifierVerdict,
+  isRiskLevel,
+  isUserAuthorization,
+} from "@autogate/core";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { completeSimple } from "@oh-my-pi/pi-ai";
+import type { OmpEvaluatorOptions, OmpLogger, OmpContext } from "./types.js";
 
-export const CLASSIFY_RESULT_TOOL: any = {
+export const CLASSIFY_RESULT_TOOL = {
   name: "classify_result",
   description: "Report the security classification result for the proposed action",
   parameters: {
@@ -21,88 +28,87 @@ export const CLASSIFY_RESULT_TOOL: any = {
 };
 export class OmpNativeEvaluator implements GateEvaluator {
   readonly name = "omp-native-evaluator";
-  private getCtx?: () => any;
-  private fallbackModel?: any;
+  private getCtx?: () => unknown;
+  private fallbackModel?: unknown;
   private fallbackApiKey?: string;
   private fallbackSessionId?: string;
-  private currentCtx: any = null;
+  private currentCtx: OmpContext | null = null;
   private classifierTimeout?: number;
-  private logger?: any;
+  private logger?: OmpLogger;
   private evalLogFile?: string;
 
   constructor(
-    arg1?: (() => any) | any | Record<string, any>,
-    arg2?: string | any | Record<string, any>,
-    arg3?: string | number | Record<string, any>,
-    arg4?: number | Record<string, any>,
+    arg1?: (() => unknown) | unknown | OmpEvaluatorOptions,
+    arg2?: unknown,
+    arg3?: unknown,
+    arg4?: unknown,
   ) {
-    this.evalLogFile =
-      (arg1 as any)?.evalLogFile ??
-      (arg2 as any)?.evalLogFile ??
-      (arg3 as any)?.evalLogFile ??
-      (arg4 as any)?.evalLogFile;
     if (
       typeof arg1 === "object" &&
       arg1 !== null &&
       !Array.isArray(arg1) &&
-      typeof (arg1 as any).evaluate !== "function" &&
-      !(arg1 as any).api &&
-      !(arg1 as any).id &&
-      typeof arg1 !== "function" &&
-      ("classifierTimeout" in arg1 ||
-        "model" in arg1 ||
-        "fallbackModel" in arg1 ||
-        "logger" in arg1 ||
-        "evalLogFile" in arg1)
+      typeof (arg1 as { evaluate?: unknown }).evaluate !== "function" &&
+      !("api" in arg1) &&
+      !("id" in arg1) &&
+      typeof arg1 !== "function"
     ) {
-      this.fallbackModel = (arg1 as any).model ?? (arg1 as any).fallbackModel;
-      this.fallbackApiKey = (arg1 as any).apiKey ?? (arg1 as any).fallbackApiKey;
-      this.fallbackSessionId = (arg1 as any).sessionId ?? (arg1 as any).fallbackSessionId;
-      this.classifierTimeout = (arg1 as any).classifierTimeout;
-      this.getCtx = (arg1 as any).getCtx;
-      this.logger = (arg1 as any).logger;
-      if ((arg1 as any).evalLogFile) this.evalLogFile = (arg1 as any).evalLogFile;
+      const opts = arg1 as OmpEvaluatorOptions;
+      this.fallbackModel = opts.model ?? opts.fallbackModel;
+      this.fallbackApiKey = opts.apiKey ?? opts.fallbackApiKey;
+      this.fallbackSessionId = opts.sessionId ?? opts.fallbackSessionId;
+      this.classifierTimeout = opts.classifierTimeout;
+      this.getCtx = opts.getCtx;
+      this.logger = opts.logger;
+      this.evalLogFile = opts.evalLogFile;
     } else if (typeof arg1 === "function") {
-      this.getCtx = arg1;
+      this.getCtx = arg1 as () => unknown;
       this.fallbackModel = arg2;
       if (typeof arg3 === "string") {
         this.fallbackApiKey = arg3;
       } else if (typeof arg3 === "number") {
         this.classifierTimeout = arg3;
       } else if (typeof arg3 === "object" && arg3 !== null) {
-        this.classifierTimeout = (arg3 as any).classifierTimeout ?? this.classifierTimeout;
-        if ((arg3 as any).apiKey) this.fallbackApiKey = (arg3 as any).apiKey;
-        if ((arg3 as any).logger) this.logger = (arg3 as any).logger;
+        const o = arg3 as OmpEvaluatorOptions;
+        this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
+        if (o.apiKey) this.fallbackApiKey = o.apiKey;
+        if (o.logger) this.logger = o.logger;
       }
       if (typeof arg4 === "number") {
         this.classifierTimeout = arg4;
       } else if (typeof arg4 === "object" && arg4 !== null) {
-        this.classifierTimeout = (arg4 as any).classifierTimeout ?? this.classifierTimeout;
-        if ((arg4 as any).logger) this.logger = (arg4 as any).logger;
+        const o = arg4 as OmpEvaluatorOptions;
+        this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
+        if (o.logger) this.logger = o.logger;
+        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
       }
     } else {
       this.fallbackModel = arg1;
       if (typeof arg2 === "string") {
         this.fallbackApiKey = arg2;
       } else if (typeof arg2 === "object" && arg2 !== null) {
-        this.classifierTimeout = (arg2 as any).classifierTimeout ?? this.classifierTimeout;
-        if ((arg2 as any).apiKey) this.fallbackApiKey = (arg2 as any).apiKey;
-        if ((arg2 as any).sessionId) this.fallbackSessionId = (arg2 as any).sessionId;
-        if ((arg2 as any).logger) this.logger = (arg2 as any).logger;
+        const o = arg2 as OmpEvaluatorOptions;
+        this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
+        if (o.apiKey) this.fallbackApiKey = o.apiKey;
+        if (o.sessionId) this.fallbackSessionId = o.sessionId;
+        if (o.logger) this.logger = o.logger;
+        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
       }
       if (typeof arg3 === "string") {
         this.fallbackSessionId = arg3;
       } else if (typeof arg3 === "number") {
         this.classifierTimeout = arg3;
       } else if (typeof arg3 === "object" && arg3 !== null) {
-        this.classifierTimeout = (arg3 as any).classifierTimeout ?? this.classifierTimeout;
-        if ((arg3 as any).logger) this.logger = (arg3 as any).logger;
+        const o = arg3 as OmpEvaluatorOptions;
+        this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
+        if (o.logger) this.logger = o.logger;
+        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
       }
       if (typeof arg4 === "number") {
         this.classifierTimeout = arg4;
       } else if (typeof arg4 === "object" && arg4 !== null) {
-        if ("logger" in arg4) this.logger = (arg4 as any).logger;
-        if ("evalLogFile" in arg4) this.evalLogFile = (arg4 as any).evalLogFile;
+        const o = arg4 as OmpEvaluatorOptions;
+        if (o.logger) this.logger = o.logger;
+        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
       }
     }
 
@@ -111,7 +117,11 @@ export class OmpNativeEvaluator implements GateEvaluator {
     }
   }
 
-  private async appendEvalLog(entry: Record<string, any>): Promise<void> {
+  public setContext(ctx: OmpContext): void {
+    this.currentCtx = ctx;
+  }
+
+  private async appendEvalLog(entry: Record<string, unknown>): Promise<void> {
     const targetFile =
       this.evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
     try {
@@ -120,21 +130,11 @@ export class OmpNativeEvaluator implements GateEvaluator {
     } catch {}
   }
 
-  private log(
-    level: "debug" | "info" | "warn" | "error",
-    message: string,
-    data?: Record<string, any>,
-  ) {
+  private log(level: "debug" | "info" | "warn" | "error", message: string, data?: unknown) {
     const logFn = this.logger?.[level] ?? console[level] ?? console.log;
     try {
       logFn.call(this.logger ?? console, message, data);
     } catch {}
-  }
-
-  setContext(ctx: any) {
-    if (ctx) {
-      this.currentCtx = ctx;
-    }
   }
 
   async evaluate(action: GateAction): Promise<ClassifierResult> {
@@ -145,13 +145,13 @@ export class OmpNativeEvaluator implements GateEvaluator {
       ? AbortSignal.any([action.signal, timeoutSignal])
       : timeoutSignal;
 
-    let sessionId: any = action.sessionID;
-    let lastResponse: any = null;
+    let sessionId: string = String(action.sessionID);
+    let lastResponse: unknown = null;
     let attempts = 0;
     let thinking: string | undefined = undefined;
     let reasoningTokens = 0;
-    let model: any = this.fallbackModel;
-    let ctx: any = null;
+    let model: unknown = this.fallbackModel;
+    let ctx: OmpContext | null = null;
     if (combinedSignal.aborted) {
       const durationMs = Math.round(performance.now() - startTime);
       const isTimeout = timeoutSignal.aborted;
@@ -180,11 +180,11 @@ export class OmpNativeEvaluator implements GateEvaluator {
         environment: action.environment,
       });
 
-      ctx = this.getCtx?.() || this.currentCtx;
+      ctx = (this.getCtx?.() || this.currentCtx) as OmpContext | null;
       try {
-        if (ctx?.models?.resolve) {
-          model =
-            ctx.models.resolve("@smol") || ctx.models.resolve("default") || ctx.model || model;
+        const rawModels = ctx?.models as { resolve?(name: string): unknown } | undefined;
+        if (typeof rawModels?.resolve === "function") {
+          model = rawModels.resolve("@smol") || rawModels.resolve("default") || ctx?.model || model;
         } else if (ctx?.model) {
           model = ctx.model || model;
         }
@@ -193,26 +193,32 @@ export class OmpNativeEvaluator implements GateEvaluator {
       sessionId =
         action.sessionID ||
         ctx?.sessionManager?.getSessionId?.() ||
-        ctx?.sessionID ||
-        ctx?.sessionId ||
-        this.fallbackSessionId;
+        (typeof ctx?.sessionID === "string" ? ctx.sessionID : undefined) ||
+        (typeof ctx?.sessionId === "string" ? ctx.sessionId : undefined) ||
+        this.fallbackSessionId ||
+        "";
+
+      const modelObj = (model && typeof model === "object" ? model : {}) as Record<string, unknown>;
 
       this.log("debug", "[AutoGate OMP Evaluator] Evaluating action", {
         toolName: action.toolName,
         targetPath: action.targetPath,
         command: action.commandString,
-        model: model?.id,
-        provider: model?.provider,
+        model: modelObj.id,
+        provider: modelObj.provider,
         sessionId,
       });
 
       let apiKey = this.fallbackApiKey;
       try {
-        if (ctx?.modelRegistry?.getApiKey && model) {
-          const resolvedKey = await ctx.modelRegistry.getApiKey(model, sessionId);
+        const rawRegistry = ctx?.modelRegistry as
+          | { getApiKey?(m: unknown, s?: string): Promise<string | undefined> }
+          | undefined;
+        if (typeof rawRegistry?.getApiKey === "function" && model) {
+          const resolvedKey = await rawRegistry.getApiKey(model, sessionId);
           if (resolvedKey) apiKey = resolvedKey;
-        } else if (ctx?.model?.apiKey) {
-          apiKey = ctx.model.apiKey || apiKey;
+        } else if (typeof modelObj.apiKey === "string") {
+          apiKey = modelObj.apiKey || apiKey;
         }
       } catch {}
 
@@ -223,7 +229,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         process.env.AUTOGATE_API_KEY;
 
       this.log("debug", "[AutoGate OMP Evaluator] Resolved API key", {
-        provider: model?.provider,
+        provider: modelObj.provider,
         hasKey: Boolean(apiKey),
       });
 
@@ -242,17 +248,19 @@ export class OmpNativeEvaluator implements GateEvaluator {
         timeoutMs,
       });
 
-      const messages: any[] = [{ role: "user", content: userPrompt, timestamp: Date.now() }];
+      const messages: Parameters<typeof completeSimple>[1]["messages"] = [
+        { role: "user", content: userPrompt, timestamp: Date.now() },
+      ];
       const maxRetries = 2;
       let validResult: ClassifierResult | null = null;
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const response = await completeSimple(
-          model,
+          model as Parameters<typeof completeSimple>[0],
           {
             systemPrompt: [systemPrompt],
             messages,
-            tools: [CLASSIFY_RESULT_TOOL],
+            tools: [CLASSIFY_RESULT_TOOL as any],
           },
           {
             apiKey,
@@ -295,16 +303,27 @@ export class OmpNativeEvaluator implements GateEvaluator {
           };
         }
         const toolCall = Array.isArray(response.content)
-          ? response.content.find(
-              (c: any) =>
-                c &&
+          ? response.content.find((item: unknown) => {
+              if (!item || typeof item !== "object") return false;
+              const c = item as unknown as Record<string, unknown>;
+              const fn =
+                c.function && typeof c.function === "object"
+                  ? (c.function as Record<string, unknown>)
+                  : undefined;
+              return (
                 c.type === "toolCall" &&
-                (c.name === "classify_result" || c.function?.name === "classify_result"),
-            )
+                (c.name === "classify_result" || fn?.name === "classify_result")
+              );
+            })
           : undefined;
 
-        if (toolCall) {
-          let args: any = (toolCall as any).arguments ?? (toolCall as any).function?.arguments;
+        if (toolCall && typeof toolCall === "object") {
+          const tc = toolCall as unknown as Record<string, unknown>;
+          const fn =
+            tc.function && typeof tc.function === "object"
+              ? (tc.function as Record<string, unknown>)
+              : undefined;
+          let args: unknown = tc.arguments ?? fn?.arguments;
           if (typeof args === "string") {
             try {
               args = JSON.parse(args);
@@ -313,30 +332,27 @@ export class OmpNativeEvaluator implements GateEvaluator {
             }
           }
 
-          if (args && typeof args === "object") {
-            const verdictRaw = String(args.verdict ?? "")
+          if (args && typeof args === "object" && !Array.isArray(args)) {
+            const argsObj = args as Record<string, unknown>;
+            const verdictRaw = String(argsObj.verdict ?? "")
               .toUpperCase()
               .trim();
-            const reason = typeof args.reason === "string" ? args.reason : undefined;
-            const riskRaw = String(args.risk_level ?? "")
+            const reason = typeof argsObj.reason === "string" ? argsObj.reason : undefined;
+            const riskRaw = String(argsObj.risk_level ?? "")
               .toUpperCase()
               .trim();
-            const authRaw = String(args.user_authorization ?? "")
+            const authRaw = String(argsObj.user_authorization ?? "")
               .toUpperCase()
               .trim();
-            const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw)
-              ? (riskRaw as any)
-              : undefined;
-            const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw)
-              ? (authRaw as any)
-              : undefined;
+            const risk_level = isRiskLevel(riskRaw) ? riskRaw : undefined;
+            const user_authorization = isUserAuthorization(authRaw) ? authRaw : undefined;
 
-            if (verdictRaw === "ALLOW" || verdictRaw === "BLOCK" || verdictRaw === "UNSURE") {
+            if (isClassifierVerdict(verdictRaw)) {
               validResult = {
-                verdict: verdictRaw as any,
+                verdict: verdictRaw,
                 risk_level,
                 user_authorization,
-                reason,
+                reason: reason || "",
               };
               break;
             }
@@ -357,35 +373,66 @@ export class OmpNativeEvaluator implements GateEvaluator {
         });
       }
       const durationMs = Math.round(performance.now() - startTime);
-      const rawThinking = Array.isArray(lastResponse?.content)
-        ? lastResponse.content
-            .filter(
-              (c: any) =>
-                c &&
-                (c.type === "thinking" || c.type === "reasoning" || c.type === "reasoning_text"),
-            )
-            .map((c: any) => c.thinking ?? c.text ?? c.reasoning ?? c.reasoning_content)
+      const lastContent =
+        lastResponse && typeof lastResponse === "object" && "content" in lastResponse
+          ? (lastResponse as { content?: unknown[] }).content
+          : undefined;
+      const rawThinking = Array.isArray(lastContent)
+        ? lastContent
+            .filter((item: unknown) => {
+              if (!item || typeof item !== "object") return false;
+              const c = item as unknown as Record<string, unknown>;
+              return c.type === "thinking" || c.type === "reasoning" || c.type === "reasoning_text";
+            })
+            .map((item: unknown) => {
+              const c = item as unknown as Record<string, unknown>;
+              const val = c.thinking ?? c.text ?? c.reasoning ?? c.reasoning_content;
+              return typeof val === "string" ? val : "";
+            })
             .filter(Boolean)
             .join("\n") || undefined
         : undefined;
+
+      const lastObj = (
+        lastResponse && typeof lastResponse === "object" ? lastResponse : {}
+      ) as Record<string, unknown>;
+      const usageObj = (
+        lastObj.usage && typeof lastObj.usage === "object" ? lastObj.usage : {}
+      ) as Record<string, unknown>;
+      const rawRespObj = (
+        lastObj.rawResponse && typeof lastObj.rawResponse === "object" ? lastObj.rawResponse : {}
+      ) as Record<string, unknown>;
+      const rawUsageObj = (
+        rawRespObj.usage && typeof rawRespObj.usage === "object" ? rawRespObj.usage : {}
+      ) as Record<string, unknown>;
+
       const thinking =
         rawThinking ||
-        lastResponse?.reasoning_content ||
-        lastResponse?.reasoning ||
-        lastResponse?.reasoningContent ||
-        (lastResponse as any)?.thinking ||
-        undefined;
+        (typeof lastObj.reasoning_content === "string" ? lastObj.reasoning_content : undefined) ||
+        (typeof lastObj.reasoning === "string" ? lastObj.reasoning : undefined) ||
+        (typeof lastObj.reasoningContent === "string" ? lastObj.reasoningContent : undefined) ||
+        (typeof lastObj.thinking === "string" ? lastObj.thinking : undefined);
 
       reasoningTokens =
-        lastResponse?.reasoningTokens ??
-        lastResponse?.reasoning_tokens ??
-        lastResponse?.usage?.reasoningTokens ??
-        (lastResponse?.usage as any)?.reasoning_tokens ??
-        (lastResponse?.usage as any)?.completionTokensDetails?.reasoningTokens ??
-        (lastResponse?.usage as any)?.completion_tokens_details?.reasoning_tokens ??
-        (lastResponse as any)?.rawResponse?.usage?.reasoning_tokens ??
-        (lastResponse as any)?.rawResponse?.usage?.completion_tokens_details?.reasoning_tokens ??
+        (typeof lastObj.reasoningTokens === "number" ? lastObj.reasoningTokens : undefined) ??
+        (typeof lastObj.reasoning_tokens === "number" ? lastObj.reasoning_tokens : undefined) ??
+        (typeof usageObj.reasoningTokens === "number" ? usageObj.reasoningTokens : undefined) ??
+        (typeof usageObj.reasoning_tokens === "number" ? usageObj.reasoning_tokens : undefined) ??
+        (typeof (usageObj.completionTokensDetails as { reasoningTokens?: number } | undefined)
+          ?.reasoningTokens === "number"
+          ? (usageObj.completionTokensDetails as { reasoningTokens: number }).reasoningTokens
+          : undefined) ??
+        (typeof rawUsageObj.reasoning_tokens === "number"
+          ? rawUsageObj.reasoning_tokens
+          : undefined) ??
         0;
+
+      const respObj = (
+        lastResponse && typeof lastResponse === "object" ? lastResponse : {}
+      ) as Record<string, unknown>;
+      const respUsage = (
+        respObj.usage && typeof respObj.usage === "object" ? respObj.usage : {}
+      ) as Record<string, unknown>;
 
       if (!validResult) {
         this.appendEvalLog({
@@ -398,13 +445,13 @@ export class OmpNativeEvaluator implements GateEvaluator {
             sessionID: sessionId,
           },
           model: {
-            id: model?.id,
-            provider: model?.provider,
+            id: typeof modelObj.id === "string" ? modelObj.id : undefined,
+            provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
           },
           inference: {
             durationMs,
-            promptTokens: lastResponse?.usage?.input,
-            outputTokens: lastResponse?.usage?.output,
+            promptTokens: typeof respUsage.input === "number" ? respUsage.input : undefined,
+            outputTokens: typeof respUsage.output === "number" ? respUsage.output : undefined,
             reasoningTokens,
             thinking,
             attempts,
@@ -431,13 +478,13 @@ export class OmpNativeEvaluator implements GateEvaluator {
           sessionID: sessionId,
         },
         model: {
-          id: model?.id,
-          provider: model?.provider,
+          id: typeof modelObj.id === "string" ? modelObj.id : undefined,
+          provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
         },
         inference: {
           durationMs,
-          promptTokens: lastResponse?.usage?.input,
-          outputTokens: lastResponse?.usage?.output,
+          promptTokens: typeof respUsage.input === "number" ? respUsage.input : undefined,
+          outputTokens: typeof respUsage.output === "number" ? respUsage.output : undefined,
           reasoningTokens,
           thinking,
           attempts,
@@ -469,6 +516,8 @@ export class OmpNativeEvaluator implements GateEvaluator {
         isTimeout,
       });
 
+      const modelObj = (model && typeof model === "object" ? model : {}) as Record<string, unknown>;
+
       this.appendEvalLog({
         timestamp: new Date().toISOString(),
         action: {
@@ -479,8 +528,8 @@ export class OmpNativeEvaluator implements GateEvaluator {
           sessionID: sessionId,
         },
         model: {
-          id: model?.id,
-          provider: model?.provider,
+          id: typeof modelObj.id === "string" ? modelObj.id : undefined,
+          provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
         },
         inference: {
           durationMs,

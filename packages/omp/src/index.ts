@@ -18,37 +18,43 @@ import {
 } from "./commands.ts";
 import { OmpNativeEvaluator } from "./evaluator.ts";
 
+import type { OmpContext, OmpLogger } from "./types.js";
+import { isRecord } from "@autogate/core";
+
 export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness";
   private engine: AutoGateCoreEngine;
   private evaluator: GateEvaluator;
-  private currentCtx: any = null;
+  private currentCtx: OmpContext | null = null;
 
-  constructor(pi: any, options?: Record<string, unknown>) {
+  constructor(pi: unknown, options?: Record<string, unknown>) {
     const config = loadConfig(options);
-    const fallbackMode =
-      (options as any)?.reviewFallbackMode ??
-      (options as any)?.config?.reviewFallbackMode ??
+    const optObj = isRecord(options) ? options : undefined;
+    const fallbackMode: ReviewFallbackMode =
+      (typeof optObj?.reviewFallbackMode === "string" &&
+      (optObj.reviewFallbackMode === "native" || optObj.reviewFallbackMode === "ntfy")
+        ? optObj.reviewFallbackMode
+        : undefined) ??
       config.omp?.reviewFallbackMode ??
-      (config as any)?.reviewFallbackMode ??
+      config.reviewFallbackMode ??
       "ntfy";
     const adapter = new NtfyAdapter({
       server: config.ntfyServer,
       topic: config.ntfyTopic,
       token: config.ntfyToken,
     });
+    const piObj = (pi && typeof pi === "object" ? pi : {}) as { logger?: OmpLogger };
     this.evaluator =
-      (options as any)?.evaluator ??
-      new OmpNativeEvaluator(
-        () => this.currentCtx,
-        (options as any)?.classifierModel || config.classifierModel,
-        process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AUTOGATE_API_KEY,
-        {
-          logger: pi?.logger,
-          classifierTimeout: config.classifierTimeout,
-          evalLogFile: config.evalLogFile,
-        },
-      );
+      (optObj?.evaluator as GateEvaluator | undefined) ??
+      new OmpNativeEvaluator({
+        getCtx: () => this.currentCtx,
+        model: optObj?.classifierModel || config.classifierModel,
+        apiKey:
+          process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AUTOGATE_API_KEY,
+        logger: piObj.logger,
+        classifierTimeout: config.classifierTimeout,
+        evalLogFile: config.evalLogFile,
+      });
     this.engine = new AutoGateCoreEngine({
       config,
       adapter,
@@ -57,11 +63,11 @@ export class OmpHarnessAdapter implements HarnessAdapter {
     });
   }
 
-  setContext(ctx: any) {
+  setContext(ctx: OmpContext) {
     if (ctx) {
       this.currentCtx = ctx;
-      if (this.evaluator && typeof (this.evaluator as any).setContext === "function") {
-        (this.evaluator as any).setContext(ctx);
+      if (this.evaluator instanceof OmpNativeEvaluator) {
+        this.evaluator.setContext(ctx);
       }
     }
   }
@@ -95,12 +101,24 @@ export class OmpHarnessAdapter implements HarnessAdapter {
   }
 }
 
-export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine, adapter?: any): void {
-  const parameters = pi?.zod?.object
-    ? pi.zod.object({
-        command: pi.zod.string(),
-        timeout: pi.zod.number().optional(),
-        workdir: pi.zod.string().optional(),
+export function registerShadowedBashTool(
+  pi: unknown,
+  engine: AutoGateCoreEngine,
+  adapter?: OmpHarnessAdapter,
+): void {
+  const p = pi as {
+    registerTool(tool: unknown): void;
+    zod?: {
+      object?(schema: unknown): unknown;
+      string?(): { optional(): unknown; describe?(d: string): unknown };
+      number?(): { optional(): unknown };
+    };
+  };
+  const parameters = p?.zod?.object
+    ? p.zod.object({
+        command: p.zod.string?.(),
+        timeout: p.zod.number?.().optional(),
+        workdir: p.zod.string?.().optional(),
       })
     : {
         type: "object",
@@ -112,32 +130,52 @@ export function registerShadowedBashTool(pi: any, engine: AutoGateCoreEngine, ad
         required: ["command"],
       };
 
-  pi.registerTool({
+  p.registerTool({
     name: "bash",
     label: "Bash",
     description: "Execute a bash command in a persistent shell session",
-    approval: (args: any) => resolveShadowedApproval(args),
+    approval: (args: unknown) => resolveShadowedApproval(args),
     parameters,
-    async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
-      if (ctx && adapter && typeof adapter.setContext === "function") {
-        adapter.setContext(ctx);
-      } else if (ctx && typeof (engine as any).setContext === "function") {
-        (engine as any).setContext(ctx);
+    async execute(
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal,
+      onUpdate: unknown,
+      ctx: unknown,
+    ) {
+      const cx = ctx as OmpContext | undefined;
+      if (cx && adapter && typeof adapter.setContext === "function") {
+        adapter.setContext(cx);
       }
-      if (!ctx?.invokeTool) {
+      const cxInvoke = ctx as
+        | { invokeTool?: (p: unknown, o: unknown) => Promise<unknown> }
+        | undefined;
+      if (!cxInvoke?.invokeTool) {
         throw new Error("ctx.invokeTool is unavailable for shadowed bash delegation");
       }
-      return await ctx.invokeTool(params, { signal, onUpdate });
+      return await cxInvoke.invokeTool(params, { signal, onUpdate });
     },
   });
 }
 
-export function registerShadowedEvalTool(pi: any, engine: AutoGateCoreEngine, adapter?: any): void {
-  const parameters = pi?.zod?.object
-    ? pi.zod.object({
-        code: pi.zod.string(),
-        language: pi.zod.string().optional(),
-        timeout: pi.zod.number().optional(),
+export function registerShadowedEvalTool(
+  pi: unknown,
+  engine: AutoGateCoreEngine,
+  adapter?: OmpHarnessAdapter,
+): void {
+  const p = pi as {
+    registerTool(tool: unknown): void;
+    zod?: {
+      object?(schema: unknown): unknown;
+      string?(): { optional(): unknown; describe?(d: string): unknown };
+      number?(): { optional(): unknown };
+    };
+  };
+  const parameters = p?.zod?.object
+    ? p.zod.object({
+        code: p.zod.string?.(),
+        language: p.zod.string?.().optional(),
+        timeout: p.zod.number?.().optional(),
       })
     : {
         type: "object",
@@ -149,39 +187,66 @@ export function registerShadowedEvalTool(pi: any, engine: AutoGateCoreEngine, ad
         required: ["code"],
       };
 
-  pi.registerTool({
+  p.registerTool({
     name: "eval",
     label: "Eval",
     description: "Execute Python or JavaScript code",
-    approval: (args: any) => resolveShadowedApproval(args),
+    approval: (args: unknown) => resolveShadowedApproval(args),
     parameters,
-    async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
-      if (ctx && adapter && typeof adapter.setContext === "function") {
-        adapter.setContext(ctx);
-      } else if (ctx && typeof (engine as any).setContext === "function") {
-        (engine as any).setContext(ctx);
+    async execute(
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal,
+      onUpdate: unknown,
+      ctx: unknown,
+    ) {
+      const cx = ctx as OmpContext | undefined;
+      if (cx && adapter && typeof adapter.setContext === "function") {
+        adapter.setContext(cx);
       }
-      if (!ctx?.invokeTool) {
+      const cxInvoke = ctx as
+        | { invokeTool?: (p: unknown, o: unknown) => Promise<unknown> }
+        | undefined;
+      if (!cxInvoke?.invokeTool) {
         throw new Error("ctx.invokeTool is unavailable for shadowed eval delegation");
       }
-      return await ctx.invokeTool(params, { signal, onUpdate });
+      return await cxInvoke.invokeTool(params, { signal, onUpdate });
     },
   });
 }
 
 export default function autoGateOmpExtension(
-  pi: any,
+  pi: unknown,
   options?: Record<string, unknown>,
 ): { adapter: OmpHarnessAdapter; engine: AutoGateCoreEngine } {
-  pi.setLabel?.("AutoGate Security");
+  const p = pi as
+    | {
+        setLabel?(l: string): void;
+        on?(event: string, handler: (e: unknown, c: unknown) => void): void;
+      }
+    | undefined;
+  p?.setLabel?.("AutoGate Security");
   const adapter = new OmpHarnessAdapter(pi, options);
   const engine = adapter.getEngine();
   adapter.start().catch(() => {});
 
-  pi.on?.("input", (event: any, ctx: any) => {
-    const text = event?.text || event?.input || (typeof event === "string" ? event : "");
+  p?.on?.("input", (event: unknown, ctx: unknown) => {
+    const ev = event as Record<string, unknown> | undefined;
+    const cx = ctx as Record<string, unknown> | undefined;
+    const text =
+      typeof ev?.text === "string"
+        ? ev.text
+        : typeof ev?.input === "string"
+          ? ev.input
+          : typeof event === "string"
+            ? event
+            : "";
+    const sm = cx?.sessionManager as { getSessionId?: () => string } | undefined;
     const sessionID =
-      ctx?.sessionManager?.getSessionId?.() || event?.sessionID || event?.sessionId || "";
+      (typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined) ||
+      (typeof ev?.sessionID === "string" ? ev.sessionID : undefined) ||
+      (typeof ev?.sessionId === "string" ? ev.sessionId : undefined) ||
+      "";
     if (text) {
       if (sessionID) {
         engine.setUserPrompt(sessionID, text);
@@ -191,9 +256,15 @@ export default function autoGateOmpExtension(
     }
   });
 
-  pi.on?.("turn_end", (event: any, ctx: any) => {
+  p?.on?.("turn_end", (event: unknown, ctx: unknown) => {
+    const ev = event as Record<string, unknown> | undefined;
+    const cx = ctx as Record<string, unknown> | undefined;
+    const sm = cx?.sessionManager as { getSessionId?: () => string } | undefined;
     const sessionID =
-      ctx?.sessionManager?.getSessionId?.() || event?.sessionID || event?.sessionId || "";
+      (typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined) ||
+      (typeof ev?.sessionID === "string" ? ev.sessionID : undefined) ||
+      (typeof ev?.sessionId === "string" ? ev.sessionId : undefined) ||
+      "";
     if (sessionID) {
       engine.clearTurnCache(sessionID);
     }

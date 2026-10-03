@@ -7,45 +7,75 @@ export const verdictStore = new Map<
 >();
 
 export function registerToolCallHook(
-  pi: any,
+  pi: unknown,
   engine: AutoGateCoreEngine,
   store = verdictStore,
-  setContext?: (ctx: any) => void,
+  setContext?: (ctx: Record<string, unknown>) => void,
 ): void {
-  if (typeof pi?.on !== "function") {
+  const p = pi as
+    | {
+        on?(event: string, handler: (e: unknown, c: unknown) => Promise<unknown>): void;
+        logger?: { debug?(m: string, d?: unknown): void };
+      }
+    | undefined;
+  if (typeof p?.on !== "function") {
     return;
   }
 
-  pi.on("tool_call", async (event: any, ctx: any) => {
-    if (ctx && typeof setContext === "function") {
-      setContext(ctx);
-    } else if (ctx && typeof (engine as any).setContext === "function") {
-      (engine as any).setContext(ctx);
+  p.on("tool_call", async (event: unknown, ctx: unknown) => {
+    const cx = ctx as Record<string, unknown> | undefined;
+    const ev = event as Record<string, unknown> | undefined;
+    if (cx && typeof setContext === "function") {
+      setContext(cx);
     }
     if (!engine.isEnabled()) {
       return;
     }
 
-    const toolCallId = event?.toolCallId || event?.id;
+    const toolCallId =
+      typeof ev?.toolCallId === "string" ? ev.toolCallId : typeof ev?.id === "string" ? ev.id : "";
     if (!toolCallId) {
       return;
     }
 
+    const sm = cx?.sessionManager as { getSessionId?: () => string } | undefined;
     const sessionID =
-      ctx?.sessionManager?.getSessionId?.() ||
-      event?.sessionID ||
-      event?.sessionId ||
-      ctx?.sessionID ||
-      ctx?.sessionId ||
+      (typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined) ||
+      (typeof ev?.sessionID === "string" ? ev.sessionID : undefined) ||
+      (typeof ev?.sessionId === "string" ? ev.sessionId : undefined) ||
+      (typeof cx?.sessionID === "string" ? cx.sessionID : undefined) ||
+      (typeof cx?.sessionId === "string" ? cx.sessionId : undefined) ||
       "";
-    const toolName = event?.toolName || event?.name || "";
+    const toolName =
+      typeof ev?.toolName === "string" ? ev.toolName : typeof ev?.name === "string" ? ev.name : "";
+
+    const evInput = ev?.input as Record<string, unknown> | undefined;
     const commandString =
-      event?.input?.command ||
-      event?.input?.code ||
-      event?.commandString ||
-      (typeof event?.input === "string" ? event.input : undefined);
-    const targetPath = event?.input?.path || event?.input?.filepath || event?.targetPath || "";
-    const workspaceRoot = ctx?.cwd || ctx?.directory || event?.workspaceRoot || process.cwd();
+      typeof evInput?.command === "string"
+        ? evInput.command
+        : typeof evInput?.code === "string"
+          ? evInput.code
+          : typeof ev?.commandString === "string"
+            ? ev.commandString
+            : typeof ev?.input === "string"
+              ? ev.input
+              : undefined;
+    const targetPath =
+      typeof evInput?.path === "string"
+        ? evInput.path
+        : typeof evInput?.filepath === "string"
+          ? evInput.filepath
+          : typeof ev?.targetPath === "string"
+            ? ev.targetPath
+            : "";
+    const workspaceRoot =
+      typeof cx?.cwd === "string"
+        ? (cx.cwd as string)
+        : typeof cx?.directory === "string"
+          ? (cx.directory as string)
+          : typeof ev?.workspaceRoot === "string"
+            ? ev.workspaceRoot
+            : process.cwd();
 
     const isInternalTool = [
       "todo",
@@ -70,27 +100,28 @@ export function registerToolCallHook(
       toolName,
       commandString,
       targetPath,
-      rawArgs: event?.input || event?.args,
+      rawArgs: ev?.input || ev?.args,
       workspaceRoot,
       userPrompt: engine.getUserPrompt(sessionID),
-      metadata: event?.metadata || event?.input,
-      signal: ctx?.signal || event?.signal,
+      metadata: (ev?.metadata || ev?.input) as Record<string, unknown> | undefined,
+      signal: (cx?.signal || ev?.signal) as AbortSignal | undefined,
     };
 
     const hookStartTime = performance.now();
     let decision: GateDecision;
     try {
       decision = await engine.evaluate(action);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
       decision = {
         verdict: "BLOCK",
-        reason: `Evaluation error: ${err?.message || err}`,
+        reason: `Evaluation error: ${msg}`,
       };
     }
     const hookDurationMs = Math.round(performance.now() - hookStartTime);
     try {
-      const logFn = pi?.logger?.debug ?? console.debug;
-      logFn.call(pi?.logger ?? console, "[AutoGate OMP Hook] Evaluated tool call", {
+      const logFn = p?.logger?.debug ?? console.debug;
+      logFn.call(p?.logger ?? console, "[AutoGate OMP Hook] Evaluated tool call", {
         toolName,
         toolCallId,
         verdict: decision.verdict,

@@ -15,9 +15,11 @@ export function resolveShadowedApproval(
   if (typeof args === "string") {
     command = args;
   } else if (typeof args === "object" && args !== null) {
-    const obj = args as any;
-    command = obj.command || obj.commandString || obj.code || obj.script;
-    toolCallId = obj.toolCallId || obj.id || obj.tool_call_id;
+    const obj = args as Record<string, unknown>;
+    const cmdVal = obj.command || obj.commandString || obj.code || obj.script;
+    command = typeof cmdVal === "string" ? cmdVal : undefined;
+    const idVal = obj.toolCallId || obj.id || obj.tool_call_id;
+    toolCallId = typeof idVal === "string" ? idVal : undefined;
   }
 
   let decisionRecord:
