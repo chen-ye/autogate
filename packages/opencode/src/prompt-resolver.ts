@@ -1,4 +1,5 @@
 import type { OpenCodeSessionClient } from "./types.js";
+import { resolveServerPassword } from "./index.js";
 
 interface MessageEntry {
   role?: string;
@@ -21,23 +22,52 @@ export class OpenCodePromptResolver {
   }
 
   public async fetchLatestUserMessage(sessionID: string): Promise<string> {
-    if (!this.client?.session?.messages) return "";
+    let messages: unknown[] | undefined;
+    if (typeof this.client?.session?.messages === "function") {
+      try {
+        const res = await this.client.session.messages({
+          path: { id: sessionID, sessionID },
+          query: { limit: 50 },
+        });
+        messages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data;
+      } catch {}
+    }
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      try {
+        const targetServer =
+          this.client?.serverUrl ||
+          process.env.OPENCODE_SERVER_URL ||
+          (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+            ? "http://localhost:4097"
+            : "http://localhost:4096");
+        const password = resolveServerPassword();
+        const auth = password
+          ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
+          : "";
+        const res = await fetch(`${targetServer}/api/session/${sessionID}/message?limit=50`, {
+          headers: auth ? { Authorization: auth } : {},
+        });
+        if (res.ok) {
+          const json = (await res.json()) as { data?: unknown[] } | unknown[];
+          messages = Array.isArray(json) ? json : json?.data;
+        }
+      } catch {}
+    }
+
     try {
-      const res = await this.client.session.messages({
-        path: { id: sessionID, sessionID },
-        query: { limit: 50 },
-      });
-      const messages = Array.isArray(res) ? res : res?.data;
       if (Array.isArray(messages) && messages.length > 0) {
         for (let i = messages.length - 1; i >= 0; i--) {
           const item = messages[i];
           if (!item || typeof item !== "object") continue;
           const m = item as MessageEntry;
-          const role = m.info?.role ?? m.role;
+          const role = m.info?.role ?? m.role ?? (m as { type?: string }).type;
           if (role === "user") {
             const parts = m.parts || (m.content ? [m.content] : []);
             let text = "";
-            if (typeof m.content === "string" && !m.parts) {
+            if (typeof (m as { text?: unknown }).text === "string") {
+              text = (m as { text: string }).text;
+            } else if (typeof m.content === "string" && !m.parts) {
               text = m.content;
             } else if (Array.isArray(parts)) {
               text = parts

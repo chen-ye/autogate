@@ -3,6 +3,7 @@ import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
 import { tool, type Hooks, type PluginInput } from "@opencode-ai/plugin";
+import { define } from "@opencode-ai/plugin/v2/promise";
 import type { UserMessage, Part } from "@opencode-ai/sdk";
 import {
   loadConfig,
@@ -29,22 +30,37 @@ import {
 import { OpenCodePromptResolver } from "./prompt-resolver.js";
 import type { OpenCodeSessionClient, OpenCodeEvent, OpenCodePluginInput } from "./types.js";
 
-export function isEventForWorkspace(event: unknown, workspaceDir?: string): boolean {
-  if (!workspaceDir) return true;
+export function resolveWorkspaceDirectory(val: unknown): string | undefined {
+  if (typeof val === "string" && val.trim().length > 0) {
+    return val.trim();
+  }
+  if (val && typeof val === "object") {
+    const obj = val as Record<string, unknown>;
+    if (typeof obj.directory === "string" && obj.directory.trim().length > 0) {
+      return obj.directory.trim();
+    }
+  }
+  return undefined;
+}
+
+export function isEventForWorkspace(event: unknown, workspaceDir?: unknown): boolean {
+  const wsDirStr = resolveWorkspaceDirectory(workspaceDir);
+  if (!wsDirStr) return true;
   if (!event || typeof event !== "object") return true;
 
   const ev = event as Record<string, unknown>;
-  const normalizedWs = path.resolve(workspaceDir);
+  const normalizedWs = path.resolve(wsDirStr);
 
   // 1. Authoritative workspace directory in OpenCode v2 events
-  if (
-    ev.location &&
-    typeof ev.location === "object" &&
-    typeof (ev.location as Record<string, unknown>).directory === "string"
-  ) {
-    const locDir = (ev.location as Record<string, unknown>).directory as string;
-    if (locDir.trim().length > 0) {
-      return path.resolve(locDir) === normalizedWs;
+  if (ev.location && typeof ev.location === "object") {
+    const locDir = resolveWorkspaceDirectory(ev.location);
+    if (locDir) {
+      const resolvedLoc = path.resolve(locDir);
+      return (
+        resolvedLoc === normalizedWs ||
+        resolvedLoc.startsWith(normalizedWs + path.sep) ||
+        normalizedWs.startsWith(resolvedLoc + path.sep)
+      );
     }
   }
 
@@ -52,18 +68,18 @@ export function isEventForWorkspace(event: unknown, workspaceDir?: string): bool
   const eventData = (ev.properties || ev.data) as Record<string, unknown> | undefined;
   const meta = eventData?.metadata as Record<string, unknown> | undefined;
   const dataDir =
-    typeof meta?.directory === "string"
-      ? meta.directory
-      : typeof eventData?.directory === "string"
-        ? eventData.directory
-        : undefined;
+    resolveWorkspaceDirectory(meta?.directory) ?? resolveWorkspaceDirectory(eventData?.directory);
 
   if (!dataDir) {
     return true;
   }
 
   const resolvedDataDir = path.resolve(dataDir);
-  return resolvedDataDir === normalizedWs || resolvedDataDir.startsWith(normalizedWs + path.sep);
+  return (
+    resolvedDataDir === normalizedWs ||
+    resolvedDataDir.startsWith(normalizedWs + path.sep) ||
+    normalizedWs.startsWith(resolvedDataDir + path.sep)
+  );
 }
 
 export {
@@ -136,12 +152,26 @@ export function resolveServerPassword(configDir?: string): string {
   }
 
   const candidateDirs: string[] = [];
-  if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
-    candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
-    candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
+  const preferV2 =
+    process.env.OPENCODE_PORT === "4097" ||
+    process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ||
+    fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json"));
+
+  if (preferV2) {
+    if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
+    }
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
+  } else {
+    if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
+    }
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
   }
-  candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
-  candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
 
   for (const dir of candidateDirs) {
     try {
@@ -173,7 +203,15 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     ensureAgentInstalled();
     const config = loadConfig(options);
     this.config = config;
-    const serverUrl = config.opencode?.serverUrl || config.serverUrl || "http://localhost:4096";
+    const prefer4097 =
+      process.env.OPENCODE_PORT === "4097" ||
+      process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ||
+      fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json"));
+    const serverUrl =
+      config.opencode?.serverUrl ||
+      (options?.serverUrl as string | undefined) ||
+      process.env.OPENCODE_SERVER_URL ||
+      (prefer4097 ? "http://localhost:4097" : config.serverUrl || "http://localhost:4096");
     this.serverUrl = serverUrl;
     config.serverUrl = serverUrl;
     const adapter = new NtfyAdapter({
@@ -182,7 +220,11 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       token: config.ntfyToken,
     });
 
-    const workspaceRoot = ctx.directory || ctx.worktree || process.cwd();
+    const workspaceRoot =
+      resolveWorkspaceDirectory(ctx.directory) ??
+      resolveWorkspaceDirectory(ctx.worktree) ??
+      resolveWorkspaceDirectory((ctx as unknown as { location?: unknown }).location) ??
+      process.cwd();
 
     const client = (ctx.client ?? ctx) as unknown as OpenCodeSessionClient;
     this.promptResolver = new OpenCodePromptResolver(client);
@@ -212,13 +254,26 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   }
 
   async handlePermissionAsked(request: PermissionEventData): Promise<void> {
-    const workspaceRoot = this.ctx.directory || this.ctx.worktree || process.cwd();
-    const requestDir = (request?.metadata?.directory || request?.directory) as string | undefined;
-    if (requestDir && (this.ctx.directory || this.ctx.worktree)) {
-      const explicitWs = this.ctx.directory || this.ctx.worktree;
+    const workspaceRoot =
+      resolveWorkspaceDirectory(this.ctx.directory) ??
+      resolveWorkspaceDirectory(this.ctx.worktree) ??
+      resolveWorkspaceDirectory((this.ctx as unknown as { location?: unknown }).location) ??
+      process.cwd();
+    const explicitWs =
+      resolveWorkspaceDirectory(this.ctx.directory) ??
+      resolveWorkspaceDirectory(this.ctx.worktree) ??
+      resolveWorkspaceDirectory((this.ctx as unknown as { location?: unknown }).location);
+    const requestDir =
+      resolveWorkspaceDirectory(request?.metadata?.directory) ??
+      resolveWorkspaceDirectory(request?.directory);
+    if (requestDir && explicitWs) {
       const normalizedReq = path.resolve(requestDir);
       const normalizedWs = path.resolve(explicitWs);
-      if (normalizedReq !== normalizedWs && !normalizedReq.startsWith(normalizedWs + path.sep)) {
+      if (
+        normalizedReq !== normalizedWs &&
+        !normalizedReq.startsWith(normalizedWs + path.sep) &&
+        !normalizedWs.startsWith(normalizedReq + path.sep)
+      ) {
         return;
       }
     }
@@ -262,6 +317,9 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       metadata: request.metadata,
     };
     const decision = await this.engine.evaluate(action);
+    console.log(
+      `[AutoGate] Evaluated decision for ${request.id}: verdict=${decision.verdict} reason=${decision.reason} userPrompt="${action.userPrompt}"`,
+    );
     const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
     const targetDir = (request.metadata?.directory as string) || workspaceRoot;
     await this.replyPermission(
@@ -287,24 +345,34 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     if (ctxAny.permission && typeof ctxAny.permission.reply === "function") {
       try {
         await ctxAny.permission.reply({
-          path: { requestID },
-          body: {
-            reply,
-            decision: reply,
-            message,
-          },
-          query: directory ? { directory } : undefined,
+          sessionID,
+          requestID,
+          decision: reply,
+          message,
         });
+        console.log(
+          `[AutoGate] Successfully replied to permission via ctx.permission: ${requestID} -> ${reply}`,
+        );
         return;
-      } catch {}
+      } catch (err) {
+        console.error(`[AutoGate] ctx.permission.reply failed for ${requestID}:`, err);
+      }
     }
 
-    const serverUrl = this.serverUrl || "http://localhost:4096";
+    const serverUrl =
+      this.serverUrl ||
+      process.env.OPENCODE_SERVER_URL ||
+      (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+        ? "http://localhost:4097"
+        : "http://localhost:4096");
     const password = resolveServerPassword(
       typeof ctxAny.configDir === "string" ? ctxAny.configDir : undefined,
     );
     const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64");
-    const workspaceRoot = this.ctx.directory || this.ctx.worktree;
+    const workspaceRoot =
+      resolveWorkspaceDirectory(this.ctx.directory) ??
+      resolveWorkspaceDirectory(this.ctx.worktree) ??
+      resolveWorkspaceDirectory((this.ctx as unknown as { location?: unknown }).location);
     const targetDir = directory || workspaceRoot;
     const urls = [
       sessionID
@@ -329,9 +397,19 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
           signal: AbortSignal.timeout(5000),
         });
         if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
+          console.log(
+            `[AutoGate] Successfully replied to permission via HTTP ${fullUrl}: ${requestID} -> ${reply}`,
+          );
           return;
+        } else {
+          console.error(
+            `[AutoGate] HTTP reply to ${fullUrl} returned ${res.status}:`,
+            await res.text(),
+          );
         }
-      } catch {}
+      } catch (err) {
+        console.error(`[AutoGate] HTTP reply to ${fullUrl} fetch error:`, err);
+      }
     }
 
     const client = this.ctx.client as unknown as OpenCodeSessionClient | undefined;
@@ -350,7 +428,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       try {
         const res = await client.permission.reply({
           path: { requestID },
-          body: { reply, message },
+          body: { decision: reply, ...(message ? { message } : {}) },
           query: targetDir ? { directory: targetDir } : undefined,
         });
         if (!res?.error && res?.response?.ok !== false) return;
@@ -582,151 +660,168 @@ export async function AutoGatePlugin(
   return hooks;
 }
 
-export const plugin = {
-  id: "auto-gate",
-  async setup(ctx: OpenCodePluginInput) {
-    const opts =
-      typeof ctx.options === "object" && ctx.options !== null
-        ? (ctx.options as Record<string, unknown>)
-        : undefined;
-    const adapter = new OpenCodeHarnessAdapter(ctx as unknown as PluginInput, opts);
-    await adapter.start();
+let activeEventController: AbortController | undefined;
 
-    const config = loadConfig(opts);
-    console.log(
-      `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
-    );
+export const plugin = Object.assign(
+  define({
+    id: "auto-gate",
+    setup: async (ctx: any) => {
+      if (activeEventController) {
+        activeEventController.abort();
+        activeEventController = undefined;
+      }
+      activeEventController = new AbortController();
+      const opts =
+        typeof ctx.options === "object" && ctx.options !== null
+          ? (ctx.options as Record<string, unknown>)
+          : undefined;
+      const adapter = new OpenCodeHarnessAdapter(ctx as unknown as PluginInput, opts);
+      await adapter.start();
 
-    // Register tools via ctx.tool.transform if available
-    if (ctx.tool && typeof ctx.tool.transform === "function") {
-      await ctx.tool.transform((editor: { add(toolDef: unknown): void }) => {
-        editor.add({
-          name: "classify_result",
-          options: { codemode: false },
-          description:
-            "Report the security classification result for the agent action (internal evaluation tool)",
-          input: {
-            type: "object",
-            properties: {
-              risk_level: { type: "string", enum: ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
-              user_authorization: { type: "string", enum: ["NONE", "LOW", "MEDIUM", "HIGH"] },
-              verdict: { type: "string", enum: ["ALLOW", "BLOCK", "UNSURE"] },
-              reason: { type: "string" },
-            },
-            required: ["risk_level", "user_authorization", "verdict", "reason"],
-          },
-          async execute(args: Record<string, unknown>, context: { sessionID?: string }) {
-            if (!context.sessionID || !isEvaluationSession(context.sessionID)) {
-              throw new Error(
-                "classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.",
-              );
-            }
-            const verdictStr = typeof args.verdict === "string" ? args.verdict : "UNSURE";
-            const riskStr = typeof args.risk_level === "string" ? args.risk_level : undefined;
-            const authStr =
-              typeof args.user_authorization === "string" ? args.user_authorization : undefined;
-            const reasonStr = typeof args.reason === "string" ? args.reason : "";
-            recordEvaluationVerdict(context.sessionID, {
-              verdict: isClassifierVerdict(verdictStr) ? verdictStr : "UNSURE",
-              risk_level: isRiskLevel(riskStr) ? riskStr : undefined,
-              user_authorization: isUserAuthorization(authStr) ? authStr : undefined,
-              reason: reasonStr,
-            });
-            (
-              ctx as unknown as { session?: { interrupt?: (id: string) => Promise<unknown> } }
-            ).session
-              ?.interrupt?.(context.sessionID)
-              .catch(() => {});
-            return {
-              content: JSON.stringify(args),
-            };
-          },
-        });
+      const config = loadConfig(opts);
+      console.log(
+        `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
+      );
 
-        editor.add({
-          name: "escalate_permission",
-          options: { codemode: false },
-          description:
-            "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
-          input: {
-            type: "object",
-            properties: {
-              action: {
-                type: "string",
-                description:
-                  "The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')",
+      // Register tools via ctx.tool.transform if available
+      if (ctx.tool && typeof ctx.tool.transform === "function") {
+        await ctx.tool.transform((editor: { add(toolDef: unknown): void }) => {
+          editor.add({
+            name: "classify_result",
+            options: { codemode: false },
+            description:
+              "Report the security classification result for the agent action (internal evaluation tool)",
+            input: {
+              type: "object",
+              properties: {
+                risk_level: { type: "string", enum: ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+                user_authorization: { type: "string", enum: ["NONE", "LOW", "MEDIUM", "HIGH"] },
+                verdict: { type: "string", enum: ["ALLOW", "BLOCK", "UNSURE"] },
+                reason: { type: "string" },
               },
-              reason: {
-                type: "string",
-                description:
-                  "Why the safe alternative or automated transform cannot be used and human review is required",
-              },
+              required: ["risk_level", "user_authorization", "verdict", "reason"],
             },
-            required: ["action", "reason"],
-          },
-          async execute(args: Record<string, unknown>, context: { sessionID?: string }) {
-            const actionStr = typeof args.action === "string" ? args.action : "";
-            const reasonStr = typeof args.reason === "string" ? args.reason : "";
-            if (context.sessionID) {
-              recordEscalationIntent(context.sessionID, actionStr, reasonStr);
-            }
-            return {
-              content: `Manual verification intent registered for '${actionStr}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
-            };
-          },
+            async execute(args: Record<string, unknown>, context: { sessionID?: string }) {
+              if (!context.sessionID || !isEvaluationSession(context.sessionID)) {
+                throw new Error(
+                  "classify_result is an internal security tool reserved exclusively for AutoGate evaluation sessions.",
+                );
+              }
+              const verdictStr = typeof args.verdict === "string" ? args.verdict : "UNSURE";
+              const riskStr = typeof args.risk_level === "string" ? args.risk_level : undefined;
+              const authStr =
+                typeof args.user_authorization === "string" ? args.user_authorization : undefined;
+              const reasonStr = typeof args.reason === "string" ? args.reason : "";
+              recordEvaluationVerdict(context.sessionID, {
+                verdict: isClassifierVerdict(verdictStr) ? verdictStr : "UNSURE",
+                risk_level: isRiskLevel(riskStr) ? riskStr : undefined,
+                user_authorization: isUserAuthorization(authStr) ? authStr : undefined,
+                reason: reasonStr,
+              });
+              (
+                ctx as unknown as { session?: { interrupt?: (id: string) => Promise<unknown> } }
+              ).session
+                ?.interrupt?.(context.sessionID)
+                .catch(() => {});
+              return {
+                content: JSON.stringify(args),
+              };
+            },
+          });
+
+          editor.add({
+            name: "escalate_permission",
+            options: { codemode: false },
+            description:
+              "Request human manual verification for a blocked or high-risk action when safe automated transformations cannot satisfy the goal.",
+            input: {
+              type: "object",
+              properties: {
+                action: {
+                  type: "string",
+                  description:
+                    "The command or target path requiring human approval (e.g. '/etc/hosts' or 'rm -rf dist')",
+                },
+                reason: {
+                  type: "string",
+                  description:
+                    "Why the safe alternative or automated transform cannot be used and human review is required",
+                },
+              },
+              required: ["action", "reason"],
+            },
+            async execute(args: Record<string, unknown>, context: { sessionID?: string }) {
+              const actionStr = typeof args.action === "string" ? args.action : "";
+              const reasonStr = typeof args.reason === "string" ? args.reason : "";
+              if (context.sessionID) {
+                recordEscalationIntent(context.sessionID, actionStr, reasonStr);
+              }
+              return {
+                content: `Manual verification intent registered for '${actionStr}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
+              };
+            },
+          });
         });
-      });
-    }
+      }
 
-    // Subscribe to events
-    const eventObj = ctx.event as unknown as
-      | { subscribe(opts?: { signal?: AbortSignal }): Promise<AsyncIterable<OpenCodeEvent>> }
-      | undefined;
-    if (eventObj && typeof eventObj.subscribe === "function") {
-      const controller = new AbortController();
-      const subscribeFn = eventObj.subscribe.bind(eventObj);
-      (async () => {
-        try {
-          const stream = await subscribeFn({ signal: controller.signal });
-          for await (const event of stream) {
-            const workspaceDir = ctx.directory || ctx.worktree;
-            if (workspaceDir && !isEventForWorkspace(event, workspaceDir)) {
-              continue;
-            }
+      // Subscribe to events
+      const eventObj = ctx.event as unknown as
+        | { subscribe(opts?: { signal?: AbortSignal }): Promise<AsyncIterable<OpenCodeEvent>> }
+        | undefined;
+      if (eventObj && typeof eventObj.subscribe === "function") {
+        const signal = activeEventController.signal;
+        const subscribeFn = eventObj.subscribe.bind(eventObj);
+        (async () => {
+          try {
+            const stream = await subscribeFn({ signal });
+            for await (const event of stream) {
+              const workspaceDir =
+                resolveWorkspaceDirectory(ctx.directory) ??
+                resolveWorkspaceDirectory(ctx.worktree) ??
+                resolveWorkspaceDirectory((ctx as unknown as { location?: unknown }).location);
+              if (workspaceDir && !isEventForWorkspace(event, workspaceDir)) {
+                continue;
+              }
 
-            if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
-              const eventData = event.properties || event.data;
-              if (eventData) {
-                await adapter.handlePermissionAsked(eventData);
-              }
-            } else if (
-              event.type === "permission.replied" ||
-              event.type === "permission.v2.replied"
-            ) {
-              const eventData = event.properties || event.data;
-              if (eventData) {
-                await adapter.handlePermissionReplied(eventData);
-              }
-            } else if (
-              event.type === "session.idle" ||
-              (event.type === "session.status" &&
-                (event.properties?.status === "idle" || event.data?.status === "idle"))
-            ) {
-              const sessionID = event.properties?.sessionID || event.data?.sessionID;
-              if (typeof sessionID === "string" && sessionID.length > 0) {
-                adapter.clearTurnCache(sessionID);
+              if (event.type === "permission.asked" || event.type === "permission.v2.asked") {
+                const eventData = (event.properties || event.data) as
+                  | PermissionEventData
+                  | undefined;
+                if (eventData) {
+                  console.log(
+                    `[AutoGate] Intercepted permission asked: ${eventData.id} for session ${eventData.sessionID}`,
+                  );
+                  await adapter.handlePermissionAsked(eventData);
+                }
+              } else if (
+                event.type === "permission.replied" ||
+                event.type === "permission.v2.replied"
+              ) {
+                const eventData = (event.properties || event.data) as
+                  | { requestID?: string; id?: string; reply?: string }
+                  | undefined;
+                if (eventData) {
+                  await adapter.handlePermissionReplied(eventData);
+                }
+              } else if (
+                event.type === "session.idle" ||
+                (event.type === "session.status" &&
+                  (event.properties?.status === "idle" || event.data?.status === "idle"))
+              ) {
+                const sessionID = event.properties?.sessionID || event.data?.sessionID;
+                if (typeof sessionID === "string" && sessionID.length > 0) {
+                  adapter.clearTurnCache(sessionID);
+                }
               }
             }
+          } catch (err) {
+            console.error("[AutoGate] Event stream error:", err);
           }
-        } catch {}
-      })();
-    }
-
-    return async () => {
-      await adapter.dispose();
-    };
-  },
-  server: AutoGatePlugin,
-};
+        })();
+      }
+    },
+  }),
+  { server: AutoGatePlugin },
+);
 
 export default plugin;

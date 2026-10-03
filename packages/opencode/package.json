@@ -2,10 +2,13 @@
   "name": "@autogate/opencode",
   "version": "1.0.0",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./index.ts",
   "exports": {
-    ".": "./src/index.ts",
+    ".": "./index.ts",
     "./evaluator": "./src/evaluator.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outfile ./dist/index.js --target bun --external '@opencode-ai/*' --external '@opencode/*'"
   },
   "dependencies": {
     "@autogate/core": "workspace:*",

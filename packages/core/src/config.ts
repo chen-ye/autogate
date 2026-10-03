@@ -151,12 +151,20 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     }
   }
 
+  const defaultPort =
+    process.env.OPENCODE_PORT ||
+    (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ? "4097" : undefined) ||
+    "4096";
   const rawServerUrl =
-    options?.serverUrl ?? options?.SERVER_URL ?? env.SERVER_URL ?? fileConfig.serverUrl;
+    options?.serverUrl ??
+    options?.SERVER_URL ??
+    env.SERVER_URL ??
+    fileConfig.serverUrl ??
+    process.env.OPENCODE_SERVER_URL;
   const serverUrl =
     typeof rawServerUrl === "string" && rawServerUrl.trim().length > 0
       ? rawServerUrl.trim()
-      : "http://localhost:4096";
+      : `http://localhost:${defaultPort}`;
 
   const rawToken =
     options?.ntfyToken ??

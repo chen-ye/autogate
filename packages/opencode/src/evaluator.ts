@@ -303,6 +303,7 @@ export async function extractVerdictFromSession(
     return currentResult;
   }
 
+  let allMessages: unknown[] = [];
   if (typeof client?.session?.messages === "function") {
     try {
       const msgsRes = await client.session
@@ -314,32 +315,66 @@ export async function extractVerdictFromSession(
         string,
         unknown
       >;
-      const allMessages: unknown[] = Array.isArray(msgsRes)
+      allMessages = Array.isArray(msgsRes)
         ? msgsRes
         : Array.isArray(resObj.data)
           ? resObj.data
           : [];
+    } catch {}
+  }
 
-      if (allMessages.length > 0) {
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-          const msg = allMessages[i];
-          const m = (msg && typeof msg === "object" ? msg : {}) as {
-            parts?: unknown[];
-            content?: unknown;
-            tool_calls?: unknown[];
-          };
-          const parts = [
-            ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
-            ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
-            ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
-          ];
-          const result = extractVerdictFromParts(parts);
-          if (result) {
-            return result;
-          }
-        }
+  if (allMessages.length === 0 && client && "message" in client) {
+    try {
+      const msgDomain = (client as Record<string, unknown>).message as
+        | { list?(opts: unknown): Promise<{ data?: unknown[] } | unknown[]> }
+        | undefined;
+      if (typeof msgDomain?.list === "function") {
+        const res = await msgDomain.list({ sessionID, limit: 50 });
+        allMessages = Array.isArray(res) ? res : res?.data || [];
       }
     } catch {}
+  }
+
+  if (allMessages.length === 0) {
+    try {
+      const serverUrl =
+        client?.serverUrl ||
+        process.env.OPENCODE_SERVER_URL ||
+        (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+          ? "http://localhost:4097"
+          : "http://localhost:4096");
+      const password = resolveServerPassword();
+      const authHeader = password
+        ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
+        : "";
+      const res = await fetch(`${serverUrl}/api/session/${sessionID}/message?limit=50`, {
+        headers: authHeader ? { Authorization: authHeader } : {},
+      });
+      if (res.ok) {
+        const json = (await res.json()) as { data?: unknown[] } | unknown[];
+        allMessages = Array.isArray(json) ? json : json?.data || [];
+      }
+    } catch {}
+  }
+
+  if (allMessages.length > 0) {
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      const msg = allMessages[i];
+      const m = (msg && typeof msg === "object" ? msg : {}) as {
+        parts?: unknown[];
+        content?: unknown;
+        tool_calls?: unknown[];
+      };
+      const parts = [
+        ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
+        ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
+        ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
+      ];
+      const result = extractVerdictFromParts(parts);
+      if (result) {
+        return result;
+      }
+    }
   }
 
   return null;
@@ -546,32 +581,22 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         }, timeoutMs);
       });
 
-      const promptPromise = client.session
-        .prompt({
-          path: { id: sessionID },
-          agent: evalAgent,
-          body: {
-            agent: evalAgent,
-            model: {
-              providerID: modelRef.providerID,
-              modelID: modelRef.modelID,
-            },
-            tools: { ...EVAL_SESSION_TOOLS },
-            system: systemPrompt,
-            parts: [
-              {
-                type: "text",
-                text: userPromptText,
-              },
-            ],
-          },
-        })
-        .then(async (res) => {
-          if (typeof client.session.wait === "function") {
-            await client.session.wait({ path: { id: sessionID, sessionID } }).catch(() => {});
-          }
-          return res;
-        });
+      const promptOpts = {
+        sessionID,
+        text: userPromptText,
+        path: { id: sessionID, sessionID },
+        body: {
+          text: userPromptText,
+        },
+      };
+      const promptPromise = client.session.prompt(promptOpts).then(async (res) => {
+        if (typeof client.session.wait === "function") {
+          await client.session
+            .wait({ sessionID, path: { id: sessionID, sessionID } })
+            .catch(() => {});
+        }
+        return res;
+      });
 
       promptPromise
         .then(async (promptRes) => {
@@ -608,29 +633,23 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           const maxRetries = 2;
           while (attempts < maxRetries) {
             attempts++;
+            const repromptText =
+              "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }. If tool calling is unavailable, output a single JSON object conforming to the schema.";
+            const repromptOpts = {
+              sessionID,
+              text: repromptText,
+              path: { id: sessionID, sessionID },
+              body: {
+                text: repromptText,
+              },
+            };
             const repromptRes = await client.session
-              .prompt({
-                path: { id: sessionID },
-                agent: evalAgent,
-                body: {
-                  agent: evalAgent,
-                  model: {
-                    providerID: modelRef.providerID,
-                    modelID: modelRef.modelID,
-                  },
-                  tools: { ...EVAL_SESSION_TOOLS },
-                  system: systemPrompt,
-                  parts: [
-                    {
-                      type: "text",
-                      text: "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }. If tool calling is unavailable, output a single JSON object conforming to the schema.",
-                    },
-                  ],
-                },
-              })
+              .prompt(repromptOpts)
               .then(async (res) => {
                 if (typeof client.session.wait === "function") {
-                  await client.session.wait({ path: { id: sessionID, sessionID } }).catch(() => {});
+                  await client.session
+                    .wait({ sessionID, path: { id: sessionID, sessionID } })
+                    .catch(() => {});
                 }
                 return res;
               })
