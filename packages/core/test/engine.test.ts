@@ -13,10 +13,12 @@ import type { AutoGateConfig } from "../src/config";
 class MockEvaluator implements GateEvaluator {
   readonly name = "mock-evaluator";
   public evaluateCallCount = 0;
+  public lastEvaluatedAction?: GateAction;
   public nextResult: ClassifierResult = { verdict: "ALLOW", reason: "Allowed" };
 
-  async evaluate(_action: GateAction): Promise<ClassifierResult> {
+  async evaluate(action: GateAction): Promise<ClassifierResult> {
     this.evaluateCallCount++;
+    this.lastEvaluatedAction = action;
     return this.nextResult;
   }
 }
@@ -489,5 +491,57 @@ describe("AutoGateCoreEngine", () => {
     expect(decision.verdict).toBe("BLOCK"); // MockAdapter was initialized with autoReply = "reject"
     expect(mockAdapter.publishedRequests.length).toBe(1);
     expect(mockAdapter.publishedRequests[0].id).toBe("act-remote-enabled-unsure");
+  });
+
+  it("instantiates and evaluates in host-agnostic mode without client or SDK traversal", async () => {
+    mockEvaluator.nextResult = { verdict: "ALLOW", reason: "Host-agnostic allow" };
+    const pureEngine = new AutoGateCoreEngine({
+      config,
+      evaluator: mockEvaluator,
+      adapter: mockAdapter,
+    });
+
+    const actionWithPrompts: GateAction = {
+      id: "act-pure-1",
+      harness: "generic",
+      sessionID: "ses-pure",
+      toolName: "bash",
+      commandString: "echo pure",
+      workspaceRoot: "/tmp",
+      userPrompt: "Direct user prompt",
+      subagentPrompt: "[Subagent: Worker]\nChild prompt",
+    };
+
+    const decision = await pureEngine.evaluate(actionWithPrompts);
+    expect(decision.verdict).toBe("ALLOW");
+    expect(mockEvaluator.lastEvaluatedAction?.userPrompt).toBe("Direct user prompt");
+    expect(mockEvaluator.lastEvaluatedAction?.subagentPrompt).toBe(
+      "[Subagent: Worker]\nChild prompt",
+    );
+  });
+
+  it("falls back to cached userPrompt if action.userPrompt is omitted", async () => {
+    mockEvaluator.nextResult = { verdict: "ALLOW", reason: "Fallback prompt allow" };
+    const pureEngine = new AutoGateCoreEngine({
+      config,
+      evaluator: mockEvaluator,
+      adapter: mockAdapter,
+    });
+
+    pureEngine.setUserPrompt("ses-fallback", "Cached session prompt");
+
+    const actionWithoutPrompt: GateAction = {
+      id: "act-pure-2",
+      harness: "generic",
+      sessionID: "ses-fallback",
+      toolName: "bash",
+      commandString: "echo fallback",
+      workspaceRoot: "/tmp",
+    };
+
+    const decision = await pureEngine.evaluate(actionWithoutPrompt);
+    expect(decision.verdict).toBe("ALLOW");
+    expect(actionWithoutPrompt.userPrompt).toBe("Cached session prompt");
+    expect(mockEvaluator.lastEvaluatedAction?.userPrompt).toBe("Cached session prompt");
   });
 });
