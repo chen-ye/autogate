@@ -148,7 +148,6 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     const client = ctx.client || (ctx as any);
     this.engine = new AutoGateCoreEngine({
       config,
-      client,
       adapter,
       evaluator: new OpenCodeSessionEvaluator(client, config),
       workspaceRoot,

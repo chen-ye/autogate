@@ -201,10 +201,7 @@ export function isTransformableAction(
 
 export class DefaultGateEvaluator implements GateEvaluator {
   readonly name = "default-classifier";
-  constructor(
-    private client?: any,
-    private config?: AutoGateConfig,
-  ) {}
+  constructor(private config?: AutoGateConfig) {}
   async evaluate(action: GateAction): Promise<ClassifierResult> {
     return { verdict: "UNSURE", reason: "No evaluator configured on engine" };
   }
@@ -226,7 +223,6 @@ export interface AutoGateEngineOptions {
   adapter?: NotifierAdapter;
   evaluator?: GateEvaluator;
   workspaceRoot?: string;
-  client?: any;
   remoteReviewEnabled?: boolean;
 }
 
@@ -253,46 +249,34 @@ export class AutoGateCoreEngine {
   private turnDecisionCache = new Map<string, Set<string>>();
   private workspaceRoot?: string;
   private stopRemoteListen?: () => void;
-  private client?: any;
   private reviewFallbackMode: ReviewFallbackMode = "ntfy";
   private remoteReviewEnabled: boolean = true;
 
   constructor(
-    optionsOrClient?: AutoGateEngineOptions | any,
-    config?: AutoGateConfig,
+    optionsOrConfig?: AutoGateEngineOptions | AutoGateConfig,
     remoteAdapter?: NotifierAdapter,
     evaluator?: GateEvaluator,
   ) {
     let remoteReviewOption: boolean | undefined;
     if (
-      optionsOrClient &&
-      typeof optionsOrClient === "object" &&
-      !Array.isArray(optionsOrClient) &&
-      ("config" in optionsOrClient ||
-        "evaluator" in optionsOrClient ||
-        "adapter" in optionsOrClient ||
-        "remoteReviewEnabled" in optionsOrClient)
+      optionsOrConfig &&
+      typeof optionsOrConfig === "object" &&
+      !Array.isArray(optionsOrConfig) &&
+      ("config" in optionsOrConfig ||
+        "evaluator" in optionsOrConfig ||
+        "adapter" in optionsOrConfig ||
+        "remoteReviewEnabled" in optionsOrConfig)
     ) {
-      const opts = optionsOrClient as AutoGateEngineOptions;
+      const opts = optionsOrConfig as AutoGateEngineOptions;
       this.config = opts.config;
       this.remoteAdapter = opts.adapter ?? (opts as any).remoteAdapter ?? createDummyAdapter();
-      this.evaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.client, opts.config);
+      this.evaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.config);
       this.workspaceRoot = opts.workspaceRoot ?? (opts.config as any)?.workspaceRoot;
-      this.client = opts.client;
       remoteReviewOption = opts.remoteReviewEnabled;
     } else {
-      if (optionsOrClient && typeof optionsOrClient === "object" && "autoMode" in optionsOrClient) {
-        this.config = optionsOrClient as AutoGateConfig;
-        this.remoteAdapter = (config as unknown as NotifierAdapter) ?? createDummyAdapter();
-        this.evaluator =
-          (remoteAdapter as unknown as GateEvaluator) ??
-          new DefaultGateEvaluator(undefined, this.config);
-      } else {
-        this.client = optionsOrClient;
-        this.config = config!;
-        this.remoteAdapter = remoteAdapter ?? createDummyAdapter();
-        this.evaluator = evaluator ?? new DefaultGateEvaluator(this.client, this.config);
-      }
+      this.config = (optionsOrConfig as AutoGateConfig) || { autoMode: false };
+      this.remoteAdapter = remoteAdapter ?? createDummyAdapter();
+      this.evaluator = evaluator ?? new DefaultGateEvaluator(this.config);
     }
     this.workspaceRoot = this.workspaceRoot || (this.config as any)?.workspaceRoot;
     this.enabled = this.config.autoMode;
@@ -350,183 +334,16 @@ export class AutoGateCoreEngine {
     const sanitizedText = sanitizeUserPrompt(text);
     if (typeof promptText === "string") {
       this.userPrompts.set(promptOrSession, sanitizedText);
-      if (this.sessionParentCache.has(promptOrSession)) {
-        return;
-      }
-      if (this.client?.session?.get) {
-        this.client.session
-          .get({ path: { id: promptOrSession } })
-          .then((res: any) => {
-            const data = res?.data ?? res;
-            if (data?.parentID) {
-              this.sessionParentCache.set(promptOrSession, data.parentID);
-            } else {
-              this.userPrompt = sanitizedText;
-            }
-          })
-          .catch(() => {
-            if (!this.userPrompt) this.userPrompt = sanitizedText;
-          });
-      } else {
-        if (!this.userPrompt) {
-          this.userPrompt = sanitizedText;
-        }
+      if (!this.userPrompt) {
+        this.userPrompt = sanitizedText;
       }
     } else {
       this.userPrompt = sanitizedText;
     }
   }
 
-  private async fetchLatestUserMessage(sessionID: string): Promise<string> {
-    if (!this.client?.session?.messages) return "";
-    try {
-      const res = await this.client.session.messages({ path: { id: sessionID } });
-      const messages = res?.data ?? res;
-      if (Array.isArray(messages) && messages.length > 0) {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const m = messages[i];
-          const role = m?.info?.role ?? m?.role;
-          if (role === "user") {
-            const parts = m.parts || m.content || [];
-            let text = "";
-            if (typeof parts === "string") {
-              text = parts;
-            } else if (Array.isArray(parts)) {
-              text = parts
-                .filter(
-                  (p: any) =>
-                    p && (typeof p === "string" || p.type === "text" || typeof p.text === "string"),
-                )
-                .map((p: any) => (typeof p === "string" ? p : p.text || ""))
-                .join("\n");
-            } else if (m.content && typeof m.content === "string") {
-              text = m.content;
-            }
-            if (text) {
-              const isSlashCmd = /<auto-slash-command[^>]*>/i.test(text);
-              if (
-                text.includes("[SYSTEM DIRECTIVE:") ||
-                text.includes("[restore checkpointed") ||
-                (text.includes("<!-- OMO_INTERNAL") && !isSlashCmd) ||
-                text.includes("[auto-gate-eval]") ||
-                text.includes("## Environment Trust Boundaries:") ||
-                text.includes("## Context:") ||
-                text.includes("### Conversation Transcript")
-              ) {
-                continue;
-              }
-              const reqMatch = text.match(/<user-request>([\s\S]*?)<\/user-request>/i);
-              if (reqMatch && reqMatch[1]) {
-                text = reqMatch[1].trim();
-              } else {
-                const slashMatch = text.match(
-                  /<auto-slash-command[^>]*>([\s\S]*?)<\/auto-slash-command>/i,
-                );
-                if (slashMatch && slashMatch[1]) {
-                  const innerReq = slashMatch[1].match(/<user-request>([\s\S]*?)<\/user-request>/i);
-                  if (innerReq && innerReq[1]) {
-                    text = innerReq[1].trim();
-                  } else {
-                    text = slashMatch[1].trim();
-                  }
-                }
-              }
-              return text.trim();
-            }
-          }
-        }
-      }
-    } catch {}
-    return "";
-  }
-
-  public async resolveSessionPrompts(
-    sessionID?: string,
-  ): Promise<{ userPrompt: string; subagentPrompt?: string }> {
-    if (!sessionID) {
-      return { userPrompt: this.userPrompt || "" };
-    }
-
-    let parentID: string | undefined = undefined;
-    let sessionTitle: string | undefined = undefined;
-
-    try {
-      if (this.sessionParentCache.has(sessionID)) {
-        parentID = this.sessionParentCache.get(sessionID);
-      }
-      if (this.client?.session?.get) {
-        const sessionRes = await this.client.session.get({ path: { id: sessionID } });
-        const data = sessionRes?.data ?? sessionRes;
-        if (data?.parentID) {
-          parentID = data.parentID;
-          this.sessionParentCache.set(sessionID, data.parentID);
-        }
-        sessionTitle = data?.title;
-      }
-    } catch {}
-
-    if (!parentID) {
-      const userPrompt =
-        this.userPrompts.get(sessionID) ||
-        (await this.fetchLatestUserMessage(sessionID)) ||
-        this.userPrompt ||
-        "";
-      return { userPrompt };
-    }
-
-    const rawSubagentText =
-      this.userPrompts.get(sessionID) || (await this.fetchLatestUserMessage(sessionID)) || "";
-    let subagentPrompt = rawSubagentText;
-    const cleanTitle = sessionTitle?.trim();
-    if (cleanTitle) {
-      if (subagentPrompt) {
-        if (!subagentPrompt.includes(cleanTitle)) {
-          subagentPrompt = `[Subagent: ${cleanTitle}]\n${subagentPrompt}`;
-        }
-      } else {
-        subagentPrompt = `[Subagent: ${cleanTitle}]`;
-      }
-    }
-
-    let rootSessionID = sessionID;
-    const visited = new Set<string>([sessionID]);
-    let iterID: string | undefined = parentID;
-
-    while (iterID && !visited.has(iterID)) {
-      visited.add(iterID);
-      try {
-        let parentData: any = null;
-        if (this.client?.session?.get) {
-          const res = await this.client.session.get({ path: { id: iterID } });
-          parentData = res?.data ?? res;
-        }
-        rootSessionID = iterID;
-        let nextParentID: string | undefined = undefined;
-        if (parentData && typeof parentData === "object") {
-          nextParentID = parentData.parentID || undefined;
-        } else {
-          nextParentID = this.sessionParentCache.get(iterID);
-        }
-        if (nextParentID) {
-          this.sessionParentCache.set(iterID, nextParentID);
-          iterID = nextParentID;
-        } else {
-          break;
-        }
-      } catch {
-        break;
-      }
-    }
-
-    const rootUserPrompt =
-      this.userPrompts.get(rootSessionID) ||
-      (await this.fetchLatestUserMessage(rootSessionID)) ||
-      this.userPrompt ||
-      "";
-    return {
-      userPrompt: rootUserPrompt,
-      subagentPrompt: subagentPrompt || undefined,
-    };
+  public setSessionParent(sessionID: string, parentID: string): void {
+    this.sessionParentCache.set(sessionID, parentID);
   }
 
   public getUserPrompt(sessionID?: string): string {
@@ -665,11 +482,11 @@ export class AutoGateCoreEngine {
 
     // Resolve prompts if not already populated on action
     if (!action.userPrompt) {
-      const resolved = await this.resolveSessionPrompts(action.sessionID);
-      action.userPrompt = sanitizeUserPrompt(resolved.userPrompt);
-      action.subagentPrompt = resolved.subagentPrompt
-        ? sanitizeUserPrompt(resolved.subagentPrompt)
-        : undefined;
+      const fallbackPrompt =
+        (action.sessionID ? this.userPrompts.get(action.sessionID) : undefined) ||
+        this.userPrompt ||
+        "";
+      action.userPrompt = sanitizeUserPrompt(fallbackPrompt);
     }
 
     // 5. Calls `this.evaluator.evaluate(action)`.
