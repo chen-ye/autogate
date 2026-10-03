@@ -6,6 +6,7 @@ import {
   buildClassifierUserPrompt,
   parseVerdict,
 } from "@autogate/core";
+import type { PaseoClient, PaseoAgentInstance } from "./types.js";
 
 export const DEFAULT_EVAL_CWD = "/tmp/autogate-eval";
 export const DEFAULT_TIMEOUT_MS = 45000;
@@ -62,31 +63,35 @@ export interface PaseoNativeEvaluatorOptions {
 /**
  * Helper to safely extract candidate output text from various Paseo agent completion structures.
  */
-function extractCandidateText(finishResult: any): string {
+function extractCandidateText(finishResult: unknown): string {
   if (!finishResult) return "";
   if (typeof finishResult === "string") return finishResult;
 
-  if (typeof finishResult.lastMessage === "string") {
-    return finishResult.lastMessage;
+  const res = finishResult as Record<string, unknown>;
+  if (typeof res.lastMessage === "string") {
+    return res.lastMessage;
   }
-  if (finishResult.lastMessage && typeof finishResult.lastMessage === "object") {
-    if (typeof finishResult.lastMessage.text === "string") {
-      return finishResult.lastMessage.text;
+  if (res.lastMessage && typeof res.lastMessage === "object") {
+    const lm = res.lastMessage as Record<string, unknown>;
+    if (typeof lm.text === "string") {
+      return lm.text;
     }
-    if (typeof finishResult.lastMessage.content === "string") {
-      return finishResult.lastMessage.content;
+    if (typeof lm.content === "string") {
+      return lm.content;
     }
-    return JSON.stringify(finishResult.lastMessage);
+    return JSON.stringify(res.lastMessage);
   }
 
-  if (typeof finishResult.final?.lastMessage === "string") {
-    return finishResult.final.lastMessage;
+  const finalObj =
+    res.final && typeof res.final === "object" ? (res.final as Record<string, unknown>) : undefined;
+  if (typeof finalObj?.lastMessage === "string") {
+    return finalObj.lastMessage;
   }
-  if (typeof finishResult.text === "string") {
-    return finishResult.text;
+  if (typeof res.text === "string") {
+    return res.text;
   }
-  if (typeof finishResult.content === "string") {
-    return finishResult.content;
+  if (typeof res.content === "string") {
+    return res.content;
   }
 
   return "";
@@ -105,22 +110,30 @@ export class PaseoNativeEvaluator implements GateEvaluator {
   readonly name = "paseo-native-evaluator";
 
   constructor(
-    private paseoSource: any | (() => any),
+    private paseoSource:
+      | PaseoClient
+      | (() => PaseoClient | undefined | Promise<PaseoClient | undefined>)
+      | { getPaseo?(): PaseoClient | Promise<PaseoClient> },
     private options?: PaseoNativeEvaluatorOptions,
   ) {}
 
-  private async resolvePaseo(): Promise<any> {
+  private async resolvePaseo(): Promise<PaseoClient | undefined> {
     if (typeof this.paseoSource === "function") {
       return await this.paseoSource();
     }
-    if (this.paseoSource && typeof this.paseoSource.getPaseo === "function") {
-      return await this.paseoSource.getPaseo();
+    if (
+      this.paseoSource &&
+      typeof (this.paseoSource as { getPaseo?: unknown }).getPaseo === "function"
+    ) {
+      return await (
+        this.paseoSource as { getPaseo(): PaseoClient | Promise<PaseoClient> }
+      ).getPaseo();
     }
-    return this.paseoSource;
+    return this.paseoSource as PaseoClient | undefined;
   }
 
   private async resolveProvider(
-    paseo: any,
+    paseo?: PaseoClient,
     runtimeOptions?: Record<string, unknown>,
   ): Promise<string> {
     const explicitProvider =
@@ -145,9 +158,10 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         return metaProvider.trim();
       }
       if (typeof metaProvider === "object" && metaProvider !== null) {
-        const str = metaProvider.provider || metaProvider.id || metaProvider.name;
+        const mp = metaProvider as Record<string, unknown>;
+        const str = mp.provider || mp.id || mp.name;
         if (typeof str === "string" && str.trim()) {
-          const model = metaProvider.model;
+          const model = mp.model;
           if (model && typeof model === "string" && model.trim()) {
             return `${str.trim()}/${model.trim()}`;
           }
@@ -159,16 +173,19 @@ export class PaseoNativeEvaluator implements GateEvaluator {
     if (typeof paseo?.config?.get === "function") {
       try {
         const res = await paseo.config.get();
-        const cfg = res?.config ?? res;
-        const cfgMeta = cfg?.metadataGeneration?.providers?.[0];
+        const cfg = (res?.config ?? res) as Record<string, unknown> | undefined;
+        const mg = cfg?.metadataGeneration as Record<string, unknown> | undefined;
+        const providers = Array.isArray(mg?.providers) ? mg.providers : undefined;
+        const cfgMeta = providers?.[0];
         if (cfgMeta) {
           if (typeof cfgMeta === "string" && cfgMeta.trim()) {
             return cfgMeta.trim();
           }
           if (typeof cfgMeta === "object" && cfgMeta !== null) {
-            const str = cfgMeta.provider || cfgMeta.id || cfgMeta.name;
+            const cm = cfgMeta as Record<string, unknown>;
+            const str = cm.provider || cm.id || cm.name;
             if (typeof str === "string" && str.trim()) {
-              const model = cfgMeta.model;
+              const model = cm.model;
               if (model && typeof model === "string" && model.trim()) {
                 return `${str.trim()}/${model.trim()}`;
               }
@@ -218,7 +235,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         environment: action.environment,
       });
 
-      const createOptions: any = {
+      const createOptions: Record<string, unknown> = {
         cwd,
         parent: undefined,
         title: `[auto-gate-eval] ${action.toolName || "permission"}`,
@@ -234,16 +251,21 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         notifyOnFinish: false,
         labels: {
           "autogate.role": "evaluator",
-          "autogate.targetAgentId": (action as any).sessionId || action.sessionID || "",
+          "autogate.targetAgentId":
+            (action as unknown as { sessionId?: string }).sessionId || action.sessionID || "",
         },
       };
 
-      let evalAgent: any;
+      let evalAgent: PaseoAgentInstance | undefined;
       try {
+        if (!paseo?.agents?.create) {
+          throw new Error("Paseo agents.create API not available");
+        }
         evalAgent = await paseo.agents.create(createOptions);
         console.log("[AutoGate Native] created evalAgent:", evalAgent?.id);
-      } catch (createErr: any) {
-        console.error("[AutoGate Native] createAgent error:", createErr?.message || createErr);
+      } catch (createErr: unknown) {
+        const errObj = createErr as { message?: string } | undefined;
+        console.error("[AutoGate Native] createAgent error:", errObj?.message || createErr);
         if (fallback && typeof fallback.evaluate === "function") {
           return await fallback.evaluate(action, runtimeOptions);
         }
@@ -276,7 +298,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         DEFAULT_TIMEOUT_MS;
 
       const controller = new AbortController();
-      let timeoutId: any;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
       const onActionAbort = () => {
         controller.abort(action.signal?.reason || new Error("Action evaluation aborted"));
@@ -294,7 +316,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         controller.abort(new Error(`Classifier evaluation timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
-      let finishResult: any;
+      let finishResult: unknown;
       try {
         const timeoutOrAbortPromise = new Promise<never>((_, reject) => {
           if (controller.signal.aborted) {
@@ -316,7 +338,12 @@ export class PaseoNativeEvaluator implements GateEvaluator {
           );
         });
 
-        const finishPromise = Promise.resolve().then(() => evalAgent.waitForFinish({ timeoutMs }));
+        const finishPromise = Promise.resolve().then(() => {
+          if (evalAgent && typeof evalAgent.waitForFinish === "function") {
+            return evalAgent.waitForFinish({ timeoutMs });
+          }
+          return undefined;
+        });
         finishResult = await Promise.race([finishPromise, timeoutOrAbortPromise]);
       } finally {
         clearTimeout(timeoutId);
@@ -327,7 +354,8 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         }
       }
 
-      if (finishResult?.status === "timeout") {
+      const res = finishResult as Record<string, unknown> | undefined;
+      if (res?.status === "timeout") {
         return {
           verdict: "UNSURE",
           reason: `PaseoNativeEvaluator error: Classifier evaluation timed out after ${timeoutMs}ms`,
@@ -335,10 +363,10 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         };
       }
 
-      if (finishResult?.status === "error" && finishResult?.error && !finishResult?.lastMessage) {
+      if (res?.status === "error" && res?.error && !res?.lastMessage) {
         return {
           verdict: "UNSURE",
-          reason: `PaseoNativeEvaluator error: ${finishResult.error}`,
+          reason: `PaseoNativeEvaluator error: ${res.error}`,
           ...(evalAgentId ? { metadata: { evalAgentId } } : {}),
         };
       }

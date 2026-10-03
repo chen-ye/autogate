@@ -87,12 +87,12 @@ function truncateValue(val: unknown, maxBytes = TRUNCATION_LIMIT): unknown {
  * Convenience helper matching Paseo's official example helper pattern
  * for extracting shell commands from permission requests.
  */
-export function shellCommand(request: any): string | null {
+export function shellCommand(request: unknown): string | null {
   if (!request || typeof request !== "object") {
     return null;
   }
-
-  const input = request.input ?? request.args ?? request;
+  const reqObj = request as Record<string, unknown>;
+  const input = reqObj.input ?? reqObj.args ?? request;
   if (!input) {
     return null;
   }
@@ -101,97 +101,102 @@ export function shellCommand(request: any): string | null {
     const trimmed = input.trim();
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
-        const parsed = JSON.parse(trimmed);
+        const parsed: unknown = JSON.parse(trimmed);
         if (parsed && typeof parsed === "object") {
-          if (typeof parsed.command === "string") return parsed.command;
-          if (typeof parsed.cmd === "string") return parsed.cmd;
-          if (typeof parsed.code === "string") return parsed.code;
-          if (typeof parsed.script === "string") return parsed.script;
+          const p = parsed as Record<string, unknown>;
+          if (typeof p.command === "string") return p.command;
+          if (typeof p.cmd === "string") return p.cmd;
+          if (typeof p.code === "string") return p.code;
+          if (typeof p.script === "string") return p.script;
         }
       } catch {}
     }
     return input;
   }
 
-  if (typeof input === "object") {
-    if (typeof input.command === "string") {
-      return input.command;
+  if (typeof input === "object" && input !== null) {
+    const inObj = input as Record<string, unknown>;
+    if (typeof inObj.command === "string") {
+      return inObj.command;
     }
-    if (typeof input.cmd === "string") {
-      return input.cmd;
+    if (typeof inObj.cmd === "string") {
+      return inObj.cmd;
     }
-    if (typeof input.code === "string") {
-      return input.code;
+    if (typeof inObj.code === "string") {
+      return inObj.code;
     }
-    if (typeof input.script === "string") {
-      return input.script;
+    if (typeof inObj.script === "string") {
+      return inObj.script;
     }
   }
 
-  if (typeof request.command === "string") {
-    return request.command;
+  if (typeof reqObj.command === "string") {
+    return reqObj.command;
   }
-  if (typeof request.cmd === "string") {
-    return request.cmd;
+  if (typeof reqObj.cmd === "string") {
+    return reqObj.cmd;
   }
-  if (typeof request.code === "string") {
-    return request.code;
+  if (typeof reqObj.code === "string") {
+    return reqObj.code;
   }
-  if (typeof request.script === "string") {
-    return request.script;
+  if (typeof reqObj.script === "string") {
+    return reqObj.script;
   }
 
   return null;
 }
 
-function extractToolName(request: any): string {
+function extractToolName(request: unknown): string {
   if (!request || typeof request !== "object") {
     return "";
   }
-  if (typeof request.name === "string" && request.name) {
-    return request.name;
+  const r = request as Record<string, unknown>;
+  if (typeof r.name === "string" && r.name) {
+    return r.name;
   }
-  if (typeof request.toolName === "string" && request.toolName) {
-    return request.toolName;
+  if (typeof r.toolName === "string" && r.toolName) {
+    return r.toolName;
   }
-  if (typeof request.tool === "string" && request.tool) {
-    return request.tool;
+  if (typeof r.tool === "string" && r.tool) {
+    return r.tool;
   }
-  if (typeof request.kind === "string" && request.kind) {
-    return request.kind;
+  if (typeof r.kind === "string" && r.kind) {
+    return r.kind;
   }
-  if (typeof request.type === "string" && request.type) {
-    return request.type;
+  if (typeof r.type === "string" && r.type) {
+    return r.type;
   }
   return "";
 }
 
-function extractTargetPath(args: any, request: any): string | undefined {
+function extractTargetPath(args: unknown, request: unknown): string | undefined {
   let path: string | undefined = undefined;
 
   if (args && typeof args === "object") {
-    if (typeof args.path === "string") {
-      path = args.path;
-    } else if (typeof args.filepath === "string") {
-      path = args.filepath;
-    } else if (typeof args.filePath === "string") {
-      path = args.filePath;
-    } else if (typeof args.file === "string") {
-      path = args.file;
+    const a = args as Record<string, unknown>;
+    if (typeof a.path === "string") {
+      path = a.path;
+    } else if (typeof a.filepath === "string") {
+      path = a.filepath;
+    } else if (typeof a.filePath === "string") {
+      path = a.filePath;
+    } else if (typeof a.file === "string") {
+      path = a.file;
     }
   }
 
   if (!path && request && typeof request === "object") {
-    if (typeof request.path === "string") {
-      path = request.path;
-    } else if (typeof request.filepath === "string") {
-      path = request.filepath;
-    } else if (typeof request.filePath === "string") {
-      path = request.filePath;
-    } else if (typeof request.file === "string") {
-      path = request.file;
-    } else if (typeof request.targetPath === "string") {
-      path = request.targetPath;
+    const r = request as Record<string, unknown>;
+    if (typeof r.path === "string") {
+      path = r.path;
+    } else if (typeof r.filepath === "string") {
+      path = r.filepath;
+    } else if (typeof r.filePath === "string") {
+      path = r.filePath;
+    } else if (typeof r.file === "string") {
+      path = r.file;
+    } else if (typeof r.targetPath === "string") {
+      path = r.targetPath;
     }
   }
 
@@ -201,18 +206,19 @@ function extractTargetPath(args: any, request: any): string | undefined {
   return undefined;
 }
 
-function extractCommandString(args: any, request: any): string | undefined {
+function extractCommandString(args: unknown, request: unknown): string | undefined {
   let command: string | undefined = undefined;
 
   if (args && typeof args === "object") {
-    if (typeof args.command === "string") {
-      command = args.command;
-    } else if (typeof args.cmd === "string") {
-      command = args.cmd;
-    } else if (typeof args.code === "string") {
-      command = args.code;
-    } else if (typeof args.script === "string") {
-      command = args.script;
+    const a = args as Record<string, unknown>;
+    if (typeof a.command === "string") {
+      command = a.command;
+    } else if (typeof a.cmd === "string") {
+      command = a.cmd;
+    } else if (typeof a.code === "string") {
+      command = a.code;
+    } else if (typeof a.script === "string") {
+      command = a.script;
     }
   }
 
@@ -236,15 +242,25 @@ function extractCommandString(args: any, request: any): string | undefined {
 /**
  * Extracts a normalized GateAction payload from a Paseo agent permission request event.
  */
-export function extractActionFromRequest(event: { agent?: any; request?: any }): GateAction {
-  const request = event?.request;
-  const agent = event?.agent;
+export function extractActionFromRequest(event: {
+  agent?: unknown;
+  request?: unknown;
+  userPrompt?: string;
+}): GateAction {
+  const request =
+    event?.request && typeof event.request === "object"
+      ? (event.request as Record<string, unknown>)
+      : undefined;
+  const agent =
+    event?.agent && typeof event.agent === "object"
+      ? (event.agent as Record<string, unknown>)
+      : undefined;
 
   let rawArgs: unknown = undefined;
-  if (request && typeof request === "object") {
+  if (request) {
     rawArgs = request.input ?? request.args ?? request.params ?? request.detail ?? request;
-  } else if (request !== undefined) {
-    rawArgs = request;
+  } else if (event?.request !== undefined) {
+    rawArgs = event.request;
   }
 
   // Parses shell commands from tool arguments (args.command, args.cmd, args.code, args.script)
@@ -273,8 +289,8 @@ export function extractActionFromRequest(event: { agent?: any; request?: any }):
       ? agent.userPrompt
       : typeof request?.userPrompt === "string"
         ? request.userPrompt
-        : typeof (event as any)?.userPrompt === "string"
-          ? (event as any).userPrompt
+        : typeof event?.userPrompt === "string"
+          ? event.userPrompt
           : "";
 
   const action: GateAction = {
@@ -290,7 +306,7 @@ export function extractActionFromRequest(event: { agent?: any; request?: any }):
   };
 
   if (request?.metadata && typeof request.metadata === "object") {
-    action.metadata = request.metadata;
+    action.metadata = request.metadata as Record<string, unknown>;
   }
   if (request?.signal instanceof AbortSignal) {
     action.signal = request.signal;

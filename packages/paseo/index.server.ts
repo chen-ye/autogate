@@ -1,6 +1,7 @@
 import { PaseoHarnessAdapter } from "./server/adapter.js";
 import { extractActionFromRequest, shellCommand } from "./server/inspect.js";
 import { PaseoNativeEvaluator, type PaseoNativeEvaluatorOptions } from "./server/evaluator.js";
+import type { PaseoServer, PaseoPluginOptions } from "./server/types.js";
 
 /**
  * Daemon contribution entrypoint for Paseo.
@@ -14,8 +15,8 @@ import { PaseoNativeEvaluator, type PaseoNativeEvaluatorOptions } from "./server
  * without leaking timers or listeners on plugin reload or disable.
  */
 export default function contribute(
-  server: any,
-  options?: Record<string, unknown>,
+  server: PaseoServer,
+  options?: PaseoPluginOptions,
 ): () => Promise<void> {
   const adapter = new PaseoHarnessAdapter(server, options);
   return async () => {

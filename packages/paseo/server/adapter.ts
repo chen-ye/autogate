@@ -15,17 +15,25 @@ import {
 } from "@autogate/core";
 import { extractActionFromRequest } from "./inspect.js";
 import { PaseoNativeEvaluator } from "./evaluator.js";
+import type {
+  PaseoServer,
+  PaseoClient,
+  PaseoAgentInstance,
+  PaseoPluginOptions,
+  PaseoPermissionEvent,
+} from "./types.js";
+
 export interface PendingPermissionRequest {
   agentId: string;
   action: GateAction;
-  agent?: any;
+  agent?: PaseoAgentInstance;
 }
 
 export class PaseoHarnessAdapter implements HarnessAdapter {
   readonly name: string = "paseo";
 
-  private server: any;
-  private options?: Record<string, unknown>;
+  private server: PaseoServer;
+  private options?: PaseoPluginOptions;
   private config: AutoGateConfig;
   private engine: AutoGateCoreEngine;
   private ntfyAdapter: NotifierAdapter;
@@ -34,9 +42,9 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
   private unregisterResolved?: () => void;
   private stopRemoteListen?: () => void;
   private isDisposed: boolean = false;
-  private lastHookPaseo?: any;
+  private lastHookPaseo?: PaseoClient;
 
-  constructor(server: any, options?: Record<string, unknown>) {
+  constructor(server: PaseoServer, options?: PaseoPluginOptions) {
     this.server = server;
     this.options = options;
 
@@ -58,7 +66,6 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
       apiKey:
         (options?.apiKey as string) ||
         (options?.evaluatorApiKey as string) ||
-        (config as any).apiKey ||
         process.env.AUTOGATE_API_KEY ||
         process.env.GEMINI_API_KEY ||
         process.env.GOOGLE_API_KEY ||
@@ -67,7 +74,6 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
       baseUrl:
         (options?.baseUrl as string) ||
         (options?.evaluatorBaseUrl as string) ||
-        (config as any).evaluatorBaseUrl ||
         process.env.AUTOGATE_EVALUATOR_BASE_URL ||
         process.env.AUTOGATE_INFERENCE_URL ||
         process.env.GEMINI_BASE_URL,
@@ -113,14 +119,8 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     this.startListening().catch(() => {});
   }
 
-  private getPaseoClient(): any {
-    return (
-      this.lastHookPaseo ||
-      (this.options as any)?.paseo ||
-      (this.options as any)?.client ||
-      this.server?.paseo ||
-      this.server
-    );
+  private getPaseoClient(): PaseoClient | undefined {
+    return this.lastHookPaseo || this.options?.paseo || this.options?.client || this.server?.paseo;
   }
 
   public getEngine(): AutoGateCoreEngine {
@@ -163,8 +163,12 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
 
   public async handleRemoteReply(resp: ReviewResponse): Promise<void> {
     if (this.isDisposed) return;
-    const requestId =
-      resp.req_id ?? (resp as any).id ?? (resp as any).requestId ?? (resp as any).requestID;
+    const reqObj = resp as unknown as {
+      id?: string;
+      requestId?: string;
+      requestID?: string;
+    };
+    const requestId = resp.req_id || reqObj.id || reqObj.requestId || reqObj.requestID;
     if (!requestId) return;
 
     const pending = this.pendingRequests.get(requestId);
@@ -200,26 +204,43 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     await this.handleRemoteReply(resp);
   }
 
-  private onPermissionRequested = async (event: any, context?: any): Promise<void> => {
+  private onPermissionRequested = async (event: unknown, context?: unknown): Promise<void> => {
     if (this.isDisposed) return;
     try {
-      if (context?.paseo) {
-        this.lastHookPaseo = context.paseo;
+      const ctx = context as { paseo?: PaseoClient } | undefined;
+      if (ctx?.paseo) {
+        this.lastHookPaseo = ctx.paseo;
       }
 
-      const requestId = event?.request?.id ?? event?.requestId;
+      const ev = event as PaseoPermissionEvent | undefined;
+      const req = ev?.request;
+      const requestId =
+        (typeof req?.id === "string" ? req.id : undefined) ??
+        (typeof ev?.requestId === "string" ? ev.requestId : undefined);
       if (!requestId) {
         return;
       }
       // Recursion guard: never evaluate permissions for the evaluator agent itself, and actively deny tool execution
+      const agentObj = ev?.agent as
+        | (PaseoAgentInstance & {
+            labels?: Record<string, string>;
+            title?: string;
+            cwd?: string;
+          })
+        | undefined;
       if (
-        event?.agent?.labels?.["autogate.role"] === "evaluator" ||
-        event?.agent?.title?.startsWith("[auto-gate-eval]")
+        agentObj?.labels?.["autogate.role"] === "evaluator" ||
+        agentObj?.title?.startsWith("[auto-gate-eval]")
       ) {
-        const agent = this.getAgent(event?.agent?.id, event, context);
-        if (agent && typeof agent.respondToPermission === "function") {
+        const agent = this.getAgent(agentObj?.id || agentObj?.agentId, event, context);
+        if (
+          agent &&
+          typeof (agent as { respondToPermission?: unknown }).respondToPermission === "function"
+        ) {
           try {
-            await agent.respondToPermission({
+            await (
+              agent as { respondToPermission(data: unknown): Promise<unknown> }
+            ).respondToPermission({
               requestId,
               response: {
                 behavior: "deny",
@@ -235,20 +256,20 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         return;
       }
 
-      const action = extractActionFromRequest(event);
+      const action = extractActionFromRequest(event as { agent?: unknown; request?: unknown });
       console.log("[AutoGate] onPermissionRequested for:", action.toolName, action.commandString);
-      const agent = this.getAgent(event?.agent?.id, event, context);
+      const agent = this.getAgent(agentObj?.id || agentObj?.agentId, event, context);
       const decision = await this.engine.evaluate(action);
       console.log("[AutoGate] decision verdict:", decision.verdict, decision.reason);
 
       if (this.config.paseo?.timelineBadges !== false) {
         try {
           const targetAgent =
-            this.getAgent(event?.agent?.id || action.sessionID, event, context) ?? agent;
+            this.getAgent(agentObj?.id || action.sessionID, event, context) ?? agent;
           let timelineAgent = targetAgent;
           if (!timelineAgent?.timeline?.append) {
-            const client = context?.paseo ?? this.getPaseoClient();
-            const agentId = event?.agent?.id || action.sessionID;
+            const client = ctx?.paseo ?? this.getPaseoClient();
+            const agentId = agentObj?.id || action.sessionID;
             if (agentId && typeof client?.agents?.ref === "function") {
               const refAgent = client.agents.ref(agentId);
               if (refAgent?.timeline?.append) {
@@ -257,6 +278,8 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
             }
           }
           if (typeof timelineAgent?.timeline?.append === "function") {
+            const evalAgentId = (decision as unknown as { metadata?: { evalAgentId?: unknown } })
+              .metadata?.evalAgentId;
             await timelineAgent.timeline.append({
               type: "plugin",
               id: "autogate-eval-" + action.id,
@@ -268,7 +291,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
                 reason: decision.reason,
                 command: action.commandString,
                 toolName: action.toolName,
-                evalAgentId: (decision as any).metadata?.evalAgentId,
+                evalAgentId: typeof evalAgentId === "string" ? evalAgentId : undefined,
               },
             });
           }
@@ -277,9 +300,14 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         }
       }
       if (decision.verdict === "ALLOW") {
-        if (agent && typeof agent.respondToPermission === "function") {
+        if (
+          agent &&
+          typeof (agent as { respondToPermission?: unknown }).respondToPermission === "function"
+        ) {
           try {
-            await agent.respondToPermission({
+            await (
+              agent as { respondToPermission(data: unknown): Promise<unknown> }
+            ).respondToPermission({
               requestId,
               response: { behavior: "allow" },
             });
@@ -289,9 +317,14 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
           }
         }
       } else if (decision.verdict === "BLOCK") {
-        if (agent && typeof agent.respondToPermission === "function") {
+        if (
+          agent &&
+          typeof (agent as { respondToPermission?: unknown }).respondToPermission === "function"
+        ) {
           try {
-            await agent.respondToPermission({
+            await (
+              agent as { respondToPermission(data: unknown): Promise<unknown> }
+            ).respondToPermission({
               requestId,
               response: {
                 behavior: "deny",
@@ -306,7 +339,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
           }
         }
       } else if (decision.verdict === "UNSURE") {
-        const agentId = event?.agent?.id ?? "";
+        const agentId = agentObj?.id ?? "";
         this.pendingRequests.set(requestId, {
           agentId,
           action,
@@ -338,7 +371,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
 
         if (this.ntfyAdapter && typeof this.ntfyAdapter.publish === "function") {
           try {
-            this.ntfyAdapter.publish(payload).catch((err: any) => {
+            this.ntfyAdapter.publish(payload).catch((err: unknown) => {
               console.error("[AutoGate] Failed to publish async Ntfy notification:", err);
             });
           } catch (publishErr) {
@@ -352,13 +385,19 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     }
   };
 
-  private onPermissionResolved = async (event: any): Promise<void> => {
+  private onPermissionResolved = async (event: unknown): Promise<void> => {
     if (this.isDisposed) return;
     try {
-      const requestId = event?.requestId ?? event?.request?.id ?? event?.id;
+      const ev = event as
+        | (PaseoPermissionEvent & {
+            resolution?: { behavior?: string };
+            request?: { id?: string };
+          })
+        | undefined;
+      const requestId = ev?.requestId ?? ev?.request?.id ?? ev?.id;
       if (!requestId) return;
 
-      const reply = event?.resolution?.behavior === "allow" ? "once" : "reject";
+      const reply = ev?.resolution?.behavior === "allow" ? "once" : "reject";
       this.engine.handlePermissionReplied({
         id: requestId,
         requestID: requestId,
@@ -371,13 +410,22 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     }
   };
 
-  private getAgent(agentId?: string, event?: any, context?: any): any {
-    if (event?.agent && typeof event.agent.respondToPermission === "function") {
-      return event.agent;
+  private getAgent(
+    agentId?: string,
+    event?: unknown,
+    context?: unknown,
+  ): PaseoAgentInstance | undefined {
+    const ev = event as PaseoPermissionEvent | undefined;
+    const ctx = context as { paseo?: PaseoClient } | undefined;
+    if (
+      ev?.agent &&
+      typeof (ev.agent as { respondToPermission?: unknown }).respondToPermission === "function"
+    ) {
+      return ev.agent;
     }
-    if (context?.paseo?.agents?.ref && agentId) {
+    if (ctx?.paseo?.agents?.ref && agentId) {
       try {
-        const agent = context.paseo.agents.ref(agentId);
+        const agent = ctx.paseo.agents.ref(agentId);
         if (agent) return agent;
       } catch {}
     }
@@ -393,28 +441,16 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
         if (agent) return agent;
       } catch {}
     }
-    if (this.server?.agents?.ref && agentId) {
+    if (this.options?.paseo?.agents?.ref && agentId) {
       try {
-        const agent = this.server.agents.ref(agentId);
+        const agent = this.options.paseo.agents.ref(agentId);
         if (agent) return agent;
       } catch {}
     }
-    if (typeof this.server?.getAgent === "function" && agentId) {
-      try {
-        const agent = this.server.getAgent(agentId);
-        if (agent) return agent;
-      } catch {}
+    if (ev?.agent) {
+      return ev.agent;
     }
-    if ((this.options as any)?.paseo?.agents?.ref && agentId) {
-      try {
-        const agent = (this.options as any).paseo.agents.ref(agentId);
-        if (agent) return agent;
-      } catch {}
-    }
-    if (event?.agent) {
-      return event.agent;
-    }
-    return null;
+    return undefined;
   }
 
   public async dispose(): Promise<void> {
