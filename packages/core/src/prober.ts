@@ -569,18 +569,15 @@ export function detectDirectFileTarget(
       if (typeof obj.directory === "string" && obj.directory.trim()) {
         return obj.directory.trim();
       }
-      if (
-        typeof (obj.metadata as any)?.directory === "string" &&
-        (obj.metadata as any).directory.trim()
-      ) {
-        return (obj.metadata as any).directory.trim();
+      const meta =
+        typeof obj.metadata === "object" && obj.metadata !== null
+          ? (obj.metadata as Record<string, unknown>)
+          : undefined;
+      if (typeof meta?.directory === "string" && meta.directory.trim()) {
+        return meta.directory.trim();
       }
-      if (
-        !obj.path &&
-        typeof (obj.metadata as any)?.filepath === "string" &&
-        (obj.metadata as any).filepath.trim()
-      ) {
-        return (obj.metadata as any).filepath.trim();
+      if (!obj.path && typeof meta?.filepath === "string" && meta.filepath.trim()) {
+        return meta.filepath.trim();
       }
       if (
         Array.isArray(obj.patterns) &&

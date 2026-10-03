@@ -10,6 +10,32 @@ export interface DirectApiEvaluatorOptions {
   fetchImpl?: typeof fetch;
 }
 
+function extractCandidateTextFromResponse(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (!data || typeof data !== "object") return "";
+
+  const obj = data as Record<string, unknown>;
+  if (Array.isArray(obj.candidates) && obj.candidates.length > 0) {
+    const firstCandidate = obj.candidates[0];
+    if (firstCandidate && typeof firstCandidate === "object") {
+      const candObj = firstCandidate as Record<string, unknown>;
+      if (typeof candObj.output === "string") return candObj.output;
+      if (candObj.content && typeof candObj.content === "object") {
+        const contentObj = candObj.content as Record<string, unknown>;
+        if (Array.isArray(contentObj.parts) && contentObj.parts.length > 0) {
+          const firstPart = contentObj.parts[0];
+          if (firstPart && typeof firstPart === "object") {
+            const partObj = firstPart as Record<string, unknown>;
+            if (typeof partObj.text === "string") return partObj.text;
+          }
+        }
+      }
+    }
+  }
+
+  return JSON.stringify(data);
+}
+
 export class DirectApiEvaluator implements GateEvaluator {
   readonly name = "direct-api-evaluator";
 
@@ -95,11 +121,8 @@ export class DirectApiEvaluator implements GateEvaluator {
           throw new Error(`HTTP error ${response.status}: ${errorText}`);
         }
 
-        const data = (await response.json()) as any;
-        const candidateText =
-          data?.candidates?.[0]?.content?.parts?.[0]?.text ??
-          data?.candidates?.[0]?.output ??
-          (typeof data === "string" ? data : JSON.stringify(data));
+        const data: unknown = await response.json();
+        const candidateText = extractCandidateTextFromResponse(data);
 
         return parseVerdict(candidateText);
       } finally {

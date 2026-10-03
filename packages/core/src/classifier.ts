@@ -18,6 +18,24 @@ export function formatUserTranscript(userPrompt?: string): string {
   return userPrompt.trim();
 }
 
+export function isRiskLevel(val: unknown): val is RiskLevel {
+  return (
+    typeof val === "string" &&
+    (val === "LOW" || val === "MEDIUM" || val === "HIGH" || val === "CRITICAL")
+  );
+}
+
+export function isUserAuthorization(val: unknown): val is UserAuthorization {
+  return (
+    typeof val === "string" &&
+    (val === "NONE" || val === "LOW" || val === "MEDIUM" || val === "HIGH")
+  );
+}
+
+export function isClassifierVerdict(val: unknown): val is ClassifierVerdict {
+  return typeof val === "string" && (val === "ALLOW" || val === "BLOCK" || val === "UNSURE");
+}
+
 export function formatActionDetails(actionName: string, actionArgs: unknown): string {
   if (!actionArgs) return "";
 
@@ -60,17 +78,19 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
       commandStr = commandStr ?? patternsJoined;
       pathStr = pathStr ?? patternsJoined;
     }
-    if (
-      !pathStr &&
-      typeof (obj.metadata as any)?.filepath === "string" &&
-      (obj.metadata as any).filepath.trim()
-    ) {
-      pathStr = (obj.metadata as any).filepath.trim();
+
+    const meta =
+      typeof obj.metadata === "object" && obj.metadata !== null
+        ? (obj.metadata as Record<string, unknown>)
+        : undefined;
+
+    if (!pathStr && typeof meta?.filepath === "string" && meta.filepath.trim()) {
+      pathStr = meta.filepath.trim();
     }
     if (typeof obj.directory === "string") {
       directory = obj.directory;
-    } else if (typeof (obj.metadata as any)?.directory === "string") {
-      directory = (obj.metadata as any).directory;
+    } else if (typeof meta?.directory === "string") {
+      directory = meta.directory;
     }
   }
 
@@ -102,12 +122,15 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
   }
 
   if (actionName === "eval") {
+    const isObj = typeof actionArgs === "object" && actionArgs !== null;
+    const argObj = isObj ? (actionArgs as Record<string, unknown>) : undefined;
     const lang =
-      (actionArgs as any)?.language ||
-      (typeof actionArgs === "object" && actionArgs !== null && (actionArgs as any)?.lang) ||
-      "javascript";
-    const code =
-      commandStr || (typeof (actionArgs as any)?.code === "string" ? (actionArgs as any).code : "");
+      typeof argObj?.language === "string"
+        ? argObj.language
+        : typeof argObj?.lang === "string"
+          ? argObj.lang
+          : "javascript";
+    const code = commandStr || (typeof argObj?.code === "string" ? argObj.code : "");
     if (code) {
       return `- **Eval Code (${lang})**:\n\`\`\`${lang}\n${code.trim()}\n\`\`\``;
     }
@@ -488,15 +511,16 @@ export function parseVerdict(rawContent: string): ClassifierResult {
       const authRaw = String(parsed.user_authorization ?? "")
         .toUpperCase()
         .trim();
-      const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw)
-        ? (riskRaw as RiskLevel)
-        : undefined;
-      const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw)
-        ? (authRaw as UserAuthorization)
-        : undefined;
+      const risk_level = isRiskLevel(riskRaw) ? riskRaw : undefined;
+      const user_authorization = isUserAuthorization(authRaw) ? authRaw : undefined;
 
-      if (verdictRaw === "ALLOW" || verdictRaw === "BLOCK" || verdictRaw === "UNSURE") {
-        return { verdict: verdictRaw as ClassifierVerdict, risk_level, user_authorization, reason };
+      if (isClassifierVerdict(verdictRaw)) {
+        return {
+          verdict: verdictRaw,
+          risk_level,
+          user_authorization,
+          reason: reason || "",
+        };
       }
     } catch {
       // not valid JSON

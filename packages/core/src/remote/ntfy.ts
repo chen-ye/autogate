@@ -95,7 +95,12 @@ export class NtfyAdapter implements RemoteAdapter {
 
     const run = async () => {
       while (!controller.signal.aborted) {
-        let reader: any;
+        let reader:
+          | {
+              read(): Promise<{ value?: Uint8Array; done: boolean }>;
+              cancel?(reason?: unknown): Promise<unknown>;
+            }
+          | undefined;
         try {
           const response = await fetch(url, {
             headers,
@@ -168,7 +173,7 @@ export class NtfyAdapter implements RemoteAdapter {
           // On unexpected network error or disconnect, wait briefly and reconnect
           await new Promise((resolve) => setTimeout(resolve, 1000));
         } finally {
-          if (reader) {
+          if (reader && typeof reader.cancel === "function") {
             try {
               await reader.cancel();
             } catch {
