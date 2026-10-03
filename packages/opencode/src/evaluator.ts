@@ -1,6 +1,6 @@
-import fs from "fs";
-import path from "path";
-import os from "os";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import type {
   ClassifierResult,
   ClassifierVerdict,
@@ -16,6 +16,7 @@ import {
   buildClassifierUserPrompt,
   parseVerdict,
 } from "@autogate/core";
+import { resolveServerPassword } from "./index.js";
 
 export interface EvaluationAuditEntry {
   timestamp: number;
@@ -101,6 +102,18 @@ export async function archiveEvaluationSession(
           .catch(() => {});
       });
   }
+
+  try {
+    const oc2Archive = path.join(os.homedir(), ".config", "openchamber2", "sessions-archive.json");
+    if (fs.existsSync(oc2Archive)) {
+      const raw = fs.readFileSync(oc2Archive, "utf8");
+      const parsed = JSON.parse(raw);
+      if (!parsed[sessionID]) {
+        parsed[sessionID] = Date.now();
+        fs.writeFileSync(oc2Archive, JSON.stringify(parsed));
+      }
+    }
+  } catch {}
 }
 
 export const DEDICATED_AUTO_GATE_DIR = "/tmp/opencode-auto-gate/sandbox";
@@ -272,9 +285,11 @@ export async function extractVerdictFromSession(
 
   if (typeof client?.session?.messages === "function") {
     try {
-      const msgsRes = await client.session.messages({ path: { id: sessionID } }).catch(async () => {
-        return client.session.messages({ sessionID }).catch(() => null);
-      });
+      const msgsRes = await client.session
+        .messages({ path: { id: sessionID, sessionID }, query: { limit: 50 } })
+        .catch(async () => {
+          return client.session.messages({ sessionID, query: { limit: 50 } }).catch(() => null);
+        });
       const allMessages = Array.isArray(msgsRes)
         ? msgsRes
         : Array.isArray(msgsRes?.data)
@@ -325,25 +340,86 @@ export async function classifyRequest(input: ClassifyInput): Promise<ClassifierR
 
   const evalAgent = await resolveEvaluationAgent(input.client);
   const evalTitle = `[auto-gate-eval] ${actionName}`;
-  const sessionRes = await input.client.session
-    .create({
-      body: {
-        title: evalTitle,
-        directory: sandboxDir,
-        agent: evalAgent,
-      },
-      title: evalTitle,
-      directory: sandboxDir,
-      agent: evalAgent,
-    })
-    .catch(() =>
-      input.client.session.create({
+  let sessionRes: any;
+  if (typeof input.client?.session?.create === "function") {
+    try {
+      sessionRes = await input.client.session.create({
         title: evalTitle,
         agent: evalAgent,
-        body: { title: evalTitle, agent: evalAgent },
-      }),
-    );
-  const sessionID = sessionRes.data?.id ?? (sessionRes as any).id;
+        location: { directory: sandboxDir },
+        body: {
+          title: evalTitle,
+          agent: evalAgent,
+          location: { directory: sandboxDir },
+        },
+      });
+    } catch {}
+
+    if (!sessionRes?.data?.id && !(sessionRes as any)?.id) {
+      try {
+        sessionRes = await input.client.session.create({
+          body: {
+            title: evalTitle,
+            directory: sandboxDir,
+            agent: evalAgent,
+          },
+          title: evalTitle,
+          directory: sandboxDir,
+          agent: evalAgent,
+        });
+      } catch {}
+    }
+
+    if (!sessionRes?.data?.id && !(sessionRes as any)?.id) {
+      try {
+        sessionRes = await input.client.session.create({
+          title: evalTitle,
+          agent: evalAgent,
+          body: { title: evalTitle, agent: evalAgent },
+        });
+      } catch {}
+    }
+  }
+
+  // Fallback to direct HTTP API if client method was unavailable or did not return an ID
+  if (!sessionRes?.data?.id && !(sessionRes as any)?.id) {
+    const serverUrl =
+      (input.config as any)?.serverUrl ||
+      (input.client as any)?.serverUrl ||
+      process.env.OPENCODE_SERVER_URL ||
+      "http://localhost:4097";
+    const password = resolveServerPassword((input.config as any)?.configDir);
+    const authHeader = password
+      ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
+      : "";
+    const urls = [`${serverUrl}/api/session`, `${serverUrl}/session`];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(authHeader ? { Authorization: authHeader } : {}),
+          },
+          body: JSON.stringify({
+            title: evalTitle,
+            agent: evalAgent,
+            location: { directory: sandboxDir },
+          }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json?.data?.id || json?.id) {
+            sessionRes = json;
+            break;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const sessionID = sessionRes?.data?.id ?? (sessionRes as any)?.id;
   if (!sessionID) {
     throw new Error("Failed to create ephemeral classifier session: missing session ID");
   }
