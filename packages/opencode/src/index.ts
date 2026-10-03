@@ -72,6 +72,8 @@ export {
   recordEvaluationVerdict,
   evaluationSessions,
 };
+export * from "./types.js";
+export * from "./prompt-resolver.js";
 
 export function ensureAgentInstalled(): void {
   try {
@@ -118,24 +120,41 @@ export function resolveServerPassword(configDir?: string): string {
     return envPassword.trim();
   }
 
-  const activeConfigDir =
-    configDir ||
-    process.env.OPENCODE_CONFIG_DIR ||
-    (process.env.XDG_CONFIG_HOME
-      ? path.join(process.env.XDG_CONFIG_HOME, "opencode")
-      : undefined) ||
-    path.join(os.homedir(), ".config", "opencode");
-
-  try {
-    const serviceJsonPath = path.join(activeConfigDir, "service.json");
-    if (fs.existsSync(serviceJsonPath)) {
-      const raw = fs.readFileSync(serviceJsonPath, "utf8");
-      const parsed = JSON.parse(raw);
-      if (typeof parsed?.password === "string" && parsed.password.trim().length > 0) {
-        return parsed.password.trim();
+  const explicitDir = configDir || process.env.OPENCODE_CONFIG_DIR;
+  if (explicitDir && explicitDir.trim().length > 0) {
+    try {
+      const serviceJsonPath = path.join(explicitDir.trim(), "service.json");
+      if (fs.existsSync(serviceJsonPath)) {
+        const raw = fs.readFileSync(serviceJsonPath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.password === "string" && parsed.password.trim().length > 0) {
+          return parsed.password.trim();
+        }
       }
-    }
-  } catch {}
+    } catch {}
+    return "";
+  }
+
+  const candidateDirs: string[] = [];
+  if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
+    candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
+    candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
+  }
+  candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
+  candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
+
+  for (const dir of candidateDirs) {
+    try {
+      const serviceJsonPath = path.join(dir, "service.json");
+      if (fs.existsSync(serviceJsonPath)) {
+        const raw = fs.readFileSync(serviceJsonPath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.password === "string" && parsed.password.trim().length > 0) {
+          return parsed.password.trim();
+        }
+      }
+    } catch {}
+  }
 
   return "";
 }
@@ -306,7 +325,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
             "Content-Type": "application/json",
             Authorization: authHeader,
           },
-          body: JSON.stringify({ decision: reply, reply, message }),
+          body: JSON.stringify({ decision: reply, message }),
           signal: AbortSignal.timeout(5000),
         });
         if (res.ok && !res.headers.get("content-type")?.includes("text/html")) {
