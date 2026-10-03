@@ -15,6 +15,9 @@ import {
   buildClassifierSystemPrompt,
   buildClassifierUserPrompt,
   parseVerdict,
+  isRiskLevel,
+  isUserAuthorization,
+  isClassifierVerdict,
 } from "@autogate/core";
 import { resolveServerPassword } from "./index.js";
 import type { OpenCodeClassifyInput, OpenCodeSessionClient } from "./types.js";
@@ -78,7 +81,7 @@ export function clearEvaluationSession(sessionID: string): void {
 }
 
 export async function archiveEvaluationSession(
-  client: any,
+  client: OpenCodeSessionClient | undefined,
   sessionID: string,
   actionName: string,
   verdict: string,
@@ -89,20 +92,17 @@ export async function archiveEvaluationSession(
       archived: Date.now(),
     },
   };
-  if (typeof client?.session?.update === "function") {
-    await client.session
-      .update({
+  if (client?.session && typeof client.session.update === "function") {
+    const updateFn = client.session.update.bind(client.session);
+    await updateFn({
+      path: { id: sessionID, sessionID },
+      body: archivePayload,
+    }).catch(async () => {
+      await updateFn({
         path: { id: sessionID, sessionID },
         body: archivePayload,
-      })
-      .catch(async () => {
-        await client.session
-          .update({
-            sessionID,
-            ...archivePayload,
-          })
-          .catch(() => {});
-      });
+      }).catch(() => {});
+    });
   }
 
   try {
@@ -173,7 +173,7 @@ export const EVAL_SESSION_TOOLS = {
 
 let cachedEvalAgent: string | undefined;
 
-export async function resolveEvaluationAgent(client: any): Promise<string> {
+export async function resolveEvaluationAgent(client?: OpenCodeSessionClient): Promise<string> {
   if (cachedEvalAgent) return cachedEvalAgent;
   try {
     const res = await client?.app?.agents?.();
@@ -181,7 +181,9 @@ export async function resolveEvaluationAgent(client: any): Promise<string> {
     if (
       Array.isArray(agents) &&
       agents.length > 0 &&
-      !agents.some((a: any) => a.name === "auto-gate-eval")
+      !agents.some(
+        (a) => typeof a === "object" && a !== null && "name" in a && a.name === "auto-gate-eval",
+      )
     ) {
       cachedEvalAgent = "build";
       return "build";
@@ -191,53 +193,67 @@ export async function resolveEvaluationAgent(client: any): Promise<string> {
   return "auto-gate-eval";
 }
 
-export function extractVerdictFromParts(partsList: any[]): ClassifierResult | null {
+function extractToolInput(part: Record<string, unknown>): Record<string, unknown> | null {
+  const state =
+    part.state && typeof part.state === "object"
+      ? (part.state as Record<string, unknown>)
+      : undefined;
+  const fn =
+    part.function && typeof part.function === "object"
+      ? (part.function as Record<string, unknown>)
+      : undefined;
+
+  let toolInput: unknown =
+    state?.input ?? part.input ?? part.args ?? part.arguments ?? fn?.arguments ?? fn?.args;
+
+  if (typeof toolInput === "string") {
+    try {
+      toolInput = JSON.parse(toolInput);
+    } catch {}
+  }
+
+  if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
+    return toolInput as Record<string, unknown>;
+  }
+  return null;
+}
+
+export function extractVerdictFromParts(partsList: readonly unknown[]): ClassifierResult | null {
   if (!Array.isArray(partsList) || partsList.length === 0) return null;
 
   // 1. First scan for classify_result tool call
   for (const part of partsList) {
     if (part && typeof part === "object") {
+      const p = part as Record<string, unknown>;
+      const fn =
+        p.function && typeof p.function === "object"
+          ? (p.function as Record<string, unknown>)
+          : undefined;
       const isToolCall =
-        (part.type === "tool" && part.tool === "classify_result") ||
-        (part.type === "tool_use" && part.name === "classify_result") ||
-        part.tool === "classify_result" ||
-        part.name === "classify_result" ||
-        (part.function &&
-          (part.function.name === "classify_result" || part.function.tool === "classify_result"));
+        (p.type === "tool" && p.tool === "classify_result") ||
+        (p.type === "tool_use" && p.name === "classify_result") ||
+        p.tool === "classify_result" ||
+        p.name === "classify_result" ||
+        (fn && (fn.name === "classify_result" || fn.tool === "classify_result"));
 
       if (isToolCall) {
-        let toolInput =
-          (part as any).state?.input ??
-          (part as any).input ??
-          (part as any).args ??
-          (part as any).arguments ??
-          (part as any).function?.arguments ??
-          (part as any).function?.args;
-
-        if (typeof toolInput === "string") {
-          try {
-            toolInput = JSON.parse(toolInput);
-          } catch {}
-        }
-
-        if (toolInput && typeof toolInput === "object" && toolInput.verdict) {
-          const rawVerdict = String(toolInput.verdict).toUpperCase().trim();
-          if (rawVerdict === "ALLOW" || rawVerdict === "BLOCK" || rawVerdict === "UNSURE") {
-            const riskRaw = String(toolInput.risk_level ?? "")
-              .toUpperCase()
-              .trim();
-            const authRaw = String(toolInput.user_authorization ?? "")
-              .toUpperCase()
-              .trim();
-            const risk_level = ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(riskRaw)
-              ? (riskRaw as RiskLevel)
-              : undefined;
-            const user_authorization = ["NONE", "LOW", "MEDIUM", "HIGH"].includes(authRaw)
-              ? (authRaw as UserAuthorization)
-              : undefined;
-            const reason = typeof toolInput.reason === "string" ? toolInput.reason : undefined;
+        const toolInput = extractToolInput(p);
+        if (toolInput && typeof toolInput.verdict === "string") {
+          const rawVerdict = toolInput.verdict.toUpperCase().trim();
+          if (isClassifierVerdict(rawVerdict)) {
+            const riskRaw =
+              typeof toolInput.risk_level === "string"
+                ? toolInput.risk_level.toUpperCase().trim()
+                : "";
+            const authRaw =
+              typeof toolInput.user_authorization === "string"
+                ? toolInput.user_authorization.toUpperCase().trim()
+                : "";
+            const risk_level = isRiskLevel(riskRaw) ? riskRaw : undefined;
+            const user_authorization = isUserAuthorization(authRaw) ? authRaw : undefined;
+            const reason = typeof toolInput.reason === "string" ? toolInput.reason : "";
             return {
-              verdict: rawVerdict as ClassifierVerdict,
+              verdict: rawVerdict,
               risk_level,
               user_authorization,
               reason,
@@ -252,8 +268,10 @@ export function extractVerdictFromParts(partsList: any[]): ClassifierResult | nu
   let textContent = "";
   for (const part of partsList) {
     if (part && typeof part === "object") {
-      const text = (part as any).text ?? (part as any).content;
-      if (typeof text === "string") {
+      const p = part as Record<string, unknown>;
+      const text =
+        typeof p.text === "string" ? p.text : typeof p.content === "string" ? p.content : undefined;
+      if (text) {
         textContent += text + "\n";
       }
     } else if (typeof part === "string") {
@@ -276,9 +294,9 @@ export function extractVerdictFromParts(partsList: any[]): ClassifierResult | nu
 }
 
 export async function extractVerdictFromSession(
-  client: any,
+  client: OpenCodeSessionClient | undefined,
   sessionID: string,
-  currentParts: any[] = [],
+  currentParts: readonly unknown[] = [],
 ): Promise<ClassifierResult | null> {
   const currentResult = extractVerdictFromParts(currentParts);
   if (currentResult) {
@@ -292,29 +310,28 @@ export async function extractVerdictFromSession(
         .catch(async () => {
           return client.session.messages({ sessionID, query: { limit: 50 } }).catch(() => null);
         });
-      const allMessages = Array.isArray(msgsRes)
+      const resObj = (msgsRes && typeof msgsRes === "object" ? msgsRes : {}) as Record<
+        string,
+        unknown
+      >;
+      const allMessages: unknown[] = Array.isArray(msgsRes)
         ? msgsRes
-        : Array.isArray(msgsRes?.data)
-          ? msgsRes.data
-          : Array.isArray(msgsRes?.data?.data)
-            ? msgsRes.data.data
-            : Array.isArray(msgsRes?.data?.messages)
-              ? msgsRes.data.messages
-              : Array.isArray(msgsRes?.messages)
-                ? msgsRes.messages
-                : [];
+        : Array.isArray(resObj.data)
+          ? resObj.data
+          : [];
 
       if (allMessages.length > 0) {
         for (let i = allMessages.length - 1; i >= 0; i--) {
           const msg = allMessages[i];
+          const m = (msg && typeof msg === "object" ? msg : {}) as {
+            parts?: unknown[];
+            content?: unknown;
+            tool_calls?: unknown[];
+          };
           const parts = [
-            ...(Array.isArray(msg?.parts) ? msg.parts : msg?.parts ? [msg.parts] : []),
-            ...(Array.isArray(msg?.content) ? msg.content : msg?.content ? [msg.content] : []),
-            ...(Array.isArray(msg?.tool_calls)
-              ? msg.tool_calls
-              : msg?.tool_calls
-                ? [msg.tool_calls]
-                : []),
+            ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
+            ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
+            ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
           ];
           const result = extractVerdictFromParts(parts);
           if (result) {
@@ -332,6 +349,14 @@ export function resetCachedEvaluationAgent(): void {
 }
 
 export async function classifyRequest(input: OpenCodeClassifyInput): Promise<ClassifierResult> {
+  if (!input.client) {
+    return {
+      verdict: "UNSURE",
+      reason: "No client provided for classification",
+    };
+  }
+  const client = input.client;
+
   // Entry
   const sandboxDir = ensureSandboxDirectory();
   const userPrompt = input.userPrompt ?? "";
@@ -340,12 +365,12 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
   const actionArgs = input.actionArgs ?? input.request?.patterns ?? input.request?.metadata ?? {};
   const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
 
-  const evalAgent = await resolveEvaluationAgent(input.client);
+  const evalAgent = await resolveEvaluationAgent(client);
   const evalTitle = `[auto-gate-eval] ${actionName}`;
   let sessionRes: { data?: { id?: string }; id?: string } | undefined;
-  if (typeof input.client?.session?.create === "function") {
+  if (typeof client.session.create === "function") {
     try {
-      sessionRes = await input.client.session.create({
+      sessionRes = await client.session.create({
         title: evalTitle,
         agent: evalAgent,
         location: { directory: sandboxDir },
@@ -368,7 +393,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           title: evalTitle,
           directory: sandboxDir,
           agent: evalAgent,
-        } as any);
+        });
       } catch {}
     }
 
@@ -378,19 +403,22 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           title: evalTitle,
           agent: evalAgent,
           body: { title: evalTitle, agent: evalAgent },
-        } as any);
+        });
       } catch {}
     }
   }
 
   // Fallback to direct HTTP API if client method was unavailable or did not return an ID
   if (!sessionRes?.data?.id && !sessionRes?.id) {
+    const cfg = input.config;
     const serverUrl =
-      (input.config as any)?.serverUrl ||
-      (input.client as any)?.serverUrl ||
+      cfg?.serverUrl ||
+      input.client?.serverUrl ||
       process.env.OPENCODE_SERVER_URL ||
       "http://localhost:4097";
-    const password = resolveServerPassword((input.config as any)?.configDir);
+    const password = resolveServerPassword(
+      typeof cfg?.opencode?.serverUrl === "string" ? undefined : undefined,
+    );
     const authHeader = password
       ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
       : "";
@@ -411,9 +439,9 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           signal: AbortSignal.timeout(5000),
         });
         if (res.ok) {
-          const json = (await res.json()) as any;
-          if (json?.data?.id || json?.id) {
-            sessionRes = json;
+          const json: unknown = await res.json();
+          if (json && typeof json === "object" && ("data" in json || "id" in json)) {
+            sessionRes = json as { data?: { id?: string }; id?: string };
             break;
           }
         }
@@ -455,7 +483,11 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         });
         const responseText =
           genRes?.text ?? genRes?.content ?? (typeof genRes === "string" ? genRes : "");
-        capturedReasoning = genRes?.reasoning ?? genRes?.thinking ?? genRes?.metadata?.reasoning;
+        const metaObj =
+          genRes?.metadata && typeof genRes.metadata === "object"
+            ? (genRes.metadata as { reasoning?: string })
+            : undefined;
+        capturedReasoning = genRes?.reasoning ?? genRes?.thinking ?? metaObj?.reasoning;
         if (responseText) {
           const parsed = parseVerdict(responseText);
           if (
@@ -496,8 +528,8 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     }
 
     if (!verdictResult) {
-      const timeoutMs = (input.config as any)?.classifierTimeout ?? 45000;
-      let timeoutId: any;
+      const timeoutMs = input.config?.classifierTimeout ?? 45000;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const verdictPromise = new Promise<ClassifierResult>((resolve) => {
         registerEvaluationSession(sessionID, resolve);
       });
@@ -505,10 +537,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
         timeoutId = setTimeout(() => {
           try {
-            const maybePromise = input.client?.session?.abort?.({ path: { id: sessionID } });
-            if (maybePromise && typeof (maybePromise as any).catch === "function") {
-              (maybePromise as any).catch(() => {});
-            }
+            input.client?.session?.abort?.({ path: { id: sessionID } })?.catch(() => {});
           } catch {}
           resolve({
             verdict: "UNSURE",
@@ -517,7 +546,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         }, timeoutMs);
       });
 
-      const promptPromise = input.client.session.prompt({
+      const promptPromise = client.session.prompt({
         path: { id: sessionID },
         agent: evalAgent,
         body: {
@@ -538,22 +567,31 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       });
 
       promptPromise
-        .then(async (promptRes: any) => {
+        .then(async (promptRes) => {
           if (!promptRes) return;
-          if (
-            promptRes?.data?.reasoning ||
-            promptRes?.reasoning ||
-            promptRes?.data?.thinking ||
-            promptRes?.thinking
-          ) {
-            capturedReasoning =
-              promptRes?.data?.reasoning ??
-              promptRes?.reasoning ??
-              promptRes?.data?.thinking ??
-              promptRes?.thinking;
+          const resObj = promptRes as Record<string, unknown>;
+          const resData = (
+            resObj.data && typeof resObj.data === "object" ? resObj.data : {}
+          ) as Record<string, unknown>;
+          const reasoning =
+            typeof resData.reasoning === "string"
+              ? resData.reasoning
+              : typeof resObj.reasoning === "string"
+                ? resObj.reasoning
+                : typeof resData.thinking === "string"
+                  ? resData.thinking
+                  : typeof resObj.thinking === "string"
+                    ? resObj.thinking
+                    : undefined;
+          if (reasoning) {
+            capturedReasoning = reasoning;
           }
-          const parts = promptRes?.data?.parts ?? (promptRes as any)?.parts ?? [];
-          const verdict = await extractVerdictFromSession(input.client, sessionID, parts);
+          const parts = Array.isArray(resData.parts)
+            ? resData.parts
+            : Array.isArray(resObj.parts)
+              ? resObj.parts
+              : [];
+          const verdict = await extractVerdictFromSession(client, sessionID, parts);
           if (verdict) {
             recordEvaluationVerdict(sessionID, verdict);
             return;
@@ -563,7 +601,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           const maxRetries = 2;
           while (attempts < maxRetries) {
             attempts++;
-            const repromptRes = await input.client.session
+            const repromptRes = await client.session
               .prompt({
                 path: { id: sessionID },
                 agent: evalAgent,
@@ -585,21 +623,30 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
               })
               .catch(() => null);
             if (repromptRes) {
-              if (
-                repromptRes?.data?.reasoning ||
-                repromptRes?.reasoning ||
-                repromptRes?.data?.thinking ||
-                repromptRes?.thinking
-              ) {
-                capturedReasoning =
-                  repromptRes?.data?.reasoning ??
-                  repromptRes?.reasoning ??
-                  repromptRes?.data?.thinking ??
-                  repromptRes?.thinking;
+              const repObj = repromptRes as Record<string, unknown>;
+              const repData = (
+                repObj.data && typeof repObj.data === "object" ? repObj.data : {}
+              ) as Record<string, unknown>;
+              const repReasoning =
+                typeof repData.reasoning === "string"
+                  ? repData.reasoning
+                  : typeof repObj.reasoning === "string"
+                    ? repObj.reasoning
+                    : typeof repData.thinking === "string"
+                      ? repData.thinking
+                      : typeof repObj.thinking === "string"
+                        ? repObj.thinking
+                        : undefined;
+              if (repReasoning) {
+                capturedReasoning = repReasoning;
               }
-              const repromptParts = repromptRes.data?.parts ?? (repromptRes as any)?.parts ?? [];
+              const repromptParts = Array.isArray(repData.parts)
+                ? repData.parts
+                : Array.isArray(repObj.parts)
+                  ? repObj.parts
+                  : [];
               const repromptVerdict = await extractVerdictFromSession(
-                input.client,
+                client,
                 sessionID,
                 repromptParts,
               );
@@ -626,8 +673,10 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
   } finally {
     clearEvaluationSession(sessionID);
     const durationMs = Date.now() - startTime;
-    const finalVerdict = verdictResult?.verdict ?? "UNKNOWN";
-    await archiveEvaluationSession(input.client, sessionID, actionName, finalVerdict);
+    const rawVerdict = verdictResult?.verdict;
+    const finalVerdict: ClassifierVerdict =
+      rawVerdict && isClassifierVerdict(rawVerdict) ? rawVerdict : "UNSURE";
+    await archiveEvaluationSession(client, sessionID, actionName, finalVerdict);
     logEvaluationDecision(
       {
         timestamp: Date.now(),
@@ -636,12 +685,12 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         commandString: typeof actionArgs === "string" ? actionArgs : JSON.stringify(actionArgs),
         userPrompt,
         reasoning: capturedReasoning ?? verdictResult?.reason,
-        verdict: finalVerdict as ClassifierVerdict,
+        verdict: finalVerdict,
         risk_level: verdictResult?.risk_level,
         user_authorization: verdictResult?.user_authorization,
         durationMs,
       },
-      (input.config as any)?.evalLogFile,
+      input.config?.evalLogFile,
     );
   }
 }
@@ -649,7 +698,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
 export class OpenCodeSessionEvaluator implements GateEvaluator {
   readonly name = "opencode-session-evaluator";
   constructor(
-    private client: OpenCodeSessionClient | any,
+    private client: OpenCodeSessionClient,
     private config?: AutoGateConfig,
   ) {}
   async evaluate(action: GateAction): Promise<ClassifierResult> {

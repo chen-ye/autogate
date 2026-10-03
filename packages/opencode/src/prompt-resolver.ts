@@ -1,9 +1,16 @@
 import type { OpenCodeSessionClient } from "./types.js";
 
+interface MessageEntry {
+  role?: string;
+  info?: { role?: string };
+  parts?: unknown[];
+  content?: string;
+}
+
 export class OpenCodePromptResolver {
   private sessionParentCache = new Map<string, string>();
 
-  constructor(private client: OpenCodeSessionClient | any) {}
+  constructor(private client: OpenCodeSessionClient) {}
 
   public setSessionParent(sessionID: string, parentID: string): void {
     this.sessionParentCache.set(sessionID, parentID);
@@ -20,26 +27,30 @@ export class OpenCodePromptResolver {
         path: { id: sessionID, sessionID },
         query: { limit: 50 },
       });
-      const messages = res?.data ?? res;
+      const messages = Array.isArray(res) ? res : res?.data;
       if (Array.isArray(messages) && messages.length > 0) {
         for (let i = messages.length - 1; i >= 0; i--) {
-          const m = messages[i];
-          const role = m?.info?.role ?? m?.role;
+          const item = messages[i];
+          if (!item || typeof item !== "object") continue;
+          const m = item as MessageEntry;
+          const role = m.info?.role ?? m.role;
           if (role === "user") {
-            const parts = m.parts || m.content || [];
+            const parts = m.parts || (m.content ? [m.content] : []);
             let text = "";
-            if (typeof parts === "string") {
-              text = parts;
+            if (typeof m.content === "string" && !m.parts) {
+              text = m.content;
             } else if (Array.isArray(parts)) {
               text = parts
                 .filter(
-                  (p: any) =>
-                    p && (typeof p === "string" || p.type === "text" || typeof p.text === "string"),
+                  (p: unknown): p is string | { text: string } =>
+                    typeof p === "string" ||
+                    (typeof p === "object" &&
+                      p !== null &&
+                      "text" in p &&
+                      typeof (p as { text: unknown }).text === "string"),
                 )
-                .map((p: any) => (typeof p === "string" ? p : p.text || ""))
+                .map((p) => (typeof p === "string" ? p : p.text))
                 .join("\n");
-            } else if (m.content && typeof m.content === "string") {
-              text = m.content;
             }
             if (text) {
               const reqMatch = text.match(/<user-request>([\s\S]*?)<\/user-request>/i);
@@ -139,7 +150,7 @@ export class OpenCodePromptResolver {
     while (iterID && !visited.has(iterID)) {
       visited.add(iterID);
       try {
-        let parentData: any = null;
+        let parentData: Record<string, unknown> | null = null;
         if (this.client?.session?.get) {
           const res = await this.client.session.get({
             path: { id: iterID, sessionID: iterID },
@@ -148,8 +159,12 @@ export class OpenCodePromptResolver {
         }
         rootSessionID = iterID;
         let nextParentID: string | undefined = undefined;
-        if (parentData && typeof parentData === "object") {
-          nextParentID = parentData.parentID || undefined;
+        if (
+          parentData &&
+          typeof parentData === "object" &&
+          typeof parentData.parentID === "string"
+        ) {
+          nextParentID = parentData.parentID;
         } else {
           nextParentID = this.sessionParentCache.get(iterID);
         }
