@@ -95,6 +95,34 @@ export function ensureAgentInstalled(): void {
   }
 }
 
+export function resolveServerPassword(configDir?: string): string {
+  const envPassword = process.env.OPENCODE_SERVER_PASSWORD || process.env.OPENCODE_PASSWORD;
+  if (envPassword && envPassword.trim().length > 0) {
+    return envPassword.trim();
+  }
+
+  const activeConfigDir =
+    configDir ||
+    process.env.OPENCODE_CONFIG_DIR ||
+    (process.env.XDG_CONFIG_HOME
+      ? path.join(process.env.XDG_CONFIG_HOME, "opencode")
+      : undefined) ||
+    path.join(os.homedir(), ".config", "opencode");
+
+  try {
+    const serviceJsonPath = path.join(activeConfigDir, "service.json");
+    if (fs.existsSync(serviceJsonPath)) {
+      const raw = fs.readFileSync(serviceJsonPath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.password === "string" && parsed.password.trim().length > 0) {
+        return parsed.password.trim();
+      }
+    }
+  } catch {}
+
+  return "";
+}
+
 export class OpenCodeHarnessAdapter implements HarnessAdapter {
   readonly name = "opencode-harness";
   private engine: AutoGateCoreEngine;
@@ -211,7 +239,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     }
 
     const serverUrl = this.serverUrl || "http://localhost:4096";
-    const password = process.env.OPENCODE_SERVER_PASSWORD || "";
+    const password = resolveServerPassword((this.ctx as any)?.configDir);
     const authHeader = "Basic " + Buffer.from(`opencode:${password}`).toString("base64");
     const workspaceRoot = this.ctx.directory || this.ctx.worktree;
     const targetDir = directory || workspaceRoot;
