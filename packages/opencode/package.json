@@ -8,7 +8,7 @@
     "./evaluator": "./src/evaluator.ts"
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outfile ./dist/index.js --target bun --external '@opencode-ai/*' --external '@opencode/*'"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@autogate/core": "workspace:*",
