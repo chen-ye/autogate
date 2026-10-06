@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import * as crypto from "crypto";
 import type {
   ClassifierResult,
   ClassifierVerdict,
@@ -86,6 +87,39 @@ export function clearEvaluationSession(sessionID: string): void {
   evaluationResolvers.delete(sessionID);
 }
 
+async function notifyOpenChamberArchive(sessionID: string): Promise<void> {
+  const ports = [14097, 14096];
+  for (const port of ports) {
+    const dirName = port === 14097 ? "openchamber2" : "openchamber";
+    const secretFile = path.join(os.homedir(), ".config", dirName, "jwt-secret");
+    if (!fs.existsSync(secretFile)) continue;
+
+    try {
+      const secret = fs.readFileSync(secretFile, "utf8").trim();
+      if (!secret) continue;
+
+      const header = { alg: "HS256", typ: "JWT" };
+      const nowSec = Math.floor(Date.now() / 1000);
+      const payload = { type: "ui-session", iat: nowSec, exp: nowSec + 3600 };
+      const encHeader = Buffer.from(JSON.stringify(header)).toString("base64url");
+      const encPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+      const data = `${encHeader}.${encPayload}`;
+      const sig = crypto.createHmac("sha256", secret).update(data).digest("base64url");
+      const token = `${data}.${sig}`;
+
+      await fetch(`http://localhost:${port}/api/openchamber/sessions/archive`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `oc_ui_session_${port}=${token}`,
+        },
+        body: JSON.stringify({ ids: [sessionID], archivedAt: Date.now() }),
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => null);
+    } catch {}
+  }
+}
+
 export async function archiveEvaluationSession(
   client: OpenCodeSessionClient | undefined,
   sessionID: string,
@@ -111,14 +145,18 @@ export async function archiveEvaluationSession(
     });
   }
 
+  await notifyOpenChamberArchive(sessionID);
+
   try {
-    const oc2Archive = path.join(os.homedir(), ".config", "openchamber2", "sessions-archive.json");
-    if (fs.existsSync(oc2Archive)) {
-      const raw = fs.readFileSync(oc2Archive, "utf8");
-      const parsed = JSON.parse(raw);
-      if (!parsed[sessionID]) {
-        parsed[sessionID] = Date.now();
-        fs.writeFileSync(oc2Archive, JSON.stringify(parsed));
+    for (const dirName of ["openchamber2", "openchamber"]) {
+      const ocArchive = path.join(os.homedir(), ".config", dirName, "sessions-archive.json");
+      if (fs.existsSync(ocArchive)) {
+        const raw = fs.readFileSync(ocArchive, "utf8");
+        const parsed = JSON.parse(raw);
+        if (!parsed[sessionID]) {
+          parsed[sessionID] = Date.now();
+          fs.writeFileSync(ocArchive, JSON.stringify(parsed));
+        }
       }
     }
   } catch {}
