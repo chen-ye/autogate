@@ -28,7 +28,7 @@ export function createMockOpenCodeClient(options?: MockOpenCodeOptions) {
       },
       prompt: async (args: any) => {
         prompts.push(args);
-        const promptText = args?.body?.parts?.[0]?.text ?? "";
+        const promptText = args?.body?.parts?.[0]?.text ?? args?.text ?? "";
 
         let verdict = options?.classifierVerdict ?? "ALLOW";
         let reason = options?.classifierReason ?? "Mock classifier approved";
@@ -39,12 +39,33 @@ export function createMockOpenCodeClient(options?: MockOpenCodeOptions) {
           reason = res.reason ?? reason;
         }
 
+        const sessionID = args?.sessionID ?? args?.path?.id;
+        if (sessionID) {
+          try {
+            const { recordEvaluationVerdict } = await import(
+              "../../../packages/opencode/src/evaluator.js"
+            );
+            recordEvaluationVerdict(sessionID, {
+              verdict,
+              reason,
+              risk_level: "LOW",
+              user_authorization: "HIGH",
+            });
+          } catch {}
+        }
+
         return {
           data: {
             parts: [
               {
-                type: "text",
-                text: JSON.stringify({ verdict, reason }),
+                type: "tool",
+                tool: "classify_result",
+                input: {
+                  verdict,
+                  reason,
+                  risk_level: "LOW",
+                  user_authorization: "HIGH",
+                },
               },
             ],
           },

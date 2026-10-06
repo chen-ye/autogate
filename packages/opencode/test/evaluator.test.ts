@@ -6,6 +6,7 @@ import {
   classifyRequest,
   archiveEvaluationSession,
   extractVerdictFromSession,
+  recordEvaluationVerdict,
 } from "../src/evaluator.js";
 
 describe("@autogate/opencode evaluator OpenCode v2 support", () => {
@@ -172,16 +173,15 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
             return { data: { id: "ses_v2_created" } };
           },
           update: async () => ({}),
-        },
-        generate: {
-          text: async () => ({
-            text: JSON.stringify({
+          prompt: async (opts: any) => {
+            recordEvaluationVerdict(opts.sessionID, {
               verdict: "ALLOW",
               risk_level: "LOW",
               user_authorization: "LOW",
               reason: "OK",
-            }),
-          }),
+            });
+            return { data: { parts: [] } };
+          },
         },
       };
 
@@ -210,16 +210,15 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
             return { data: { id: "ses_v1_fallback" } };
           },
           update: async () => ({}),
-        },
-        generate: {
-          text: async () => ({
-            text: JSON.stringify({
+          prompt: async (opts: any) => {
+            recordEvaluationVerdict(opts.sessionID, {
               verdict: "BLOCK",
               risk_level: "HIGH",
               user_authorization: "NONE",
               reason: "Unsafe",
-            }),
-          }),
+            });
+            return { data: { parts: [] } };
+          },
         },
       };
 
@@ -257,14 +256,13 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
             throw new Error("Client session create completely broken");
           },
           update: async () => ({}),
-        },
-        generate: {
-          text: async () => ({
-            text: JSON.stringify({
+          prompt: async (opts: any) => {
+            recordEvaluationVerdict(opts.sessionID, {
               verdict: "ALLOW",
               reason: "Direct HTTP OK",
-            }),
-          }),
+            });
+            return { data: { parts: [] } };
+          },
         },
       };
 

@@ -160,11 +160,35 @@ export class MockInferenceProvider {
           body !== null &&
           (body as Record<string, unknown>).stream === true);
       const parts: Array<Record<string, unknown>> = [];
+      const requestedTools = (body as any)?.tools ?? (body as any)?.functionDeclarations;
+      const hasClassifyTool =
+        Array.isArray(requestedTools) &&
+        requestedTools.some(
+          (t: any) =>
+            t?.name === "classify_result" ||
+            t?.function?.name === "classify_result",
+        );
+      let asToolCall: { name: string; args: any } | null = null;
       if (mockRes.toolCall) {
+        asToolCall = { name: mockRes.toolCall.name, args: mockRes.toolCall.input };
+      } else if (
+        hasClassifyTool &&
+        typeof mockRes.text === "string" &&
+        mockRes.text.includes('"verdict"')
+      ) {
+        try {
+          const parsed = JSON.parse(mockRes.text);
+          if (parsed && typeof parsed.verdict === "string") {
+            asToolCall = { name: "classify_result", args: parsed };
+          }
+        } catch {}
+      }
+
+      if (asToolCall) {
         parts.push({
           functionCall: {
-            name: mockRes.toolCall.name,
-            args: mockRes.toolCall.input,
+            name: asToolCall.name,
+            args: asToolCall.args,
           },
         });
       } else {
@@ -221,9 +245,33 @@ export class MockInferenceProvider {
         (body as Record<string, unknown>).stream === true) ||
       path.includes("stream");
     const message: Record<string, unknown> = { role: "assistant" };
+    const requestedToolsOpenAI = (body as any)?.tools;
+    const hasClassifyToolOpenAI =
+      Array.isArray(requestedToolsOpenAI) &&
+      requestedToolsOpenAI.some(
+        (t: any) =>
+          t?.name === "classify_result" ||
+          t?.function?.name === "classify_result",
+      );
+    let asToolCall: { name: string; args: any } | null = null;
+    if (mockRes.toolCall) {
+      asToolCall = { name: mockRes.toolCall.name, args: mockRes.toolCall.input };
+    } else if (
+      hasClassifyToolOpenAI &&
+      typeof mockRes.text === "string" &&
+      mockRes.text.includes('"verdict"')
+    ) {
+      try {
+        const parsed = JSON.parse(mockRes.text);
+        if (parsed && typeof parsed.verdict === "string") {
+          asToolCall = { name: "classify_result", args: parsed };
+        }
+      } catch {}
+    }
+
     if (mockRes.content) {
       message.content = mockRes.content;
-    } else if (mockRes.toolCall) {
+    } else if (asToolCall) {
       message.content = mockRes.thinking
         ? [{ type: "thinking", thinking: mockRes.thinking }]
         : null;
@@ -235,17 +283,17 @@ export class MockInferenceProvider {
           ]
         : (mockRes.text ?? "");
     }
-    if (mockRes.toolCall) {
+    if (asToolCall) {
       message.tool_calls = [
         {
           id: "call_1",
           type: "function",
           function: {
-            name: mockRes.toolCall.name,
+            name: asToolCall.name,
             arguments:
-              typeof mockRes.toolCall.input === "string"
-                ? mockRes.toolCall.input
-                : JSON.stringify(mockRes.toolCall.input),
+              typeof asToolCall.args === "string"
+                ? asToolCall.args
+                : JSON.stringify(asToolCall.args),
           },
         },
       ];
@@ -265,7 +313,7 @@ export class MockInferenceProvider {
         choices: [
           {
             index: 0,
-            delta: mockRes.toolCall
+            delta: asToolCall
               ? {
                   role: "assistant",
                   tool_calls: [
@@ -274,8 +322,11 @@ export class MockInferenceProvider {
                       id: "call_1",
                       type: "function",
                       function: {
-                        name: mockRes.toolCall.name,
-                        arguments: JSON.stringify(mockRes.toolCall.input),
+                        name: asToolCall.name,
+                        arguments:
+                          typeof asToolCall.args === "string"
+                            ? asToolCall.args
+                            : JSON.stringify(asToolCall.args),
                       },
                     },
                   ],
@@ -294,7 +345,7 @@ export class MockInferenceProvider {
           {
             index: 0,
             delta: {},
-            finish_reason: mockRes.toolCall ? "tool_calls" : "stop",
+            finish_reason: asToolCall ? "tool_calls" : "stop",
           },
         ],
       };

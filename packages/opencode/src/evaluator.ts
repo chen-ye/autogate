@@ -12,7 +12,6 @@ import type {
   AutoGateConfig,
 } from "@autogate/core";
 import {
-  buildClassifierSystemPrompt,
   buildClassifierUserPrompt,
   parseVerdict,
   isRiskLevel,
@@ -50,8 +49,15 @@ export function logEvaluationDecision(entry: EvaluationAuditEntry, logFilePath?:
   }
 }
 
-export const evaluationSessions = new Set<string>();
-export const evaluationResolvers = new Map<string, (res: ClassifierResult) => void>();
+const g = globalThis as unknown as {
+  __autogate_evaluation_sessions__?: Set<string>;
+  __autogate_evaluation_resolvers__?: Map<string, (res: ClassifierResult) => void>;
+};
+export const evaluationSessions: Set<string> =
+  g.__autogate_evaluation_sessions__ ?? (g.__autogate_evaluation_sessions__ = new Set<string>());
+export const evaluationResolvers: Map<string, (res: ClassifierResult) => void> =
+  g.__autogate_evaluation_resolvers__ ??
+  (g.__autogate_evaluation_resolvers__ = new Map<string, (res: ClassifierResult) => void>());
 
 export function isEvaluationSession(sessionID: string): boolean {
   return evaluationSessions.has(sessionID);
@@ -489,8 +495,6 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     throw new Error("Failed to create ephemeral classifier session: missing session ID");
   }
 
-  const modelRef = parseModelRef(input.model);
-  const systemPrompt = buildClassifierSystemPrompt();
   const userPromptText = buildClassifierUserPrompt({
     userPrompt,
     subagentPrompt,
@@ -505,201 +509,142 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
   let verdictResult: ClassifierResult | undefined;
 
   try {
-    const generateTextFn = input.client?.generate?.text ?? input.client?.ctx?.generate?.text;
-    if (typeof generateTextFn === "function") {
-      try {
-        const fullPrompt = `${systemPrompt}\n\n${userPromptText}`;
-        const genRes = await generateTextFn({
-          prompt: fullPrompt,
-          model: {
-            providerID: modelRef.providerID,
-            id: modelRef.modelID,
-          },
+    const timeoutMs = input.config?.classifierTimeout ?? 45000;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const verdictPromise = new Promise<ClassifierResult>((resolve) => {
+      registerEvaluationSession(sessionID, resolve);
+    });
+
+    const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
+      timeoutId = setTimeout(() => {
+        try {
+          input.client?.session?.abort?.({ path: { id: sessionID } })?.catch(() => {});
+        } catch {}
+        resolve({
+          verdict: "UNSURE",
+          reason: `Classifier evaluation timed out after ${Math.round(timeoutMs / 1000)} seconds`,
         });
-        const responseText =
-          genRes?.text ?? genRes?.content ?? (typeof genRes === "string" ? genRes : "");
-        const metaObj =
-          genRes?.metadata && typeof genRes.metadata === "object"
-            ? (genRes.metadata as { reasoning?: string })
-            : undefined;
-        capturedReasoning = genRes?.reasoning ?? genRes?.thinking ?? metaObj?.reasoning;
-        if (responseText) {
-          const parsed = parseVerdict(responseText);
-          if (
-            parsed &&
-            parsed.reason !== "Classifier response did not contain a valid structured verdict" &&
-            parsed.reason !== "Empty or invalid classifier output"
-          ) {
-            verdictResult = parsed;
-          } else {
-            const retryRes = await generateTextFn({
-              prompt: `${fullPrompt}\n\nYour previous response was malformed JSON or invalid verdict. You must output a single JSON object with keys: risk_level, user_authorization, verdict, reason.`,
-              model: {
-                providerID: modelRef.providerID,
-                id: modelRef.modelID,
-              },
-            });
-            const retryText =
-              retryRes?.text ?? retryRes?.content ?? (typeof retryRes === "string" ? retryRes : "");
-            if (retryRes?.reasoning || retryRes?.thinking) {
-              capturedReasoning = retryRes.reasoning ?? retryRes.thinking;
-            }
-            if (retryText) {
-              const retryParsed = parseVerdict(retryText);
-              if (
-                retryParsed &&
-                retryParsed.reason !==
-                  "Classifier response did not contain a valid structured verdict" &&
-                retryParsed.reason !== "Empty or invalid classifier output"
-              ) {
-                verdictResult = retryParsed;
-              }
-            }
-          }
-        }
-      } catch (err) {
-        // Fall back to session prompt path if generate.text throws or fails
-      }
-    }
+      }, timeoutMs);
+    });
 
-    if (!verdictResult) {
-      const timeoutMs = input.config?.classifierTimeout ?? 45000;
-      let timeoutId: ReturnType<typeof setTimeout> | undefined;
-      const verdictPromise = new Promise<ClassifierResult>((resolve) => {
-        registerEvaluationSession(sessionID, resolve);
-      });
-
-      const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
-        timeoutId = setTimeout(() => {
-          try {
-            input.client?.session?.abort?.({ path: { id: sessionID } })?.catch(() => {});
-          } catch {}
-          resolve({
-            verdict: "UNSURE",
-            reason: `Classifier evaluation timed out after ${Math.round(timeoutMs / 1000)} seconds`,
-          });
-        }, timeoutMs);
-      });
-
-      const promptOpts = {
-        sessionID,
+    const promptOpts = {
+      sessionID,
+      text: userPromptText,
+      path: { id: sessionID, sessionID },
+      body: {
         text: userPromptText,
-        path: { id: sessionID, sessionID },
-        body: {
-          text: userPromptText,
-        },
-      };
-      const promptPromise = client.session.prompt(promptOpts).then(async (res) => {
-        if (typeof client.session.wait === "function") {
-          await client.session
-            .wait({ sessionID, path: { id: sessionID, sessionID } })
-            .catch(() => {});
+      },
+    };
+    const promptPromise = client.session.prompt(promptOpts).then(async (res) => {
+      if (typeof client.session.wait === "function") {
+        await client.session
+          .wait({ sessionID, path: { id: sessionID, sessionID } })
+          .catch(() => {});
+      }
+      return res;
+    });
+
+    promptPromise
+      .then(async (promptRes) => {
+        if (!promptRes) return;
+        const resObj = promptRes as Record<string, unknown>;
+        const resData = (
+          resObj.data && typeof resObj.data === "object" ? resObj.data : {}
+        ) as Record<string, unknown>;
+        const reasoning =
+          typeof resData.reasoning === "string"
+            ? resData.reasoning
+            : typeof resObj.reasoning === "string"
+              ? resObj.reasoning
+              : typeof resData.thinking === "string"
+                ? resData.thinking
+                : typeof resObj.thinking === "string"
+                  ? resObj.thinking
+                  : undefined;
+        if (reasoning) {
+          capturedReasoning = reasoning;
         }
-        return res;
-      });
+        const parts = Array.isArray(resData.parts)
+          ? resData.parts
+          : Array.isArray(resObj.parts)
+            ? resObj.parts
+            : [];
+        const verdict = await extractVerdictFromSession(client, sessionID, parts);
+        if (verdict) {
+          recordEvaluationVerdict(sessionID, verdict);
+          return;
+        }
 
-      promptPromise
-        .then(async (promptRes) => {
-          if (!promptRes) return;
-          const resObj = promptRes as Record<string, unknown>;
-          const resData = (
-            resObj.data && typeof resObj.data === "object" ? resObj.data : {}
-          ) as Record<string, unknown>;
-          const reasoning =
-            typeof resData.reasoning === "string"
-              ? resData.reasoning
-              : typeof resObj.reasoning === "string"
-                ? resObj.reasoning
-                : typeof resData.thinking === "string"
-                  ? resData.thinking
-                  : typeof resObj.thinking === "string"
-                    ? resObj.thinking
-                    : undefined;
-          if (reasoning) {
-            capturedReasoning = reasoning;
-          }
-          const parts = Array.isArray(resData.parts)
-            ? resData.parts
-            : Array.isArray(resObj.parts)
-              ? resObj.parts
-              : [];
-          const verdict = await extractVerdictFromSession(client, sessionID, parts);
-          if (verdict) {
-            recordEvaluationVerdict(sessionID, verdict);
-            return;
-          }
-
-          let attempts = 0;
-          const maxRetries = 2;
-          while (attempts < maxRetries) {
-            attempts++;
-            const repromptText =
-              "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }. If tool calling is unavailable, output a single JSON object conforming to the schema.";
-            const repromptOpts = {
-              sessionID,
+        let attempts = 0;
+        const maxRetries = 2;
+        while (attempts < maxRetries) {
+          attempts++;
+          const repromptText =
+            "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
+          const repromptOpts = {
+            sessionID,
+            text: repromptText,
+            path: { id: sessionID, sessionID },
+            body: {
               text: repromptText,
-              path: { id: sessionID, sessionID },
-              body: {
-                text: repromptText,
-              },
-            };
-            const repromptRes = await client.session
-              .prompt(repromptOpts)
-              .then(async (res) => {
-                if (typeof client.session.wait === "function") {
-                  await client.session
-                    .wait({ sessionID, path: { id: sessionID, sessionID } })
-                    .catch(() => {});
-                }
-                return res;
-              })
-              .catch(() => null);
-            if (repromptRes) {
-              const repObj = repromptRes as Record<string, unknown>;
-              const repData = (
-                repObj.data && typeof repObj.data === "object" ? repObj.data : {}
-              ) as Record<string, unknown>;
-              const repReasoning =
-                typeof repData.reasoning === "string"
-                  ? repData.reasoning
-                  : typeof repObj.reasoning === "string"
-                    ? repObj.reasoning
-                    : typeof repData.thinking === "string"
-                      ? repData.thinking
-                      : typeof repObj.thinking === "string"
-                        ? repObj.thinking
-                        : undefined;
-              if (repReasoning) {
-                capturedReasoning = repReasoning;
+            },
+          };
+          const repromptRes = await client.session
+            .prompt(repromptOpts)
+            .then(async (res) => {
+              if (typeof client.session.wait === "function") {
+                await client.session
+                  .wait({ sessionID, path: { id: sessionID, sessionID } })
+                  .catch(() => {});
               }
-              const repromptParts = Array.isArray(repData.parts)
-                ? repData.parts
-                : Array.isArray(repObj.parts)
-                  ? repObj.parts
-                  : [];
-              const repromptVerdict = await extractVerdictFromSession(
-                client,
-                sessionID,
-                repromptParts,
-              );
-              if (repromptVerdict) {
-                recordEvaluationVerdict(sessionID, repromptVerdict);
-                return;
-              }
+              return res;
+            })
+            .catch(() => null);
+          if (repromptRes) {
+            const repObj = repromptRes as Record<string, unknown>;
+            const repData = (
+              repObj.data && typeof repObj.data === "object" ? repObj.data : {}
+            ) as Record<string, unknown>;
+            const repReasoning =
+              typeof repData.reasoning === "string"
+                ? repData.reasoning
+                : typeof repObj.reasoning === "string"
+                  ? repObj.reasoning
+                  : typeof repData.thinking === "string"
+                    ? repData.thinking
+                    : typeof repObj.thinking === "string"
+                      ? repObj.thinking
+                      : undefined;
+            if (repReasoning) {
+              capturedReasoning = repReasoning;
+            }
+            const repromptParts = Array.isArray(repData.parts)
+              ? repData.parts
+              : Array.isArray(repObj.parts)
+                ? repObj.parts
+                : [];
+            const repromptVerdict = await extractVerdictFromSession(
+              client,
+              sessionID,
+              repromptParts,
+            );
+            if (repromptVerdict) {
+              recordEvaluationVerdict(sessionID, repromptVerdict);
+              return;
             }
           }
+        }
 
-          recordEvaluationVerdict(sessionID, {
-            verdict: "UNSURE",
-            reason:
-              "Classifier failed to call classify_result tool or produce structured JSON after retries",
-          });
-        })
-        .catch(() => {});
+        recordEvaluationVerdict(sessionID, {
+          verdict: "UNSURE",
+          reason:
+            "Classifier failed to call classify_result tool after retries",
+        });
+      })
+      .catch(() => {});
 
-      verdictResult = await Promise.race([verdictPromise, timeoutPromise]);
-      if (timeoutId) clearTimeout(timeoutId);
-    }
+    verdictResult = await Promise.race([verdictPromise, timeoutPromise]);
+    if (timeoutId) clearTimeout(timeoutId);
 
     return verdictResult;
   } finally {

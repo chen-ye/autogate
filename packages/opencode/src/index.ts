@@ -3,7 +3,6 @@ import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
 import { tool, type Hooks, type PluginInput } from "@opencode-ai/plugin";
-import { define } from "@opencode-ai/plugin/v2/promise";
 import type { UserMessage, Part } from "@opencode-ai/sdk";
 import {
   loadConfig,
@@ -58,7 +57,6 @@ export function isEventForWorkspace(event: unknown, workspaceDir?: unknown): boo
       const resolvedLoc = path.resolve(locDir);
       return (
         resolvedLoc === normalizedWs ||
-        resolvedLoc.startsWith(normalizedWs + path.sep) ||
         normalizedWs.startsWith(resolvedLoc + path.sep)
       );
     }
@@ -77,8 +75,7 @@ export function isEventForWorkspace(event: unknown, workspaceDir?: unknown): boo
   const resolvedDataDir = path.resolve(dataDir);
   return (
     resolvedDataDir === normalizedWs ||
-    resolvedDataDir.startsWith(normalizedWs + path.sep) ||
-    normalizedWs.startsWith(resolvedDataDir + path.sep)
+    resolvedDataDir.startsWith(normalizedWs + path.sep)
   );
 }
 
@@ -271,8 +268,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       const normalizedWs = path.resolve(explicitWs);
       if (
         normalizedReq !== normalizedWs &&
-        !normalizedReq.startsWith(normalizedWs + path.sep) &&
-        !normalizedWs.startsWith(normalizedReq + path.sep)
+        !normalizedReq.startsWith(normalizedWs + path.sep)
       ) {
         return;
       }
@@ -583,6 +579,12 @@ export async function AutoGatePlugin(
       }
     },
 
+    // =========================================================================================
+    // NOTE FOR FUTURE MAINTAINERS (OpenCode V1 vs V2 Runtime Separation):
+    // This `event` hook is strictly invoked by legacy OpenCode 1.x runtimes via the `server()` export.
+    // OpenCode 2.x ignores this hook entirely and routes all event handling through `setup()`'s
+    // `ctx.event.subscribe()` stream. Do NOT assume this hook runs concurrently with V2 events.
+    // =========================================================================================
     event: async (input: { event: unknown }) => {
       const event = input.event as OpenCodeEvent | undefined;
       if (!event || !event.type) return;
@@ -660,23 +662,52 @@ export async function AutoGatePlugin(
   return hooks;
 }
 
-let activeEventController: AbortController | undefined;
+interface ActiveSubscription {
+  controller: AbortController;
+  adapter: OpenCodeHarnessAdapter;
+}
+
+const activeSubscriptions = new Map<string, ActiveSubscription>();
+
+export type PluginCleanup = () => Promise<void> | void;
+
+export interface OpenCodeV2PluginDefinition {
+  readonly id: string;
+  readonly setup: (context: any) => Promise<PluginCleanup | void> | PluginCleanup | void;
+}
+
+export function definePlugin<T extends OpenCodeV2PluginDefinition>(definition: T): T {
+  return definition;
+}
 
 export const plugin = Object.assign(
-  define({
+  definePlugin({
     id: "auto-gate",
     setup: async (ctx: any) => {
-      if (activeEventController) {
-        activeEventController.abort();
-        activeEventController = undefined;
+      const wsDir =
+        resolveWorkspaceDirectory(ctx.directory) ??
+        resolveWorkspaceDirectory(ctx.worktree) ??
+        resolveWorkspaceDirectory((ctx as unknown as { location?: unknown })?.location) ??
+        "__global__";
+
+      const existing = activeSubscriptions.get(wsDir);
+      if (existing) {
+        existing.controller.abort();
+        void existing.adapter.dispose();
+        activeSubscriptions.delete(wsDir);
       }
-      activeEventController = new AbortController();
+
+      const controller = new AbortController();
+      const signal = controller.signal;
+
       const opts =
         typeof ctx.options === "object" && ctx.options !== null
           ? (ctx.options as Record<string, unknown>)
           : undefined;
       const adapter = new OpenCodeHarnessAdapter(ctx as unknown as PluginInput, opts);
       await adapter.start();
+
+      activeSubscriptions.set(wsDir, { controller, adapter });
 
       const config = loadConfig(opts);
       console.log(
@@ -769,12 +800,23 @@ export const plugin = Object.assign(
         | { subscribe(opts?: { signal?: AbortSignal }): Promise<AsyncIterable<OpenCodeEvent>> }
         | undefined;
       if (eventObj && typeof eventObj.subscribe === "function") {
-        const signal = activeEventController.signal;
         const subscribeFn = eventObj.subscribe.bind(eventObj);
         (async () => {
           try {
-            const stream = await subscribeFn({ signal });
+            let stream: AsyncIterable<OpenCodeEvent> | undefined;
+            try {
+              const res = (subscribeFn as any)({ signal });
+              stream = typeof res?.then === "function" ? await res : res;
+            } catch {
+              const res = (subscribeFn as any)(undefined, { signal });
+              stream = typeof res?.then === "function" ? await res : res;
+            }
+            if (!stream || typeof (stream as any)[Symbol.asyncIterator] !== "function") {
+              return;
+            }
             for await (const event of stream) {
+              if (signal.aborted) break;
+
               const workspaceDir =
                 resolveWorkspaceDirectory(ctx.directory) ??
                 resolveWorkspaceDirectory(ctx.worktree) ??
@@ -815,10 +857,21 @@ export const plugin = Object.assign(
               }
             }
           } catch (err) {
-            console.error("[AutoGate] Event stream error:", err);
+            if (!signal.aborted) {
+              console.error("[AutoGate] Event stream error:", err);
+            }
           }
         })();
       }
+
+      // Return cleanup function to tear down subscription and adapter upon plugin unload/reload
+      return async () => {
+        controller.abort();
+        await adapter.dispose();
+        if (activeSubscriptions.get(wsDir)?.controller === controller) {
+          activeSubscriptions.delete(wsDir);
+        }
+      };
     },
   }),
   { server: AutoGatePlugin },

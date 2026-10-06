@@ -181,23 +181,17 @@ describe("AutoGate OpenCode Plugin Integration", () => {
       await hooks.dispose();
     }
   });
-  it("JSONL audit logging and stateless generate.text support in classifier evaluation", async () => {
+  it("JSONL audit logging and schema-enforced evaluation in classifier", async () => {
     const tmpLogFile = path.join(os.tmpdir(), `autogate-evals-${Date.now()}.jsonl`);
-    let generateCalled = false;
-    const { client } = createMockOpenCodeClient();
-    client.generate = {
-      text: async (_opts: any) => {
-        generateCalled = true;
-        return {
-          text: JSON.stringify({
-            verdict: "ALLOW",
-            risk_level: "LOW",
-            user_authorization: "NONE",
-            reason: "Safe read test",
-          }),
-          reasoning: "Checked patterns, confirmed safe read",
-        };
-      },
+    let promptCalled = false;
+    const { client } = createMockOpenCodeClient({
+      classifierVerdict: "ALLOW",
+      classifierReason: "Checked patterns, confirmed safe read",
+    });
+    const origPrompt = client.session.prompt;
+    client.session.prompt = async (args: any) => {
+      promptCalled = true;
+      return origPrompt(args);
     };
 
     const pluginContext = createMockPluginContext(client, "/workspace");
@@ -218,7 +212,7 @@ describe("AutoGate OpenCode Plugin Integration", () => {
       config: { evalLogFile: tmpLogFile } as any,
     });
 
-    expect(generateCalled).toBe(true);
+    expect(promptCalled).toBe(true);
     expect(result.verdict).toBe("ALLOW");
 
     // Verify JSONL log file written
