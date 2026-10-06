@@ -191,7 +191,12 @@ export class NtfyAdapter implements RemoteAdapter {
     };
   }
 
-  async updateStatus(id: string, status: string, details?: string): Promise<void> {
+  async updateStatus(
+    id: string,
+    status: string,
+    details?: string,
+    preserveBody?: string,
+  ): Promise<void> {
     const url = `${this.server}/${this.topic}`;
     const headers: Record<string, string> = {
       Title: status.replace(/[^\x20-\x7E]/g, "").trim() || "Status Update",
@@ -205,7 +210,7 @@ export class NtfyAdapter implements RemoteAdapter {
       headers["Authorization"] = `Bearer ${this.token}`;
     }
 
-    const message = formatStatusBody(status, details);
+    const message = formatStatusBody(status, details, preserveBody);
 
     const response = await fetch(url, {
       method: "POST",

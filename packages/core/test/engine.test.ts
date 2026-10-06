@@ -26,6 +26,12 @@ class MockEvaluator implements GateEvaluator {
 class MockAdapter implements NotifierAdapter {
   readonly name = "mock-adapter";
   public publishedRequests: ReviewRequest[] = [];
+  public updatedStatuses: Array<{
+    requestId: string;
+    status: string;
+    details?: string;
+    preserveBody?: string;
+  }> = [];
 
   constructor(
     private autoReply?: "once" | "always" | "reject",
@@ -48,7 +54,14 @@ class MockAdapter implements NotifierAdapter {
     return () => {};
   }
 
-  async updateStatus(_requestId: string, _status: string, _details?: string): Promise<void> {}
+  async updateStatus(
+    requestId: string,
+    status: string,
+    details?: string,
+    preserveBody?: string,
+  ): Promise<void> {
+    this.updatedStatuses.push({ requestId, status, details, preserveBody });
+  }
 }
 
 describe("AutoGateCoreEngine", () => {
@@ -543,5 +556,121 @@ describe("AutoGateCoreEngine", () => {
     expect(decision.verdict).toBe("ALLOW");
     expect(actionWithoutPrompt.userPrompt).toBe("Cached session prompt");
     expect(mockEvaluator.lastEvaluatedAction?.userPrompt).toBe("Cached session prompt");
+  });
+
+  it("ntfyVerbosity: 'verbose' publishes all dynamic details and preserves body on status update", async () => {
+    const verboseConfig: AutoGateConfig = {
+      autoMode: true,
+      consecutiveBlockThreshold: 3,
+      notifyOnVerdict: false,
+      reviewTimeout: 5000,
+      ntfyVerbosity: "verbose",
+      environment: {
+        trustedDomains: ["example.com"],
+        trustedGitRemotes: ["origin"],
+        trustedPaths: ["/tmp/trusted"],
+      },
+    };
+    const adapter = new MockAdapter();
+    const verboseEngine = new AutoGateCoreEngine({
+      config: verboseConfig,
+      evaluator: mockEvaluator,
+      adapter,
+      remoteReviewEnabled: true,
+    });
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Needs human review" };
+
+    const action: GateAction = {
+      id: "act-verbose-1",
+      harness: "opencode",
+      sessionID: "ses-verbose-1",
+      toolName: "bash",
+      commandString: "terraform apply",
+      workspaceRoot: "/workspace/prod",
+      userPrompt: "Deploy to production",
+      subagentPrompt: "[Worker] run terraform apply",
+      metadata: { reasoning: "Potentially destructive infrastructure modification." },
+      environment: verboseConfig.environment,
+    };
+
+    const evalPromise = verboseEngine.evaluate(action);
+
+    // Wait for publication
+    await new Promise((r) => setTimeout(r, 20));
+    expect(adapter.publishedRequests.length).toBe(1);
+    const pub = adapter.publishedRequests[0];
+    expect(pub.id).toBe("act-verbose-1");
+    expect(pub.message).toContain("Target: terraform apply");
+    expect(pub.message).toContain("Directory: /workspace/prod");
+    expect(pub.message).toContain("Session: ses-verbose-1");
+    expect(pub.message).toContain("User Prompt:\nDeploy to production");
+    expect(pub.message).toContain("Subagent Task:\n[Worker] run terraform apply");
+    expect(pub.message).toContain("--- Model Reasoning ---\nPotentially destructive infrastructure modification.");
+    expect(pub.message).toContain("Domains: example.com");
+
+    // Remote resolution
+    verboseEngine.resolveReviewResponse({
+      req_id: "act-verbose-1",
+      reply: "once",
+      source: "ntfy",
+    });
+
+    const decision = await evalPromise;
+    expect(decision.verdict).toBe("ALLOW");
+    expect(decision.reply).toBe("once");
+
+    // Status update check
+    expect(adapter.updatedStatuses.length).toBe(1);
+    const statusUpdate = adapter.updatedStatuses[0];
+    expect(statusUpdate.requestId).toBe("act-verbose-1");
+    expect(statusUpdate.preserveBody).toBeDefined();
+    expect(statusUpdate.preserveBody).toBe(pub.message);
+  });
+
+  it("ntfyVerbosity: 'normal' publishes concise body and does not preserve body on status update", async () => {
+    const normalConfig: AutoGateConfig = {
+      autoMode: true,
+      consecutiveBlockThreshold: 3,
+      notifyOnVerdict: false,
+      reviewTimeout: 5000,
+      ntfyVerbosity: "normal",
+    };
+    const adapter = new MockAdapter();
+    const normalEngine = new AutoGateCoreEngine({
+      config: normalConfig,
+      evaluator: mockEvaluator,
+      adapter,
+      remoteReviewEnabled: true,
+    });
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Standard check" };
+
+    const action: GateAction = {
+      id: "act-normal-1",
+      harness: "opencode",
+      sessionID: "ses-norm-1",
+      toolName: "bash",
+      commandString: "npm install",
+      workspaceRoot: "/workspace",
+      userPrompt: "Install dependencies",
+    };
+
+    const evalPromise = normalEngine.evaluate(action);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(adapter.publishedRequests.length).toBe(1);
+    const pub = adapter.publishedRequests[0];
+    expect(pub.message).toContain("Target: npm install");
+    expect(pub.message).not.toContain("--- Context & Hierarchy ---");
+
+    normalEngine.resolveReviewResponse({
+      req_id: "act-normal-1",
+      reply: "once",
+      source: "ntfy",
+    });
+
+    const decision = await evalPromise;
+    expect(decision.verdict).toBe("ALLOW");
+    expect(adapter.updatedStatuses.length).toBe(1);
+    expect(adapter.updatedStatuses[0].preserveBody).toBeUndefined();
   });
 });

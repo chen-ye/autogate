@@ -1,6 +1,7 @@
 import type {
   AutoGateConfig,
   EnvironmentConfig,
+  NtfyVerbosity,
   OmpHarnessConfig,
   OpenCodeHarnessConfig,
   PaseoHarnessConfig,
@@ -175,6 +176,18 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const ntfyToken =
     typeof rawToken === "string" && rawToken.trim().length > 0 ? rawToken.trim() : undefined;
 
+  const rawVerbosity =
+    options?.ntfyVerbosity ??
+    options?.AUTOGATE_NTFY_VERBOSITY ??
+    env.AUTOGATE_NTFY_VERBOSITY ??
+    options?.NTFY_VERBOSITY ??
+    env.NTFY_VERBOSITY ??
+    fileConfig.ntfyVerbosity;
+  const ntfyVerbosity: NtfyVerbosity =
+    typeof rawVerbosity === "string" && rawVerbosity.toLowerCase().trim() === "verbose"
+      ? "verbose"
+      : "normal";
+
   const rawFallback =
     options?.reviewFallbackMode ??
     options?.fallbackMode ??
@@ -284,6 +297,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     ntfyTopic,
     ntfyServer,
     ntfyToken,
+    ntfyVerbosity,
     classifierModel,
     classifierTimeout,
     consecutiveBlockThreshold,

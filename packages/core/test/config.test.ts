@@ -278,4 +278,24 @@ describe("config resolution", () => {
     const config = loadConfig();
     expect(config.ntfyTopic).toBe("autogate");
   });
+
+  it("15. ntfyVerbosity defaults to 'normal'", () => {
+    const config = loadConfig();
+    expect(config.ntfyVerbosity).toBe("normal");
+  });
+
+  it("16. ntfyVerbosity resolves to 'verbose' from env and options", () => {
+    const optConfig = loadConfig({ ntfyVerbosity: "verbose" });
+    expect(optConfig.ntfyVerbosity).toBe("verbose");
+
+    process.env.AUTOGATE_NTFY_VERBOSITY = "verbose";
+    const envConfig = loadConfig();
+    expect(envConfig.ntfyVerbosity).toBe("verbose");
+    delete process.env.AUTOGATE_NTFY_VERBOSITY;
+
+    process.env.NTFY_VERBOSITY = "verbose";
+    const envConfig2 = loadConfig();
+    expect(envConfig2.ntfyVerbosity).toBe("verbose");
+    delete process.env.NTFY_VERBOSITY;
+  });
 });

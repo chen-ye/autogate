@@ -291,6 +291,7 @@ export class AutoGateCoreEngine {
       abort: AbortController;
       sessionID?: string;
       directory?: string;
+      message?: string;
     }
   >();
   private turnDecisionCache = new Map<string, Set<string>>();
@@ -650,27 +651,37 @@ export class AutoGateCoreEngine {
     if (!this.stopRemoteListen) {
       await this.start();
     }
+    const messageBody = formatNotificationBody({
+      target: action.commandString
+        ? [action.commandString]
+        : action.targetPath
+          ? [action.targetPath]
+          : action.rawArgs
+            ? [String(action.rawArgs)]
+            : action.toolName,
+      reason,
+      warning: isCircuitBreaker
+        ? `Consecutive block threshold (${this.consecutiveBlocks} >= ${this.config.consecutiveBlockThreshold ?? 3}) reached.`
+        : undefined,
+      risk_level: riskLevel,
+      user_authorization: userAuth,
+      verbosity: this.config.ntfyVerbosity,
+      toolName: action.toolName,
+      workspaceRoot: action.workspaceRoot,
+      sessionID: action.sessionID,
+      rawArgs: action.rawArgs,
+      userPrompt: action.userPrompt,
+      subagentPrompt: action.subagentPrompt,
+      reasoning: action.metadata?.reasoning as string | undefined,
+      environment: action.environment || this.config.environment,
+    });
     const payload: ReviewRequest = {
       id: action.id,
       title: formatNotificationTitle(
         isCircuitBreaker ? "CIRCUIT BREAKER" : "REVIEW",
         action.toolName,
       ),
-      message: formatNotificationBody({
-        target: action.commandString
-          ? [action.commandString]
-          : action.targetPath
-            ? [action.targetPath]
-            : action.rawArgs
-              ? [String(action.rawArgs)]
-              : action.toolName,
-        reason,
-        warning: isCircuitBreaker
-          ? `Consecutive block threshold (${this.consecutiveBlocks} >= ${this.config.consecutiveBlockThreshold ?? 3}) reached.`
-          : undefined,
-        risk_level: riskLevel,
-        user_authorization: userAuth,
-      }),
+      message: messageBody,
       priority: isCircuitBreaker ? "urgent" : "high",
       tags: isCircuitBreaker ? ["rotating_light", "warning", "lock"] : ["lock", "robot"],
       actions: [
@@ -691,6 +702,7 @@ export class AutoGateCoreEngine {
         abort: abortController,
         sessionID: action.sessionID,
         directory: action.workspaceRoot || this.workspaceRoot,
+        message: messageBody,
       });
 
       if (action.signal) {
@@ -764,11 +776,14 @@ export class AutoGateCoreEngine {
     if (entry) {
       entry.abort.abort();
       this.inFlightRequests.delete(reqID);
+      const preserveBody =
+        this.config.ntfyVerbosity === "verbose" ? entry.message : undefined;
       this.remoteAdapter
         .updateStatus(
           reqID,
           `✅ Answered Remotely (${resp.reply})`,
           `Permission request was answered remotely via ${resp.source ?? "ntfy"}.`,
+          preserveBody,
         )
         .catch(() => {});
 
@@ -799,11 +814,14 @@ export class AutoGateCoreEngine {
     if (entry) {
       entry.abort.abort();
       this.inFlightRequests.delete(reqID);
+      const preserveBody =
+        this.config.ntfyVerbosity === "verbose" ? entry.message : undefined;
       this.remoteAdapter
         .updateStatus(
           reqID,
           "✅ Answered in Terminal",
           "Permission request was answered locally in the terminal.",
+          preserveBody,
         )
         .catch(() => {});
     }
@@ -834,6 +852,15 @@ export class AutoGateCoreEngine {
         reason,
         risk_level: riskLevel,
         user_authorization: userAuth,
+        verbosity: this.config.ntfyVerbosity,
+        toolName: action.toolName,
+        workspaceRoot: action.workspaceRoot,
+        sessionID: action.sessionID,
+        rawArgs: action.rawArgs,
+        userPrompt: action.userPrompt,
+        subagentPrompt: action.subagentPrompt,
+        reasoning: action.metadata?.reasoning as string | undefined,
+        environment: action.environment || this.config.environment,
       }),
       priority: verdict === "ALLOW" ? "low" : "default",
       tags: verdict === "ALLOW" ? ["white_check_mark"] : ["octagonal_sign"],

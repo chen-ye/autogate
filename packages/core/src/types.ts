@@ -106,11 +106,14 @@ export interface PaseoHarnessConfig {
   useDirectApi?: boolean;
 }
 
+export type NtfyVerbosity = "normal" | "verbose";
+
 export interface AutoGateConfig {
   autoMode: boolean;
   ntfyTopic: string;
   ntfyServer: string;
   ntfyToken?: string;
+  ntfyVerbosity?: NtfyVerbosity;
   classifierModel: string;
   classifierTimeout?: number;
   consecutiveBlockThreshold?: number;
@@ -242,7 +245,12 @@ export interface NotifierAdapter extends BaseAdapter {
     onResponse: (resp: ReviewResponse) => Promise<void>,
     signal?: AbortSignal,
   ): Promise<() => void>;
-  updateStatus(requestId: string, status: string, details?: string): Promise<void>;
+  updateStatus(
+    requestId: string,
+    status: string,
+    details?: string,
+    preserveBody?: string,
+  ): Promise<void>;
 }
 
 export interface GateEvaluator {

@@ -86,4 +86,47 @@ describe("Type System Discipline - Branded Types & Discriminated Unions", () => 
     };
     expect(blockResult.verdict).toBe("BLOCK");
   });
+
+  it("formatNotificationBody formats normal and verbose outputs correctly", async () => {
+    const { formatNotificationBody, formatStatusBody } = await import("../src/formatters.js");
+
+    const normal = formatNotificationBody({
+      target: "echo test",
+      reason: "Safe test",
+      risk_level: "LOW",
+      user_authorization: "HIGH",
+    });
+    expect(normal).toBe("Target: echo test\nReason: Safe test [Risk: LOW, Auth: HIGH]");
+
+    const verbose = formatNotificationBody({
+      target: "echo test",
+      reason: "Safe test",
+      risk_level: "LOW",
+      user_authorization: "HIGH",
+      verbosity: "verbose",
+      toolName: "bash",
+      workspaceRoot: "/workspace/project",
+      sessionID: "ses-123",
+      userPrompt: "Please run test",
+      subagentPrompt: "Task: execute test",
+      reasoning: "Confirmed read-only test",
+      environment: {
+        trustedDomains: ["github.com"],
+        trustedGitRemotes: ["origin"],
+      },
+    });
+    expect(verbose).toContain("Target: echo test\nTool: bash\nDirectory: /workspace/project\nSession: ses-123");
+    expect(verbose).toContain("--- Evaluation ---\nRisk: LOW | Auth: HIGH\nReason: Safe test");
+    expect(verbose).toContain("--- Model Reasoning ---\nConfirmed read-only test");
+    expect(verbose).toContain("--- Context & Hierarchy ---\nUser Prompt:\nPlease run test\n\nSubagent Task:\nTask: execute test");
+    expect(verbose).toContain("--- Trust Boundaries ---\nDomains: github.com\nRemotes: origin");
+
+    const statusWithoutPreserve = formatStatusBody("✅ Approved", "Answered via ntfy");
+    expect(statusWithoutPreserve).toBe("✅ Approved\nAnswered via ntfy");
+
+    const statusWithPreserve = formatStatusBody("✅ Approved", "Answered via ntfy", verbose);
+    expect(statusWithPreserve).toContain("✅ Approved\nAnswered via ntfy");
+    expect(statusWithPreserve).toContain("========================================");
+    expect(statusWithPreserve).toContain("Target: echo test");
+  });
 });
