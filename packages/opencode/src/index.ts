@@ -90,9 +90,6 @@ export function ensureAgentInstalled(): void {
 
 export function resolveServerPassword(configDir?: string): string {
   const envPassword = process.env.OPENCODE_SERVER_PASSWORD || process.env.OPENCODE_PASSWORD;
-  if (envPassword && envPassword.trim().length > 0) {
-    return envPassword.trim();
-  }
 
   const explicitDir = configDir || process.env.OPENCODE_CONFIG_DIR;
   if (explicitDir && explicitDir.trim().length > 0) {
@@ -106,6 +103,9 @@ export function resolveServerPassword(configDir?: string): string {
         }
       }
     } catch {}
+    if (envPassword && envPassword.trim().length > 0) {
+      return envPassword.trim();
+    }
     return "";
   }
 
@@ -118,20 +118,36 @@ export function resolveServerPassword(configDir?: string): string {
       fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json")));
 
   if (preferSecondary) {
+    if (process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode1"));
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode2"));
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode"));
+    }
     if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode1"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
     }
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode1"));
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode2"));
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode1"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
   } else {
+    if (process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode"));
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode1"));
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode2"));
+    }
     if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode1"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
     }
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode"));
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode1"));
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode2"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode1"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
@@ -148,6 +164,10 @@ export function resolveServerPassword(configDir?: string): string {
         }
       }
     } catch {}
+  }
+
+  if (envPassword && envPassword.trim().length > 0) {
+    return envPassword.trim();
   }
 
   return "";
@@ -659,9 +679,29 @@ const activeSubscriptions = new Map<string, ActiveSubscription>();
 
 export type PluginCleanup = () => Promise<void> | void;
 
+function isAsyncIterable<T>(val: unknown): val is AsyncIterable<T> {
+  return (
+    val !== null &&
+    typeof val === "object" &&
+    Symbol.asyncIterator in val &&
+    typeof (val as Record<symbol, unknown>)[Symbol.asyncIterator] === "function"
+  );
+}
+
+function isPromiseLike<T>(val: unknown): val is PromiseLike<T> {
+  return (
+    val !== null &&
+    typeof val === "object" &&
+    "then" in val &&
+    typeof (val as { then?: unknown }).then === "function"
+  );
+}
+
 export interface OpenCodeV2PluginDefinition {
   readonly id: string;
-  readonly setup: (context: any) => Promise<PluginCleanup | void> | PluginCleanup | void;
+  readonly setup: (
+    context: OpenCodePluginInput,
+  ) => Promise<PluginCleanup | void> | PluginCleanup | void;
 }
 
 export function definePlugin<T extends OpenCodeV2PluginDefinition>(definition: T): T {
@@ -671,11 +711,11 @@ export function definePlugin<T extends OpenCodeV2PluginDefinition>(definition: T
 export const plugin = Object.assign(
   definePlugin({
     id: "auto-gate",
-    setup: async (ctx: any) => {
+    setup: async (ctx: OpenCodePluginInput) => {
       const wsDir =
         resolveWorkspaceDirectory(ctx.directory) ??
         resolveWorkspaceDirectory(ctx.worktree) ??
-        resolveWorkspaceDirectory((ctx as unknown as { location?: unknown })?.location) ??
+        resolveWorkspaceDirectory(ctx.location) ??
         "__global__";
 
       const existing = activeSubscriptions.get(wsDir);
@@ -710,13 +750,23 @@ export const plugin = Object.assign(
             update: (id: string, fn: (draft: Record<string, unknown>) => void) => void;
           }) => {
             editor.update("auto-gate-eval", (draft) => {
+              const rawModel = config.classifierModel || "google/gemini-3.5-flash-lite";
+              const slashIdx = rawModel.indexOf("/");
+              const providerID = slashIdx > 0 ? rawModel.slice(0, slashIdx) : "google";
+              const rest = slashIdx > 0 ? rawModel.slice(slashIdx + 1) : rawModel;
+              const hashIdx = rest.indexOf("#");
+              const modelID = hashIdx > 0 ? rest.slice(0, hashIdx) : rest;
+              const variant = hashIdx > 0 ? rest.slice(hashIdx + 1) : undefined;
+
               draft.name = "auto-gate-eval";
               draft.description = "Autonomous security evaluation classifier for AutoGate";
               draft.mode = "subagent";
               draft.hidden = true;
               draft.system = systemPrompt;
               draft.steps = 3;
-              draft.model = config.classifierModel || "google/gemini-3.5-flash-lite";
+              draft.model = variant
+                ? { providerID, id: modelID, variant }
+                : { providerID, id: modelID };
               draft.permissions = [
                 { action: "*", resource: "*", effect: "deny" },
                 { action: "classify_result", resource: "*", effect: "allow" },
@@ -761,10 +811,8 @@ export const plugin = Object.assign(
                 user_authorization: isUserAuthorization(authStr) ? authStr : undefined,
                 reason: reasonStr,
               });
-              (
-                ctx as unknown as { session?: { interrupt?: (id: string) => Promise<unknown> } }
-              ).session
-                ?.interrupt?.(context.sessionID)
+              ctx.session
+                ?.interrupt?.({ sessionID: context.sessionID, resume: false })
                 .catch(() => {});
               return {
                 content: JSON.stringify(args),
@@ -808,24 +856,17 @@ export const plugin = Object.assign(
       }
 
       // Subscribe to events
-      const eventObj = ctx.event as unknown as
-        | { subscribe(opts?: { signal?: AbortSignal }): Promise<AsyncIterable<OpenCodeEvent>> }
-        | undefined;
+      const eventObj = ctx.event;
       if (eventObj && typeof eventObj.subscribe === "function") {
         const subscribeFn = eventObj.subscribe.bind(eventObj);
         (async () => {
           try {
-            let stream: AsyncIterable<OpenCodeEvent> | undefined;
-            try {
-              const res = (subscribeFn as any)({ signal });
-              stream = typeof res?.then === "function" ? await res : res;
-            } catch {
-              const res = (subscribeFn as any)(undefined, { signal });
-              stream = typeof res?.then === "function" ? await res : res;
-            }
-            if (!stream || typeof (stream as any)[Symbol.asyncIterator] !== "function") {
+            const res: unknown = subscribeFn({ signal });
+            const resolved = isPromiseLike<AsyncIterable<OpenCodeEvent>>(res) ? await res : res;
+            if (!isAsyncIterable<OpenCodeEvent>(resolved)) {
               return;
             }
+            const stream = resolved;
             for await (const event of stream) {
               if (signal.aborted) break;
 

@@ -15,12 +15,13 @@ export interface OpenCodeSessionClient {
       reasoning?: string;
       thinking?: string;
     }>;
-    get(options: { path: { id?: string; sessionID?: string } }): Promise<{
+    get(options: { sessionID?: string; path?: { id?: string; sessionID?: string } }): Promise<{
       data?: { id?: string; parentID?: string; title?: string };
       id?: string;
       parentID?: string;
       title?: string;
     }>;
+    context?(options: { sessionID: string }): Promise<{ data?: unknown[] } | unknown[]>;
     messages(options: {
       path?: { id?: string; sessionID?: string };
       sessionID?: string;
@@ -29,6 +30,7 @@ export interface OpenCodeSessionClient {
     update?(options: Record<string, unknown>): Promise<unknown>;
     delete?(options: Record<string, unknown>): Promise<unknown>;
     abort?(options: { path: { id?: string } }): Promise<unknown>;
+    interrupt?(options: { sessionID: string; resume?: boolean }): Promise<unknown>;
     wait?(options: {
       sessionID?: string;
       path?: { id?: string; sessionID?: string };
@@ -102,32 +104,43 @@ export interface OpenCodePluginInput {
   client?: OpenCodeSessionClient;
   directory?: string;
   worktree?: string;
+  location?: unknown;
   configDir?: string;
   serverUrl?: string;
   options?: Record<string, unknown>;
   permission?: {
     reply(options: {
       path?: { requestID?: string; id?: string };
-      body: {
+      body?: {
         reply?: string;
         message?: string;
         decision?: string;
         response?: string;
       };
       query?: { directory?: string };
-    }): Promise<{ error?: unknown; response?: { ok?: boolean } }>;
+      sessionID?: string;
+      requestID?: string;
+      decision?: string;
+      message?: string;
+    }): Promise<{ error?: unknown; response?: { ok?: boolean } } | unknown>;
   };
   event?: {
-    subscribe?(options?: {
-      directory?: string;
-      signal?: AbortSignal;
-    }): Promise<AsyncIterable<OpenCodeEvent>>;
+    subscribe?(
+      ...args: unknown[]
+    ): Promise<AsyncIterable<OpenCodeEvent>> | AsyncIterable<OpenCodeEvent>;
+  };
+  agent?: {
+    transform?(
+      fn: (editor: {
+        update: (id: string, fn: (draft: Record<string, unknown>) => void) => void;
+      }) => Promise<void> | void,
+    ): Promise<void>;
   };
   tool?: {
     transform?(fn: (editor: { add(def: unknown): void }) => Promise<void> | void): Promise<void>;
   };
   session?: {
-    interrupt?(sessionID: string): Promise<unknown>;
+    interrupt?(options: { sessionID: string; resume?: boolean }): Promise<unknown>;
   };
   [key: string]: unknown;
 }

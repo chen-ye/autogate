@@ -1,5 +1,4 @@
 import type { OpenCodeSessionClient } from "./types.js";
-import { resolveServerPassword } from "./index.js";
 
 interface MessageEntry {
   role?: string;
@@ -23,38 +22,19 @@ export class OpenCodePromptResolver {
 
   public async fetchLatestUserMessage(sessionID: string): Promise<string> {
     let messages: unknown[] | undefined;
-    if (typeof this.client?.session?.messages === "function") {
-      try {
+    try {
+      if (typeof this.client?.session?.context === "function") {
+        const res = await this.client.session.context({ sessionID });
+        messages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data;
+      } else if (typeof this.client?.session?.messages === "function") {
         const res = await this.client.session.messages({
+          sessionID,
           path: { id: sessionID, sessionID },
           query: { limit: 50 },
         });
         messages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data;
-      } catch {}
-    }
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      try {
-        const targetServer =
-          this.client?.serverUrl ||
-          process.env.OPENCODE_SERVER_URL ||
-          (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
-          process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
-            ? "http://localhost:4097"
-            : "http://localhost:4096");
-        const password = resolveServerPassword();
-        const auth = password
-          ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
-          : "";
-        const res = await fetch(`${targetServer}/api/session/${sessionID}/message?limit=50`, {
-          headers: auth ? { Authorization: auth } : {},
-        });
-        if (res.ok) {
-          const json = (await res.json()) as { data?: unknown[] } | unknown[];
-          messages = Array.isArray(json) ? json : json?.data;
-        }
-      } catch {}
-    }
+      }
+    } catch {}
 
     try {
       if (Array.isArray(messages) && messages.length > 0) {
@@ -141,6 +121,7 @@ export class OpenCodePromptResolver {
       }
       if (this.client?.session?.get) {
         const sessionRes = await this.client.session.get({
+          sessionID,
           path: { id: sessionID, sessionID },
         });
         const data = sessionRes?.data ?? sessionRes;
@@ -184,6 +165,7 @@ export class OpenCodePromptResolver {
         let parentData: Record<string, unknown> | null = null;
         if (this.client?.session?.get) {
           const res = await this.client.session.get({
+            sessionID: iterID,
             path: { id: iterID, sessionID: iterID },
           });
           parentData = res?.data ?? res;

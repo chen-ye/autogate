@@ -19,6 +19,7 @@ describe("@autogate/opencode resolveServerPassword", () => {
     delete process.env.OPENCODE_SERVER_PASSWORD;
     delete process.env.OPENCODE_PASSWORD;
     delete process.env.XDG_CONFIG_HOME;
+    delete process.env.XDG_STATE_HOME;
   });
 
   afterEach(() => {
@@ -28,7 +29,7 @@ describe("@autogate/opencode resolveServerPassword", () => {
     } catch {}
   });
 
-  it("prioritizes OPENCODE_SERVER_PASSWORD over service.json", () => {
+  it("prioritizes service.json over OPENCODE_SERVER_PASSWORD when service.json exists", () => {
     process.env.OPENCODE_CONFIG_DIR = tempDir;
     fs.writeFileSync(
       path.join(tempDir, "service.json"),
@@ -36,17 +37,16 @@ describe("@autogate/opencode resolveServerPassword", () => {
     );
     process.env.OPENCODE_SERVER_PASSWORD = "env-server-password";
 
-    expect(resolveServerPassword()).toBe("env-server-password");
+    expect(resolveServerPassword()).toBe("service-json-password");
   });
 
-  it("prioritizes OPENCODE_PASSWORD over service.json when OPENCODE_SERVER_PASSWORD is unset", () => {
+  it("falls back to OPENCODE_SERVER_PASSWORD and OPENCODE_PASSWORD when service.json is absent", () => {
     process.env.OPENCODE_CONFIG_DIR = tempDir;
-    fs.writeFileSync(
-      path.join(tempDir, "service.json"),
-      JSON.stringify({ password: "service-json-password" }),
-    );
-    process.env.OPENCODE_PASSWORD = "env-password";
+    process.env.OPENCODE_SERVER_PASSWORD = "env-server-password";
+    expect(resolveServerPassword()).toBe("env-server-password");
 
+    delete process.env.OPENCODE_SERVER_PASSWORD;
+    process.env.OPENCODE_PASSWORD = "env-password";
     expect(resolveServerPassword()).toBe("env-password");
   });
 
@@ -160,6 +160,10 @@ describe("@autogate/opencode runtime agent injection", () => {
       expect(evalAgent?.mode).toBe("subagent");
       expect(evalAgent?.hidden).toBe(true);
       expect(evalAgent?.steps).toBe(3);
+      expect(evalAgent?.model).toEqual({
+        providerID: "google",
+        id: "gemini-3.5-flash-lite",
+      });
       expect(typeof evalAgent?.system).toBe("string");
       expect(String(evalAgent?.system ?? "").length).toBeGreaterThan(100);
     } finally {

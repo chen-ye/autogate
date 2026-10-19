@@ -138,14 +138,11 @@ export async function archiveEvaluationSession(
   if (client?.session && typeof client.session.update === "function") {
     const updateFn = client.session.update.bind(client.session);
     await updateFn({
+      sessionID,
+      title: archivePayload.title,
       path: { id: sessionID, sessionID },
       body: archivePayload,
-    }).catch(async () => {
-      await updateFn({
-        path: { id: sessionID, sessionID },
-        body: archivePayload,
-      }).catch(() => {});
-    });
+    }).catch(() => {});
   }
 
   await notifyOpenChamberArchive(sessionID);
@@ -351,7 +348,12 @@ export async function extractVerdictFromSession(
   }
 
   let allMessages: unknown[] = [];
-  if (typeof client?.session?.messages === "function") {
+  if (typeof client?.session?.context === "function") {
+    try {
+      const res = await client.session.context({ sessionID });
+      allMessages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data || [];
+    } catch {}
+  } else if (typeof client?.session?.messages === "function") {
     try {
       const msgsRes = await client.session
         .messages({ path: { id: sessionID, sessionID }, query: { limit: 50 } })
@@ -367,41 +369,6 @@ export async function extractVerdictFromSession(
         : Array.isArray(resObj.data)
           ? resObj.data
           : [];
-    } catch {}
-  }
-
-  if (allMessages.length === 0 && client && "message" in client) {
-    try {
-      const msgDomain = (client as Record<string, unknown>).message as
-        | { list?(opts: unknown): Promise<{ data?: unknown[] } | unknown[]> }
-        | undefined;
-      if (typeof msgDomain?.list === "function") {
-        const res = await msgDomain.list({ sessionID, limit: 50 });
-        allMessages = Array.isArray(res) ? res : res?.data || [];
-      }
-    } catch {}
-  }
-
-  if (allMessages.length === 0) {
-    try {
-      const serverUrl =
-        client?.serverUrl ||
-        process.env.OPENCODE_SERVER_URL ||
-        (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
-        process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
-          ? "http://localhost:4097"
-          : "http://localhost:4096");
-      const password = resolveServerPassword();
-      const authHeader = password
-        ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
-        : "";
-      const res = await fetch(`${serverUrl}/api/session/${sessionID}/message?limit=50`, {
-        headers: authHeader ? { Authorization: authHeader } : {},
-      });
-      if (res.ok) {
-        const json = (await res.json()) as { data?: unknown[] } | unknown[];
-        allMessages = Array.isArray(json) ? json : json?.data || [];
-      }
     } catch {}
   }
 
@@ -565,7 +532,11 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
       timeoutId = setTimeout(() => {
         try {
-          input.client?.session?.abort?.({ path: { id: sessionID } })?.catch(() => {});
+          if (typeof input.client?.session?.interrupt === "function") {
+            input.client.session.interrupt({ sessionID, resume: false }).catch(() => {});
+          } else {
+            input.client?.session?.abort?.({ path: { id: sessionID } })?.catch(() => {});
+          }
         } catch {}
         resolve({
           verdict: "UNSURE",
@@ -574,12 +545,25 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       }, timeoutMs);
     });
 
+    const modelRef = parseModelRef(input.model ?? input.config?.classifierModel);
     const promptOpts = {
       sessionID,
       text: userPromptText,
       path: { id: sessionID, sessionID },
       body: {
-        text: userPromptText,
+        agent: evalAgent,
+        model: {
+          providerID: modelRef.providerID,
+          modelID: modelRef.modelID,
+        },
+        tools: { ...EVAL_SESSION_TOOLS },
+        system: PASSIVE_EVALUATOR_DIRECTIVE,
+        parts: [
+          {
+            type: "text",
+            text: userPromptText,
+          },
+        ],
       },
     };
     const promptPromise = client.session.prompt(promptOpts).then(async (res) => {
@@ -633,7 +617,19 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
             text: repromptText,
             path: { id: sessionID, sessionID },
             body: {
-              text: repromptText,
+              agent: evalAgent,
+              model: {
+                providerID: modelRef.providerID,
+                modelID: modelRef.modelID,
+              },
+              tools: { ...EVAL_SESSION_TOOLS },
+              system: PASSIVE_EVALUATOR_DIRECTIVE,
+              parts: [
+                {
+                  type: "text",
+                  text: repromptText,
+                },
+              ],
             },
           };
           const repromptRes = await client.session
@@ -684,8 +680,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
 
         recordEvaluationVerdict(sessionID, {
           verdict: "UNSURE",
-          reason:
-            "Classifier failed to call classify_result tool after retries",
+          reason: "Classifier failed to call classify_result tool after retries",
         });
       })
       .catch(() => {});
