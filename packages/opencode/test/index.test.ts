@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { resolveServerPassword, isEventForWorkspace, plugin, AutoGatePlugin } from "../src/index.js";
+import {
+  resolveServerPassword,
+  isEventForWorkspace,
+  plugin,
+  AutoGatePlugin,
+} from "../src/index.js";
 
 describe("@autogate/opencode resolveServerPassword", () => {
   const origEnv = { ...process.env };
@@ -127,9 +132,16 @@ describe("@autogate/opencode runtime agent injection", () => {
     const updatedAgents: Record<string, Record<string, unknown>> = {};
     const cleanup = await plugin.setup({
       directory: "/tmp/test-ws",
-      options: { classifierModel: "google/gemini-3.5-flash-lite", ntfyServer: "http://127.0.0.1:59999" },
+      options: {
+        classifierModel: "google/gemini-3.5-flash-lite",
+        ntfyServer: "http://127.0.0.1:59999",
+      },
       agent: {
-        transform: async (fn: (editor: { update: (id: string, cb: (draft: Record<string, unknown>) => void) => void }) => void) => {
+        transform: async (
+          fn: (editor: {
+            update: (id: string, cb: (draft: Record<string, unknown>) => void) => void;
+          }) => void,
+        ) => {
           fn({
             update(id, cb) {
               const draft: Record<string, unknown> = {};
@@ -142,23 +154,24 @@ describe("@autogate/opencode runtime agent injection", () => {
     });
 
     try {
-      expect(updatedAgents["auto-gate-eval"]).toBeDefined();
-      expect(updatedAgents["auto-gate-eval"]?.name).toBe("auto-gate-eval");
-      expect(updatedAgents["auto-gate-eval"]?.mode).toBe("subagent");
-      expect(updatedAgents["auto-gate-eval"]?.hidden).toBe(true);
-      expect(updatedAgents["auto-gate-eval"]?.steps).toBe(3);
-      expect(typeof updatedAgents["auto-gate-eval"]?.system).toBe("string");
-      expect((updatedAgents["auto-gate-eval"]?.system as string).length).toBeGreaterThan(100);
+      const evalAgent = updatedAgents["auto-gate-eval"];
+      expect(evalAgent).toBeDefined();
+      expect(evalAgent?.name).toBe("auto-gate-eval");
+      expect(evalAgent?.mode).toBe("subagent");
+      expect(evalAgent?.hidden).toBe(true);
+      expect(evalAgent?.steps).toBe(3);
+      expect(typeof evalAgent?.system).toBe("string");
+      expect(String(evalAgent?.system ?? "").length).toBeGreaterThan(100);
     } finally {
       if (typeof cleanup === "function") await cleanup();
     }
   });
 
   it("registers auto-gate-eval via config() hook in OpenCode v1 server plugin", async () => {
-    const hooks = await AutoGatePlugin(
-      { directory: "/tmp/test-ws-v1", client: {} } as any,
-      { classifierModel: "google/gemini-3.5-flash-lite", ntfyServer: "http://127.0.0.1:59999" },
-    );
+    const hooks = await AutoGatePlugin({ directory: "/tmp/test-ws-v1", client: {} } as any, {
+      classifierModel: "google/gemini-3.5-flash-lite",
+      ntfyServer: "http://127.0.0.1:59999",
+    });
 
     try {
       const configData: Record<string, any> = {};

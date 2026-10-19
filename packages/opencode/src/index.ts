@@ -56,10 +56,7 @@ export function isEventForWorkspace(event: unknown, workspaceDir?: unknown): boo
     const locDir = resolveWorkspaceDirectory(ev.location);
     if (locDir) {
       const resolvedLoc = path.resolve(locDir);
-      return (
-        resolvedLoc === normalizedWs ||
-        normalizedWs.startsWith(resolvedLoc + path.sep)
-      );
+      return resolvedLoc === normalizedWs || normalizedWs.startsWith(resolvedLoc + path.sep);
     }
   }
 
@@ -74,10 +71,7 @@ export function isEventForWorkspace(event: unknown, workspaceDir?: unknown): boo
   }
 
   const resolvedDataDir = path.resolve(dataDir);
-  return (
-    resolvedDataDir === normalizedWs ||
-    resolvedDataDir.startsWith(normalizedWs + path.sep)
-  );
+  return resolvedDataDir === normalizedWs || resolvedDataDir.startsWith(normalizedWs + path.sep);
 }
 
 export {
@@ -241,10 +235,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     if (requestDir && explicitWs) {
       const normalizedReq = path.resolve(requestDir);
       const normalizedWs = path.resolve(explicitWs);
-      if (
-        normalizedReq !== normalizedWs &&
-        !normalizedReq.startsWith(normalizedWs + path.sep)
-      ) {
+      if (normalizedReq !== normalizedWs && !normalizedReq.startsWith(normalizedWs + path.sep)) {
         return;
       }
     }
