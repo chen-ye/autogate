@@ -12,6 +12,7 @@ import {
   isClassifierVerdict,
   isRiskLevel,
   isUserAuthorization,
+  buildClassifierSystemPrompt,
   type HarnessAdapter,
   type PermissionEventData,
   type GateAction,
@@ -89,42 +90,8 @@ export * from "./types.js";
 export * from "./prompt-resolver.js";
 
 export function ensureAgentInstalled(): void {
-  try {
-    const homeDir = os.homedir();
-    const agentsDir = path.join(homeDir, ".config", "opencode", "agents");
-    const targetFile = path.join(agentsDir, "auto-gate-eval.md");
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const pluginAgentFile = path.resolve(__dirname, "../../core/agents/auto-gate-eval.md");
-
-    if (!fs.existsSync(pluginAgentFile)) {
-      return;
-    }
-
-    if (!fs.existsSync(agentsDir)) {
-      fs.mkdirSync(agentsDir, { recursive: true });
-    }
-
-    try {
-      const stats = fs.lstatSync(targetFile);
-      if (stats.isSymbolicLink()) {
-        const currentLink = fs.readlinkSync(targetFile);
-        if (path.resolve(path.dirname(targetFile), currentLink) === pluginAgentFile) {
-          return;
-        }
-        fs.unlinkSync(targetFile);
-      } else {
-        fs.unlinkSync(targetFile);
-      }
-    } catch (e: unknown) {
-      if (e && typeof e === "object" && "code" in e && (e as { code?: string }).code !== "ENOENT") {
-        return;
-      }
-    }
-
-    fs.symlinkSync(pluginAgentFile, targetFile);
-  } catch {
-    // Non-fatal if filesystem is readonly or symlink fails in test harnesses
-  }
+  // Agent 'auto-gate-eval' is injected at runtime via ctx.agent.transform (OpenCode v2)
+  // and the config() hook (OpenCode v1). No filesystem symlink is required.
 }
 
 export function resolveServerPassword(configDir?: string): string {
@@ -477,6 +444,27 @@ export async function AutoGatePlugin(
   } catch {}
 
   const hooks: Hooks = {
+    async config(configData: Record<string, unknown>) {
+      if (configData && typeof configData === "object") {
+        if (!configData.agent || typeof configData.agent !== "object") {
+          configData.agent = {};
+        }
+        const agentMap = configData.agent as Record<string, unknown>;
+        agentMap["auto-gate-eval"] = {
+          name: "auto-gate-eval",
+          description: "Autonomous security evaluation classifier for AutoGate",
+          mode: "subagent",
+          hidden: true,
+          prompt: buildClassifierSystemPrompt(),
+          steps: 3,
+          model: config.classifierModel || "google/gemini-3.5-flash-lite",
+          permission: {
+            "*": "deny",
+            classify_result: "allow",
+          },
+        };
+      }
+    },
     tool: {
       classify_result: tool({
         description:
@@ -722,6 +710,30 @@ export const plugin = Object.assign(
       console.log(
         `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
       );
+
+      // Register auto-gate-eval agent via ctx.agent.transform if available
+      if (ctx.agent && typeof ctx.agent.transform === "function") {
+        const systemPrompt = buildClassifierSystemPrompt();
+        await ctx.agent.transform(
+          (editor: {
+            update: (id: string, fn: (draft: Record<string, unknown>) => void) => void;
+          }) => {
+            editor.update("auto-gate-eval", (draft) => {
+              draft.name = "auto-gate-eval";
+              draft.description = "Autonomous security evaluation classifier for AutoGate";
+              draft.mode = "subagent";
+              draft.hidden = true;
+              draft.system = systemPrompt;
+              draft.steps = 3;
+              draft.model = config.classifierModel || "google/gemini-3.5-flash-lite";
+              draft.permissions = [
+                { action: "*", resource: "*", effect: "deny" },
+                { action: "classify_result", resource: "*", effect: "allow" },
+              ];
+            });
+          },
+        );
+      }
 
       // Register tools via ctx.tool.transform if available
       if (ctx.tool && typeof ctx.tool.transform === "function") {

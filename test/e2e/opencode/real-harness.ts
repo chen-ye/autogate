@@ -260,41 +260,7 @@ export class RealOpenCodeHarness {
       // Non-fatal if git is already initialized
     }
 
-    // 2. Set up .config/opencode/agents/ and symlink auto-gate-eval.md
-    const agentsDir = path.join(this.workspaceDir, ".config", "opencode", "agents");
-    if (!fs.existsSync(agentsDir)) {
-      fs.mkdirSync(agentsDir, { recursive: true });
-    }
-
-    const targetFile = path.join(agentsDir, "auto-gate-eval.md");
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const candidatePaths = [
-      path.resolve(process.cwd(), "packages/core/agents/auto-gate-eval.md"),
-      path.resolve(__dirname, "../../../packages/core/agents/auto-gate-eval.md"),
-      path.resolve(__dirname, "../../core/agents/auto-gate-eval.md"),
-    ];
-    const pluginAgentFile = candidatePaths.find((p) => fs.existsSync(p));
-
-    if (pluginAgentFile) {
-      try {
-        const stats = fs.lstatSync(targetFile);
-        if (stats.isSymbolicLink() || stats.isFile()) {
-          fs.unlinkSync(targetFile);
-        }
-      } catch (e: any) {
-        if (e?.code !== "ENOENT") {
-          // ignore
-        }
-      }
-      try {
-        fs.symlinkSync(pluginAgentFile, targetFile);
-      } catch {
-        // Non-fatal if symlink creation fails
-      }
-    }
-
-    // 3. Prepare OpenCode configuration
-    // 3. Prepare OpenCode configuration and allocate dynamic port
+    // 2. Prepare OpenCode configuration and allocate dynamic port
     const allocatedPort =
       options?.serverPort ??
       (await (async () => {

@@ -25,17 +25,6 @@ describe("RealOpenCodeHarness", () => {
     expect(fs.existsSync(harness.workspaceDir)).toBe(true);
     expect(fs.existsSync(path.join(harness.workspaceDir, ".git"))).toBe(true);
 
-    const agentSymlink = path.join(
-      harness.workspaceDir,
-      ".config",
-      "opencode",
-      "agents",
-      "auto-gate-eval.md",
-    );
-    expect(fs.existsSync(agentSymlink)).toBe(true);
-    const stats = fs.lstatSync(agentSymlink);
-    expect(stats.isSymbolicLink()).toBe(true);
-
     // 3. Verify server URL and authentication header
     expect(harness.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     expect(harness.authHeader).toMatch(/^Basic [A-Za-z0-9+/=]+$/);
