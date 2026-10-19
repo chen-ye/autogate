@@ -38,7 +38,8 @@ export class OpenCodePromptResolver {
         const targetServer =
           this.client?.serverUrl ||
           process.env.OPENCODE_SERVER_URL ||
-          (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+          (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
+          process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
             ? "http://localhost:4097"
             : "http://localhost:4096");
         const password = resolveServerPassword();

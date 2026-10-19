@@ -149,24 +149,30 @@ export function resolveServerPassword(configDir?: string): string {
   }
 
   const candidateDirs: string[] = [];
-  const preferV2 =
+  const preferSecondary =
     process.env.OPENCODE_PORT === "4097" ||
+    process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
     process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ||
-    fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json"));
+    (!fs.existsSync(path.join(os.homedir(), ".config", "opencode", "service.json")) &&
+      fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json")));
 
-  if (preferV2) {
+  if (preferSecondary) {
     if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode1"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
     }
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode1"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
   } else {
     if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode1"));
       candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode2"));
     }
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode1"));
     candidateDirs.push(path.join(os.homedir(), ".config", "opencode2"));
   }
 
@@ -202,8 +208,10 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     this.config = config;
     const prefer4097 =
       process.env.OPENCODE_PORT === "4097" ||
+      process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
       process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ||
-      fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json"));
+      (!fs.existsSync(path.join(os.homedir(), ".config", "opencode", "service.json")) &&
+        fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json")));
     const serverUrl =
       config.opencode?.serverUrl ||
       (options?.serverUrl as string | undefined) ||
@@ -358,7 +366,8 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     const serverUrl =
       this.serverUrl ||
       process.env.OPENCODE_SERVER_URL ||
-      (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+      (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
+      process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
         ? "http://localhost:4097"
         : "http://localhost:4096");
     const password = resolveServerPassword(

@@ -88,9 +88,12 @@ export function clearEvaluationSession(sessionID: string): void {
 }
 
 async function notifyOpenChamberArchive(sessionID: string): Promise<void> {
-  const ports = [14097, 14096];
-  for (const port of ports) {
-    const dirName = port === 14097 ? "openchamber2" : "openchamber";
+  const targets = [
+    { port: 14096, dirName: "openchamber" },
+    { port: 14097, dirName: "openchamber1" },
+    { port: 14097, dirName: "openchamber2" },
+  ];
+  for (const { port, dirName } of targets) {
     const secretFile = path.join(os.homedir(), ".config", dirName, "jwt-secret");
     if (!fs.existsSync(secretFile)) continue;
 
@@ -148,7 +151,7 @@ export async function archiveEvaluationSession(
   await notifyOpenChamberArchive(sessionID);
 
   try {
-    for (const dirName of ["openchamber2", "openchamber"]) {
+    for (const dirName of ["openchamber", "openchamber1", "openchamber2"]) {
       const ocArchive = path.join(os.homedir(), ".config", dirName, "sessions-archive.json");
       if (fs.existsSync(ocArchive)) {
         const raw = fs.readFileSync(ocArchive, "utf8");
@@ -384,7 +387,8 @@ export async function extractVerdictFromSession(
       const serverUrl =
         client?.serverUrl ||
         process.env.OPENCODE_SERVER_URL ||
-        (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+        (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
+        process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
           ? "http://localhost:4097"
           : "http://localhost:4096");
       const password = resolveServerPassword();
@@ -494,7 +498,12 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       cfg?.serverUrl ||
       input.client?.serverUrl ||
       process.env.OPENCODE_SERVER_URL ||
-      "http://localhost:4097";
+      (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
+      process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ||
+      (!fs.existsSync(path.join(os.homedir(), ".config", "opencode", "service.json")) &&
+        fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json")))
+        ? "http://localhost:4097"
+        : "http://localhost:4096");
     const password = resolveServerPassword(
       typeof cfg?.opencode?.serverUrl === "string" ? undefined : undefined,
     );

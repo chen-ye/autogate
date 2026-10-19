@@ -154,7 +154,10 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
 
   const defaultPort =
     process.env.OPENCODE_PORT ||
-    (process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ? "4097" : undefined) ||
+    (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
+    process.env.OPENCODE_CONFIG_DIR?.includes("opencode2")
+      ? "4097"
+      : undefined) ||
     "4096";
   const rawServerUrl =
     options?.serverUrl ??
