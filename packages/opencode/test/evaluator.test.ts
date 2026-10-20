@@ -2,11 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import type { AutoGateConfig } from "@autogate/core";
 import {
   classifyRequest,
   archiveEvaluationSession,
   extractVerdictFromSession,
   recordEvaluationVerdict,
+  type OpenCodeSessionClient,
 } from "../src/evaluator.js";
 
 describe("@autogate/opencode evaluator OpenCode v2 support", () => {
@@ -25,33 +27,35 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
   });
 
   describe("archiveEvaluationSession", () => {
-    it("archives session using client.session.update and registers in openchamber2 archive if file exists", async () => {
-      const oc2Dir = path.join(tempDir, ".config", "openchamber2");
-      fs.mkdirSync(oc2Dir, { recursive: true });
-      const archiveFile = path.join(oc2Dir, "sessions-archive.json");
+    it("archives session using client.session.update and registers in openchamber archive if file exists", async () => {
+      const ocDir = path.join(tempDir, ".config", "openchamber");
+      fs.mkdirSync(ocDir, { recursive: true });
+      const archiveFile = path.join(ocDir, "sessions-archive.json");
       fs.writeFileSync(archiveFile, JSON.stringify({ existing_id: 12345 }));
 
       process.env.HOME = tempDir;
       const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
 
-      let updateCalls: any[] = [];
+      const updateCalls: Array<{ sessionID: string; title?: string }> = [];
       const mockClient = {
         session: {
-          update: async (opts: any) => {
+          update: async (opts: { sessionID: string; title?: string }) => {
             updateCalls.push(opts);
             return { ok: true };
           },
         },
-      };
+      } as unknown as OpenCodeSessionClient;
 
       try {
         await archiveEvaluationSession(mockClient, "ses_test_123", "bash", "ALLOW");
 
         expect(updateCalls.length).toBe(1);
-        expect(updateCalls[0].path).toEqual({ id: "ses_test_123", sessionID: "ses_test_123" });
-        expect(updateCalls[0].body.title).toBe("[auto-gate-eval] bash -> ALLOW");
+        expect(updateCalls[0]).toEqual({
+          sessionID: "ses_test_123",
+          title: "[auto-gate-eval] bash -> ALLOW",
+        });
 
-        const written = JSON.parse(fs.readFileSync(archiveFile, "utf8"));
+        const written = JSON.parse(fs.readFileSync(archiveFile, "utf8")) as Record<string, number>;
         expect(written.existing_id).toBe(12345);
         expect(typeof written.ses_test_123).toBe("number");
       } finally {
@@ -59,17 +63,17 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
       }
     });
 
-    it("does not fail or write if openchamber2 archive does not exist", async () => {
+    it("does not fail or write if openchamber archive does not exist", async () => {
       const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
-      let updateCalls: any[] = [];
+      const updateCalls: Array<{ sessionID: string; title?: string }> = [];
       const mockClient = {
         session: {
-          update: async (opts: any) => {
+          update: async (opts: { sessionID: string; title?: string }) => {
             updateCalls.push(opts);
             return { ok: true };
           },
         },
-      };
+      } as unknown as OpenCodeSessionClient;
 
       try {
         await archiveEvaluationSession(mockClient, "ses_test_456", "bash", "BLOCK");
@@ -81,99 +85,59 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
   });
 
   describe("extractVerdictFromSession", () => {
-    it("queries messages with path id/sessionID and limit: 50", async () => {
-      let messageCalls: any[] = [];
+    it("queries session.context({ sessionID }) and extracts classify_result verdict", async () => {
+      const contextCalls: Array<{ sessionID: string }> = [];
       const mockClient = {
         session: {
-          messages: async (opts: any) => {
-            messageCalls.push(opts);
-            return {
-              data: [
-                {
-                  parts: [
-                    {
-                      type: "tool",
-                      tool: "classify_result",
-                      state: {
-                        input: {
-                          verdict: "ALLOW",
-                          risk_level: "LOW",
-                          user_authorization: "LOW",
-                          reason: "Safe check",
-                        },
+          context: async (opts: { sessionID: string }) => {
+            contextCalls.push(opts);
+            return [
+              {
+                type: "assistant",
+                content: [
+                  {
+                    type: "tool",
+                    name: "classify_result",
+                    state: {
+                      input: {
+                        verdict: "ALLOW",
+                        risk_level: "LOW",
+                        user_authorization: "LOW",
+                        reason: "Safe check",
                       },
                     },
-                  ],
-                },
-              ],
-            };
+                  },
+                ],
+              },
+            ];
           },
         },
-      };
+      } as unknown as OpenCodeSessionClient;
 
       const result = await extractVerdictFromSession(mockClient, "ses_789");
       expect(result).not.toBeNull();
       expect(result?.verdict).toBe("ALLOW");
-      expect(messageCalls.length).toBe(1);
-      expect(messageCalls[0]).toEqual({
-        path: { id: "ses_789", sessionID: "ses_789" },
-        query: { limit: 50 },
-      });
-    });
-
-    it("falls back to flat sessionID if path invocation fails", async () => {
-      let callCount = 0;
-      let lastOpts: any;
-      const mockClient = {
-        session: {
-          messages: async (opts: any) => {
-            callCount++;
-            lastOpts = opts;
-            if (opts.path) {
-              throw new Error("v1 server path rejected");
-            }
-            return {
-              data: [
-                {
-                  parts: [
-                    {
-                      type: "tool",
-                      tool: "classify_result",
-                      input: {
-                        verdict: "BLOCK",
-                        reason: "Denied",
-                      },
-                    },
-                  ],
-                },
-              ],
-            };
-          },
-        },
-      };
-
-      const result = await extractVerdictFromSession(mockClient, "ses_fallback");
-      expect(result?.verdict).toBe("BLOCK");
-      expect(callCount).toBe(2);
-      expect(lastOpts).toEqual({
-        sessionID: "ses_fallback",
-        query: { limit: 50 },
+      expect(contextCalls.length).toBe(1);
+      expect(contextCalls[0]).toEqual({
+        sessionID: "ses_789",
       });
     });
   });
 
   describe("classifyRequest session creation", () => {
-    it("uses v2 location schema when supported", async () => {
-      let createOpts: any;
+    it("uses v2 location schema and top-level prompt input", async () => {
+      let createOpts: Record<string, unknown> | undefined;
+      let promptOpts: Record<string, unknown> | undefined;
       const mockClient = {
-        app: { agents: async () => ({ data: [{ name: "auto-gate-eval" }] }) },
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
         session: {
-          create: async (opts: any) => {
+          create: async (opts: Record<string, unknown>) => {
             createOpts = opts;
             return { data: { id: "ses_v2_created" } };
           },
           update: async () => ({}),
-          prompt: async (opts: any) => {
+          prompt: async (opts: { sessionID: string; text: string }) => {
+            promptOpts = opts;
             recordEvaluationVerdict(opts.sessionID, {
               verdict: "ALLOW",
               risk_level: "LOW",
@@ -183,80 +147,46 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
             return { data: { parts: [] } };
           },
         },
-      };
+      } as unknown as OpenCodeSessionClient;
 
       const res = await classifyRequest({
         client: mockClient,
-        actionName: "bash",
+        actionName: "shell",
         actionArgs: { command: "ls" },
       });
 
       expect(res.verdict).toBe("ALLOW");
-      expect(createOpts.location).toBeDefined();
-      expect(typeof createOpts.location.directory).toBe("string");
-      expect(createOpts.body.location).toBeDefined();
-    });
-
-    it("falls back to v1 directory schema if v2 schema fails", async () => {
-      let attempts: any[] = [];
-      const mockClient = {
-        app: { agents: async () => ({ data: [] }) },
-        session: {
-          create: async (opts: any) => {
-            attempts.push(opts);
-            if (opts.location) {
-              throw new Error("Schema error: unknown key location");
-            }
-            return { data: { id: "ses_v1_fallback" } };
-          },
-          update: async () => ({}),
-          prompt: async (opts: any) => {
-            recordEvaluationVerdict(opts.sessionID, {
-              verdict: "BLOCK",
-              risk_level: "HIGH",
-              user_authorization: "NONE",
-              reason: "Unsafe",
-            });
-            return { data: { parts: [] } };
-          },
-        },
-      };
-
-      const res = await classifyRequest({
-        client: mockClient,
-        actionName: "bash",
-        actionArgs: { command: "rm -rf /" },
-      });
-
-      expect(res.verdict).toBe("BLOCK");
-      expect(attempts.length).toBe(2);
-      expect(attempts[1].directory).toBeDefined();
+      const loc = createOpts?.location as { directory?: string } | undefined;
+      expect(loc).toBeDefined();
+      expect(typeof loc?.directory).toBe("string");
+      expect(promptOpts?.sessionID).toBe("ses_v2_created");
+      expect(typeof promptOpts?.text).toBe("string");
     });
 
     it("falls back to direct HTTP API if client.session.create fails entirely", async () => {
       const origFetch = globalThis.fetch;
-      let fetchedUrls: string[] = [];
-      let fetchedBodies: any[] = [];
+      const fetchedUrls: string[] = [];
+      const fetchedBodies: Array<Record<string, unknown>> = [];
 
-      globalThis.fetch = (async (url: any, init: any) => {
+      globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
         fetchedUrls.push(String(url));
-        if (init?.body) {
-          fetchedBodies.push(JSON.parse(init.body));
+        if (typeof init?.body === "string") {
+          fetchedBodies.push(JSON.parse(init.body) as Record<string, unknown>);
         }
         return {
           ok: true,
           json: async () => ({ data: { id: "ses_http_api_123" } }),
-        };
-      }) as any;
+        } as Response;
+      }) as typeof fetch;
 
       const mockClient = {
-        app: { agents: async () => ({ data: [] }) },
+        agent: { list: async () => ({ data: [] }) },
         session: {
           create: async () => {
             throw new Error("Client session create completely broken");
           },
           update: async () => ({}),
-          prompt: async (opts: any) => {
+          prompt: async (opts: { sessionID: string }) => {
             recordEvaluationVerdict(opts.sessionID, {
               verdict: "ALLOW",
               reason: "Direct HTTP OK",
@@ -264,22 +194,22 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
             return { data: { parts: [] } };
           },
         },
-      };
+      } as unknown as OpenCodeSessionClient;
 
       try {
         const res = await classifyRequest({
           client: mockClient,
-          actionName: "bash",
+          actionName: "shell",
           actionArgs: { command: "pwd" },
           config: {
             serverUrl: "http://127.0.0.1:9999",
-          } as any,
+          } as unknown as AutoGateConfig,
         });
 
         expect(res.verdict).toBe("ALLOW");
         expect(fetchedUrls.length).toBeGreaterThan(0);
         expect(fetchedUrls[0]).toBe("http://127.0.0.1:9999/api/session");
-        expect(fetchedBodies[0].location).toBeDefined();
+        expect(fetchedBodies[0]?.location).toBeDefined();
       } finally {
         globalThis.fetch = origFetch;
       }

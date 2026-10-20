@@ -1,10 +1,12 @@
 import type { OpenCodeSessionClient } from "./types.js";
 
 interface MessageEntry {
+  type?: string;
   role?: string;
   info?: { role?: string };
+  text?: string;
   parts?: unknown[];
-  content?: string;
+  content?: unknown;
 }
 
 export class OpenCodePromptResolver {
@@ -21,36 +23,28 @@ export class OpenCodePromptResolver {
   }
 
   public async fetchLatestUserMessage(sessionID: string): Promise<string> {
-    let messages: unknown[] | undefined;
+    if (typeof this.client?.session?.context !== "function") return "";
     try {
-      if (typeof this.client?.session?.context === "function") {
-        const res = await this.client.session.context({ sessionID });
-        messages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data;
-      } else if (typeof this.client?.session?.messages === "function") {
-        const res = await this.client.session.messages({
-          sessionID,
-          path: { id: sessionID, sessionID },
-          query: { limit: 50 },
-        });
-        messages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data;
-      }
-    } catch {}
-
-    try {
+      const res = await this.client.session.context({ sessionID });
+      const messages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data;
       if (Array.isArray(messages) && messages.length > 0) {
         for (let i = messages.length - 1; i >= 0; i--) {
           const item = messages[i];
           if (!item || typeof item !== "object") continue;
           const m = item as MessageEntry;
-          const role = m.info?.role ?? m.role ?? (m as { type?: string }).type;
+          const role = m.type ?? m.info?.role ?? m.role;
           if (role === "user") {
-            const parts = m.parts || (m.content ? [m.content] : []);
             let text = "";
-            if (typeof (m as { text?: unknown }).text === "string") {
-              text = (m as { text: string }).text;
+            if (typeof m.text === "string") {
+              text = m.text;
             } else if (typeof m.content === "string" && !m.parts) {
               text = m.content;
-            } else if (Array.isArray(parts)) {
+            } else {
+              const parts = Array.isArray(m.parts)
+                ? m.parts
+                : Array.isArray(m.content)
+                  ? m.content
+                  : [];
               text = parts
                 .filter(
                   (p: unknown): p is string | { text: string } =>
@@ -120,10 +114,7 @@ export class OpenCodePromptResolver {
         parentID = this.sessionParentCache.get(sessionID);
       }
       if (this.client?.session?.get) {
-        const sessionRes = await this.client.session.get({
-          sessionID,
-          path: { id: sessionID, sessionID },
-        });
+        const sessionRes = await this.client.session.get({ sessionID });
         const data = sessionRes?.data ?? sessionRes;
         if (data?.parentID) {
           parentID = data.parentID;
@@ -164,10 +155,7 @@ export class OpenCodePromptResolver {
       try {
         let parentData: Record<string, unknown> | null = null;
         if (this.client?.session?.get) {
-          const res = await this.client.session.get({
-            sessionID: iterID,
-            path: { id: iterID, sessionID: iterID },
-          });
+          const res = await this.client.session.get({ sessionID: iterID });
           parentData = res?.data ?? res;
         }
         rootSessionID = iterID;

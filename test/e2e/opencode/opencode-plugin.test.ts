@@ -4,12 +4,12 @@ import os from "node:os";
 import fs from "node:fs";
 import { createMockOpenCodeClient, createMockPluginContext } from "./mock-opencode";
 import {
-  AutoGatePlugin,
   plugin as OpenCodePluginExport,
   isEvaluationSession,
   evaluationSessions,
   isEventForWorkspace,
 } from "@autogate/opencode";
+import { AutoGatePlugin } from "@autogate/opencode1";
 import { sharedRecentlyRejected, sharedExplicitEscalations } from "@autogate/core";
 
 describe("AutoGate OpenCode Plugin Integration", () => {

@@ -5,7 +5,6 @@ import * as crypto from "crypto";
 import type {
   ClassifierResult,
   ClassifierVerdict,
-  ClassifyInput,
   RiskLevel,
   UserAuthorization,
   GateEvaluator,
@@ -88,39 +87,32 @@ export function clearEvaluationSession(sessionID: string): void {
 }
 
 async function notifyOpenChamberArchive(sessionID: string): Promise<void> {
-  const targets = [
-    { port: 14096, dirName: "openchamber" },
-    { port: 14097, dirName: "openchamber1" },
-    { port: 14097, dirName: "openchamber2" },
-  ];
-  for (const { port, dirName } of targets) {
-    const secretFile = path.join(os.homedir(), ".config", dirName, "jwt-secret");
-    if (!fs.existsSync(secretFile)) continue;
+  const secretFile = path.join(os.homedir(), ".config", "openchamber", "jwt-secret");
+  if (!fs.existsSync(secretFile)) return;
 
-    try {
-      const secret = fs.readFileSync(secretFile, "utf8").trim();
-      if (!secret) continue;
+  try {
+    const secret = fs.readFileSync(secretFile, "utf8").trim();
+    if (!secret) return;
 
-      const header = { alg: "HS256", typ: "JWT" };
-      const nowSec = Math.floor(Date.now() / 1000);
-      const payload = { type: "ui-session", iat: nowSec, exp: nowSec + 3600 };
-      const encHeader = Buffer.from(JSON.stringify(header)).toString("base64url");
-      const encPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
-      const data = `${encHeader}.${encPayload}`;
-      const sig = crypto.createHmac("sha256", secret).update(data).digest("base64url");
-      const token = `${data}.${sig}`;
+    const header = { alg: "HS256", typ: "JWT" };
+    const nowSec = Math.floor(Date.now() / 1000);
+    const payload = { type: "ui-session", iat: nowSec, exp: nowSec + 3600 };
+    const encHeader = Buffer.from(JSON.stringify(header)).toString("base64url");
+    const encPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const data = `${encHeader}.${encPayload}`;
+    const sig = crypto.createHmac("sha256", secret).update(data).digest("base64url");
+    const token = `${data}.${sig}`;
 
-      await fetch(`http://localhost:${port}/api/openchamber/sessions/archive`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Cookie: `oc_ui_session_${port}=${token}`,
-        },
-        body: JSON.stringify({ ids: [sessionID], archivedAt: Date.now() }),
-        signal: AbortSignal.timeout(2000),
-      }).catch(() => null);
-    } catch {}
-  }
+    await fetch("http://localhost:14096/api/openchamber/sessions/archive", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `oc_ui_session_14096=${token}`,
+      },
+      body: JSON.stringify({ ids: [sessionID], archivedAt: Date.now() }),
+      signal: AbortSignal.timeout(2000),
+    }).catch(() => null);
+  } catch {}
 }
 
 export async function archiveEvaluationSession(
@@ -129,34 +121,26 @@ export async function archiveEvaluationSession(
   actionName: string,
   verdict: string,
 ): Promise<void> {
-  const archivePayload = {
-    title: `[auto-gate-eval] ${actionName} -> ${verdict}`,
-    time: {
-      archived: Date.now(),
-    },
-  };
+  const title = `[auto-gate-eval] ${actionName} -> ${verdict}`;
   if (client?.session && typeof client.session.update === "function") {
-    const updateFn = client.session.update.bind(client.session);
-    await updateFn({
-      sessionID,
-      title: archivePayload.title,
-      path: { id: sessionID, sessionID },
-      body: archivePayload,
-    }).catch(() => {});
+    await client.session
+      .update({
+        sessionID,
+        title,
+      })
+      .catch(() => {});
   }
 
   await notifyOpenChamberArchive(sessionID);
 
   try {
-    for (const dirName of ["openchamber", "openchamber1", "openchamber2"]) {
-      const ocArchive = path.join(os.homedir(), ".config", dirName, "sessions-archive.json");
-      if (fs.existsSync(ocArchive)) {
-        const raw = fs.readFileSync(ocArchive, "utf8");
-        const parsed = JSON.parse(raw);
-        if (!parsed[sessionID]) {
-          parsed[sessionID] = Date.now();
-          fs.writeFileSync(ocArchive, JSON.stringify(parsed));
-        }
+    const ocArchive = path.join(os.homedir(), ".config", "openchamber", "sessions-archive.json");
+    if (fs.existsSync(ocArchive)) {
+      const raw = fs.readFileSync(ocArchive, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, number>;
+      if (!parsed[sessionID]) {
+        parsed[sessionID] = Date.now();
+        fs.writeFileSync(ocArchive, JSON.stringify(parsed));
       }
     }
   } catch {}
@@ -178,13 +162,15 @@ export function ensureSandboxDirectory(): string {
 export function parseModelRef(modelRef?: string): {
   providerID: string;
   modelID: string;
-  provider?: string;
-  model?: string;
+  variant?: string;
 } {
   const ref = modelRef?.trim() || "google/gemini-3.5-flash-lite";
   const slashIdx = ref.indexOf("/");
   const providerID = slashIdx > 0 ? ref.slice(0, slashIdx) : "google";
-  let modelID = slashIdx > 0 ? ref.slice(slashIdx + 1) : ref;
+  const rest = slashIdx > 0 ? ref.slice(slashIdx + 1) : ref;
+  const hashIdx = rest.indexOf("#");
+  let modelID = hashIdx > 0 ? rest.slice(0, hashIdx) : rest;
+  const variant = hashIdx > 0 ? rest.slice(hashIdx + 1) : undefined;
   modelID = modelID
     .replace(/\.flash/gi, "-flash")
     .replace(/\.lite/gi, "-lite")
@@ -192,41 +178,26 @@ export function parseModelRef(modelRef?: string): {
   return {
     providerID,
     modelID,
-    provider: providerID,
-    model: modelID,
+    ...(variant ? { variant } : {}),
   };
 }
-
-export const PASSIVE_EVALUATOR_DIRECTIVE =
-  "CRITICAL: You are an isolated security evaluation judge. Your ONLY tool is classify_result. You must NEVER execute the command, run bash, edit files, or perform any operational action. Immediately invoke classify_result and stop.";
-
-export const EVAL_SESSION_TOOLS = {
-  subagent: false,
-  shell: false,
-  task: false,
-  read: false,
-  glob: false,
-  grep: false,
-  bash: false,
-  edit: false,
-  write: false,
-  question: false,
-  classify_result: true,
-  "*": false,
-};
 
 let cachedEvalAgent: string | undefined;
 
 export async function resolveEvaluationAgent(client?: OpenCodeSessionClient): Promise<string> {
   if (cachedEvalAgent) return cachedEvalAgent;
   try {
-    const res = await client?.app?.agents?.();
-    const agents = res?.data ?? [];
+    const res = await client?.agent?.list?.();
+    const agents = Array.isArray(res) ? res : (res?.data ?? []);
     if (
       Array.isArray(agents) &&
       agents.length > 0 &&
       !agents.some(
-        (a) => typeof a === "object" && a !== null && "name" in a && a.name === "auto-gate-eval",
+        (a) =>
+          typeof a === "object" &&
+          a !== null &&
+          (("id" in a && a.id === "auto-gate-eval") ||
+            ("name" in a && a.name === "auto-gate-eval")),
       )
     ) {
       cachedEvalAgent = "build";
@@ -265,7 +236,6 @@ function extractToolInput(part: Record<string, unknown>): Record<string, unknown
 export function extractVerdictFromParts(partsList: readonly unknown[]): ClassifierResult | null {
   if (!Array.isArray(partsList) || partsList.length === 0) return null;
 
-  // 1. First scan for classify_result tool call
   for (const part of partsList) {
     if (part && typeof part === "object") {
       const p = part as Record<string, unknown>;
@@ -274,7 +244,7 @@ export function extractVerdictFromParts(partsList: readonly unknown[]): Classifi
           ? (p.function as Record<string, unknown>)
           : undefined;
       const isToolCall =
-        (p.type === "tool" && p.tool === "classify_result") ||
+        (p.type === "tool" && (p.tool === "classify_result" || p.name === "classify_result")) ||
         (p.type === "tool_use" && p.name === "classify_result") ||
         p.tool === "classify_result" ||
         p.name === "classify_result" ||
@@ -308,7 +278,6 @@ export function extractVerdictFromParts(partsList: readonly unknown[]): Classifi
     }
   }
 
-  // 2. Scan for text parts containing a valid JSON verdict
   let textContent = "";
   for (const part of partsList) {
     if (part && typeof part === "object") {
@@ -347,53 +316,38 @@ export async function extractVerdictFromSession(
     return currentResult;
   }
 
-  let allMessages: unknown[] = [];
   if (typeof client?.session?.context === "function") {
     try {
       const res = await client.session.context({ sessionID });
-      allMessages = Array.isArray(res) ? res : (res as { data?: unknown[] })?.data || [];
-    } catch {}
-  } else if (typeof client?.session?.messages === "function") {
-    try {
-      const msgsRes = await client.session
-        .messages({ path: { id: sessionID, sessionID }, query: { limit: 50 } })
-        .catch(async () => {
-          return client.session.messages({ sessionID, query: { limit: 50 } }).catch(() => null);
-        });
-      const resObj = (msgsRes && typeof msgsRes === "object" ? msgsRes : {}) as Record<
-        string,
-        unknown
-      >;
-      allMessages = Array.isArray(msgsRes)
-        ? msgsRes
-        : Array.isArray(resObj.data)
-          ? resObj.data
-          : [];
-    } catch {}
-  }
+      const allMessages: unknown[] = Array.isArray(res)
+        ? res
+        : (res as { data?: unknown[] })?.data || [];
 
-  if (allMessages.length > 0) {
-    for (let i = allMessages.length - 1; i >= 0; i--) {
-      const msg = allMessages[i];
-      const m = (msg && typeof msg === "object" ? msg : {}) as {
-        parts?: unknown[];
-        content?: unknown;
-        tool_calls?: unknown[];
-      };
-      const parts = [
-        ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
-        ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
-        ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
-      ];
-      const result = extractVerdictFromParts(parts);
-      if (result) {
-        return result;
+      if (allMessages.length > 0) {
+        for (let i = allMessages.length - 1; i >= 0; i--) {
+          const msg = allMessages[i];
+          const m = (msg && typeof msg === "object" ? msg : {}) as {
+            parts?: unknown[];
+            content?: unknown;
+            tool_calls?: unknown[];
+          };
+          const parts = [
+            ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
+            ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
+            ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
+          ];
+          const result = extractVerdictFromParts(parts);
+          if (result) {
+            return result;
+          }
+        }
       }
-    }
+    } catch {}
   }
 
   return null;
 }
+
 export function resetCachedEvaluationAgent(): void {
   cachedEvalAgent = undefined;
 }
@@ -407,12 +361,17 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
   }
   const client = input.client;
 
-  // Entry
   const sandboxDir = ensureSandboxDirectory();
   const userPrompt = input.userPrompt ?? "";
   const subagentPrompt = input.subagentPrompt;
-  const actionName = input.actionName ?? input.request?.permission ?? "permission";
-  const actionArgs = input.actionArgs ?? input.request?.patterns ?? input.request?.metadata ?? {};
+  const actionName =
+    input.actionName ?? input.request?.action ?? input.request?.permission ?? "permission";
+  const actionArgs =
+    input.actionArgs ??
+    input.request?.resources ??
+    input.request?.patterns ??
+    input.request?.metadata ??
+    {};
   const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
 
   const evalAgent = await resolveEvaluationAgent(client);
@@ -424,84 +383,42 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         title: evalTitle,
         agent: evalAgent,
         location: { directory: sandboxDir },
-        body: {
-          title: evalTitle,
-          agent: evalAgent,
-          location: { directory: sandboxDir },
-        },
       });
     } catch {}
-
-    if (!sessionRes?.data?.id && !sessionRes?.id) {
-      try {
-        sessionRes = await input.client.session.create({
-          body: {
-            title: evalTitle,
-            directory: sandboxDir,
-            agent: evalAgent,
-          },
-          title: evalTitle,
-          directory: sandboxDir,
-          agent: evalAgent,
-        });
-      } catch {}
-    }
-
-    if (!sessionRes?.data?.id && !sessionRes?.id) {
-      try {
-        sessionRes = await input.client.session.create({
-          title: evalTitle,
-          agent: evalAgent,
-          body: { title: evalTitle, agent: evalAgent },
-        });
-      } catch {}
-    }
   }
 
-  // Fallback to direct HTTP API if client method was unavailable or did not return an ID
   if (!sessionRes?.data?.id && !sessionRes?.id) {
     const cfg = input.config;
     const serverUrl =
       cfg?.serverUrl ||
-      input.client?.serverUrl ||
+      client.serverUrl ||
       process.env.OPENCODE_SERVER_URL ||
-      (process.env.OPENCODE_CONFIG_DIR?.includes("opencode1") ||
-      process.env.OPENCODE_CONFIG_DIR?.includes("opencode2") ||
-      (!fs.existsSync(path.join(os.homedir(), ".config", "opencode", "service.json")) &&
-        fs.existsSync(path.join(os.homedir(), ".config", "opencode2", "service.json")))
-        ? "http://localhost:4097"
-        : "http://localhost:4096");
-    const password = resolveServerPassword(
-      typeof cfg?.opencode?.serverUrl === "string" ? undefined : undefined,
-    );
+      "http://localhost:4096";
+    const password = resolveServerPassword();
     const authHeader = password
       ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
       : "";
-    const urls = [`${serverUrl}/api/session`, `${serverUrl}/session`];
-    for (const url of urls) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(authHeader ? { Authorization: authHeader } : {}),
-          },
-          body: JSON.stringify({
-            title: evalTitle,
-            agent: evalAgent,
-            location: { directory: sandboxDir },
-          }),
-          signal: AbortSignal.timeout(5000),
-        });
-        if (res.ok) {
-          const json: unknown = await res.json();
-          if (json && typeof json === "object" && ("data" in json || "id" in json)) {
-            sessionRes = json as { data?: { id?: string }; id?: string };
-            break;
-          }
+    try {
+      const res = await fetch(`${serverUrl}/api/session`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authHeader ? { Authorization: authHeader } : {}),
+        },
+        body: JSON.stringify({
+          title: evalTitle,
+          agent: evalAgent,
+          location: { directory: sandboxDir },
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const json: unknown = await res.json();
+        if (json && typeof json === "object" && ("data" in json || "id" in json)) {
+          sessionRes = json as { data?: { id?: string }; id?: string };
         }
-      } catch {}
-    }
+      }
+    } catch {}
   }
 
   const sessionID = sessionRes?.data?.id ?? sessionRes?.id;
@@ -532,11 +449,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
       timeoutId = setTimeout(() => {
         try {
-          if (typeof input.client?.session?.interrupt === "function") {
-            input.client.session.interrupt({ sessionID, resume: false }).catch(() => {});
-          } else {
-            input.client?.session?.abort?.({ path: { id: sessionID } })?.catch(() => {});
-          }
+          client.session.interrupt?.({ sessionID, resume: false })?.catch(() => {});
         } catch {}
         resolve({
           verdict: "UNSURE",
@@ -545,35 +458,17 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       }, timeoutMs);
     });
 
-    const modelRef = parseModelRef(input.model ?? input.config?.classifierModel);
-    const promptOpts = {
-      sessionID,
-      text: userPromptText,
-      path: { id: sessionID, sessionID },
-      body: {
-        agent: evalAgent,
-        model: {
-          providerID: modelRef.providerID,
-          modelID: modelRef.modelID,
-        },
-        tools: { ...EVAL_SESSION_TOOLS },
-        system: PASSIVE_EVALUATOR_DIRECTIVE,
-        parts: [
-          {
-            type: "text",
-            text: userPromptText,
-          },
-        ],
-      },
-    };
-    const promptPromise = client.session.prompt(promptOpts).then(async (res) => {
-      if (typeof client.session.wait === "function") {
-        await client.session
-          .wait({ sessionID, path: { id: sessionID, sessionID } })
-          .catch(() => {});
-      }
-      return res;
-    });
+    const promptPromise = client.session
+      .prompt({
+        sessionID,
+        text: userPromptText,
+      })
+      .then(async (res) => {
+        if (typeof client.session.wait === "function") {
+          await client.session.wait({ sessionID }).catch(() => {});
+        }
+        return res;
+      });
 
     promptPromise
       .then(async (promptRes) => {
@@ -612,33 +507,14 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
           attempts++;
           const repromptText =
             "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
-          const repromptOpts = {
-            sessionID,
-            text: repromptText,
-            path: { id: sessionID, sessionID },
-            body: {
-              agent: evalAgent,
-              model: {
-                providerID: modelRef.providerID,
-                modelID: modelRef.modelID,
-              },
-              tools: { ...EVAL_SESSION_TOOLS },
-              system: PASSIVE_EVALUATOR_DIRECTIVE,
-              parts: [
-                {
-                  type: "text",
-                  text: repromptText,
-                },
-              ],
-            },
-          };
           const repromptRes = await client.session
-            .prompt(repromptOpts)
+            .prompt({
+              sessionID,
+              text: repromptText,
+            })
             .then(async (res) => {
               if (typeof client.session.wait === "function") {
-                await client.session
-                  .wait({ sessionID, path: { id: sessionID, sessionID } })
-                  .catch(() => {});
+                await client.session.wait({ sessionID }).catch(() => {});
               }
               return res;
             })

@@ -2,12 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import {
-  resolveServerPassword,
-  isEventForWorkspace,
-  plugin,
-  AutoGatePlugin,
-} from "../src/index.js";
+import { resolveServerPassword, isEventForWorkspace, plugin } from "../src/index.js";
 
 describe("@autogate/opencode resolveServerPassword", () => {
   const origEnv = { ...process.env };
@@ -95,7 +90,12 @@ describe("@autogate/opencode resolveServerPassword", () => {
     );
     process.env.XDG_CONFIG_HOME = xdgDir;
 
-    expect(resolveServerPassword()).toBe("xdg-password");
+    const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
+    try {
+      expect(resolveServerPassword()).toBe("xdg-password");
+    } finally {
+      homedirSpy.mockRestore();
+    }
   });
 
   it("returns empty string when no env var and no service.json exists", () => {
@@ -168,24 +168,6 @@ describe("@autogate/opencode runtime agent injection", () => {
       expect(String(evalAgent?.system ?? "").length).toBeGreaterThan(100);
     } finally {
       if (typeof cleanup === "function") await cleanup();
-    }
-  });
-
-  it("registers auto-gate-eval via config() hook in OpenCode v1 server plugin", async () => {
-    const hooks = await AutoGatePlugin({ directory: "/tmp/test-ws-v1", client: {} } as any, {
-      classifierModel: "google/gemini-3.5-flash-lite",
-      ntfyServer: "http://127.0.0.1:59999",
-    });
-
-    try {
-      const configData: Record<string, any> = {};
-      await (hooks as any).config(configData);
-      expect(configData.agent?.["auto-gate-eval"]).toBeDefined();
-      expect(configData.agent["auto-gate-eval"].mode).toBe("subagent");
-      expect(configData.agent["auto-gate-eval"].hidden).toBe(true);
-      expect(typeof configData.agent["auto-gate-eval"].prompt).toBe("string");
-    } finally {
-      if (typeof hooks.dispose === "function") await (hooks as any).dispose();
     }
   });
 });

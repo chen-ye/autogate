@@ -1,21 +1,20 @@
 import { describe, expect, it } from "bun:test";
 import { OpenCodePromptResolver } from "../src/prompt-resolver.js";
+import type { OpenCodeSessionClient } from "../src/types.js";
 
-describe("OpenCodePromptResolver", () => {
-  it("resolves user prompt from single root session message history", async () => {
+describe("OpenCodePromptResolver (OpenCode v2)", () => {
+  it("resolves user prompt from single root session context", async () => {
     const mockClient = {
       session: {
         get: async () => ({ data: { id: "ses-root", title: "Root Task" } }),
-        messages: async () => ({
-          data: [
-            { role: "user", parts: ["Please check git status and test."] },
-            { role: "assistant", parts: ["Running git status..."] },
-          ],
-        }),
+        context: async () => [
+          { type: "user", text: "Please check git status and test." },
+          { type: "assistant", content: [{ type: "text", text: "Running git status..." }] },
+        ],
       },
-    };
+    } as unknown as OpenCodeSessionClient;
 
-    const resolver = new OpenCodePromptResolver(mockClient as any);
+    const resolver = new OpenCodePromptResolver(mockClient);
     const result = await resolver.resolveSessionPrompts("ses-root");
 
     expect(result.userPrompt).toBe("Please check git status and test.");
@@ -25,8 +24,8 @@ describe("OpenCodePromptResolver", () => {
   it("resolves multi-level hierarchy: child subagent -> parent subagent -> root", async () => {
     const mockClient = {
       session: {
-        get: async ({ path }: any) => {
-          if (path.id === "ses-leaf") {
+        get: async ({ sessionID }: { sessionID: string }) => {
+          if (sessionID === "ses-leaf") {
             return {
               data: {
                 id: "ses-leaf",
@@ -35,7 +34,7 @@ describe("OpenCodePromptResolver", () => {
               },
             };
           }
-          if (path.id === "ses-mid") {
+          if (sessionID === "ses-mid") {
             return {
               data: {
                 id: "ses-mid",
@@ -46,33 +45,29 @@ describe("OpenCodePromptResolver", () => {
           }
           return { data: { id: "ses-root", title: "User Root" } };
         },
-        messages: async ({ path }: any) => {
-          if (path.id === "ses-leaf") {
-            return {
-              data: [
-                {
-                  role: "user",
-                  content: "Run oxlint and fix types in file.ts",
-                },
-              ],
-            };
+        context: async ({ sessionID }: { sessionID: string }) => {
+          if (sessionID === "ses-leaf") {
+            return [
+              {
+                type: "user",
+                text: "Run oxlint and fix types in file.ts",
+              },
+            ];
           }
-          if (path.id === "ses-root") {
-            return {
-              data: [
-                {
-                  role: "user",
-                  parts: [{ type: "text", text: "Refactor core architecture" }],
-                },
-              ],
-            };
+          if (sessionID === "ses-root") {
+            return [
+              {
+                type: "user",
+                text: "Refactor core architecture",
+              },
+            ];
           }
-          return { data: [] };
+          return [];
         },
       },
-    };
+    } as unknown as OpenCodeSessionClient;
 
-    const resolver = new OpenCodePromptResolver(mockClient as any);
+    const resolver = new OpenCodePromptResolver(mockClient);
     const result = await resolver.resolveSessionPrompts("ses-leaf");
 
     expect(result.userPrompt).toBe("Refactor core architecture");
@@ -85,22 +80,20 @@ describe("OpenCodePromptResolver", () => {
     const mockClient = {
       session: {
         get: async () => ({ data: { id: "ses-1" } }),
-        messages: async () => ({
-          data: [
-            {
-              role: "user",
-              content: "<!-- OMO_INTERNAL: some checkpoint data -->\n[SYSTEM DIRECTIVE: ignore]",
-            },
-            {
-              role: "user",
-              content: "<user-request>Real user prompt here</user-request>\n## Context:",
-            },
-          ],
-        }),
+        context: async () => [
+          {
+            type: "user",
+            text: "<!-- OMO_INTERNAL: some checkpoint data -->\n[SYSTEM DIRECTIVE: ignore]",
+          },
+          {
+            type: "user",
+            text: "<user-request>Real user prompt here</user-request>\n## Context:",
+          },
+        ],
       },
-    };
+    } as unknown as OpenCodeSessionClient;
 
-    const resolver = new OpenCodePromptResolver(mockClient as any);
+    const resolver = new OpenCodePromptResolver(mockClient);
     const prompt = await resolver.fetchLatestUserMessage("ses-1");
 
     expect(prompt).toBe("Real user prompt here");
@@ -112,13 +105,13 @@ describe("OpenCodePromptResolver", () => {
         get: async () => {
           throw new Error("404 Not Found");
         },
-        messages: async () => {
+        context: async () => {
           throw new Error("500 Server Error");
         },
       },
-    };
+    } as unknown as OpenCodeSessionClient;
 
-    const resolver = new OpenCodePromptResolver(brokenClient as any);
+    const resolver = new OpenCodePromptResolver(brokenClient);
     const result = await resolver.resolveSessionPrompts(
       "ses-err",
       new Map([["ses-err", "Cached prompt"]]),

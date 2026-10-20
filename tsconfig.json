@@ -28,6 +28,12 @@
       ],
       "@autogate/opencode/*": [
         "./packages/opencode/src/*"
+      ],
+      "@autogate/opencode1": [
+        "./packages/opencode1/src/index.ts"
+      ],
+      "@autogate/opencode1/*": [
+        "./packages/opencode1/src/*"
       ]
     }
   },
