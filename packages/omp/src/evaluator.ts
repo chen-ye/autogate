@@ -36,6 +36,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
   private classifierTimeout?: number;
   private logger?: OmpLogger;
   private evalLogFile?: string;
+  private suppressEvalLog?: boolean;
 
   constructor(
     arg1?: (() => unknown) | unknown | OmpEvaluatorOptions,
@@ -60,6 +61,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
       this.getCtx = opts.getCtx;
       this.logger = opts.logger;
       this.evalLogFile = opts.evalLogFile;
+      this.suppressEvalLog = opts.suppressEvalLog;
     } else if (typeof arg1 === "function") {
       this.getCtx = arg1 as () => unknown;
       this.fallbackModel = arg2;
@@ -122,6 +124,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
   }
 
   private async appendEvalLog(entry: Record<string, unknown>): Promise<void> {
+    if (this.suppressEvalLog) return;
     const targetFile =
       this.evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
     try {
@@ -438,6 +441,23 @@ export class OmpNativeEvaluator implements GateEvaluator {
         respObj.usage && typeof respObj.usage === "object" ? respObj.usage : {}
       ) as Record<string, unknown>;
 
+      const evalMetadata = this.suppressEvalLog
+        ? {
+            model: {
+              id: typeof modelObj.id === "string" ? modelObj.id : undefined,
+              provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
+            },
+            inference: {
+              durationMs,
+              promptTokens: typeof respUsage.input === "number" ? respUsage.input : undefined,
+              outputTokens: typeof respUsage.output === "number" ? respUsage.output : undefined,
+              reasoningTokens,
+              thinking,
+              attempts,
+            },
+          }
+        : undefined;
+
       if (!validResult) {
         this.appendEvalLog({
           timestamp: new Date().toISOString(),
@@ -469,6 +489,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         return {
           verdict: "UNSURE",
           reason: "Model failed to invoke classify_result tool call after retries",
+          ...(evalMetadata ? { metadata: evalMetadata } : {}),
         };
       }
 
@@ -507,7 +528,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         reason: validResult.reason,
       });
 
-      return validResult;
+      return evalMetadata ? { ...validResult, metadata: evalMetadata } : validResult;
     } catch (err: unknown) {
       const durationMs = Math.round(performance.now() - startTime);
       const isTimeout = timeoutSignal.aborted;
@@ -522,29 +543,31 @@ export class OmpNativeEvaluator implements GateEvaluator {
 
       const modelObj = (model && typeof model === "object" ? model : {}) as Record<string, unknown>;
 
-      this.appendEvalLog({
-        timestamp: new Date().toISOString(),
-        action: {
-          id: action.id,
-          toolName: action.toolName,
-          command: action.commandString,
-          targetPath: action.targetPath,
-          sessionID: sessionId,
-        },
-        model: {
-          id: typeof modelObj.id === "string" ? modelObj.id : undefined,
-          provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
-        },
-        inference: {
-          durationMs,
-          attempts: typeof attempts !== "undefined" ? attempts : 0,
-        },
-        decision: {
-          verdict: "UNSURE",
-          reason: errorMsg,
-        },
-        error: errorMsg,
-      }).catch(() => {});
+      if (!(action.signal?.aborted && !isTimeout)) {
+        this.appendEvalLog({
+          timestamp: new Date().toISOString(),
+          action: {
+            id: action.id,
+            toolName: action.toolName,
+            command: action.commandString,
+            targetPath: action.targetPath,
+            sessionID: sessionId,
+          },
+          model: {
+            id: typeof modelObj.id === "string" ? modelObj.id : undefined,
+            provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
+          },
+          inference: {
+            durationMs,
+            attempts: typeof attempts !== "undefined" ? attempts : 0,
+          },
+          decision: {
+            verdict: "UNSURE",
+            reason: errorMsg,
+          },
+          error: errorMsg,
+        }).catch(() => {});
+      }
 
       if (combinedSignal.aborted) {
         return {

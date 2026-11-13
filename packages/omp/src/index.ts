@@ -1,11 +1,8 @@
 import {
   AutoGateCoreEngine,
   NtfyAdapter,
-  DirectApiEvaluator,
   loadConfig,
   type HarnessAdapter,
-  type GateAction,
-  type GateDecision,
   type GateEvaluator,
   type ReviewFallbackMode,
 } from "@autogate/core";
@@ -25,11 +22,14 @@ export class OmpHarnessAdapter implements HarnessAdapter {
   readonly name = "omp-harness";
   private engine: AutoGateCoreEngine;
   private evaluator: GateEvaluator;
+  private nativeEvaluator?: OmpNativeEvaluator;
+  private evalLogFile?: string;
   private currentCtx: OmpContext | null = null;
 
   constructor(pi: unknown, options?: Record<string, unknown>) {
     const config = loadConfig(options);
     const optObj = isRecord(options) ? options : undefined;
+    this.evalLogFile = config.evalLogFile;
     const fallbackMode: ReviewFallbackMode =
       (typeof optObj?.reviewFallbackMode === "string" &&
       (optObj.reviewFallbackMode === "native" || optObj.reviewFallbackMode === "ntfy")
@@ -44,9 +44,15 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       token: config.ntfyToken,
     });
     const piObj = (pi && typeof pi === "object" ? pi : {}) as { logger?: OmpLogger };
-    this.evaluator =
-      (optObj?.evaluator as GateEvaluator | undefined) ??
-      new OmpNativeEvaluator({
+
+    let evaluator: GateEvaluator;
+    if (optObj?.evaluator) {
+      evaluator = optObj.evaluator as GateEvaluator;
+      if (evaluator instanceof OmpNativeEvaluator) {
+        this.nativeEvaluator = evaluator;
+      }
+    } else {
+      const nativeEval = new OmpNativeEvaluator({
         getCtx: () => this.currentCtx,
         model: optObj?.classifierModel || config.classifierModel,
         apiKey:
@@ -54,21 +60,29 @@ export class OmpHarnessAdapter implements HarnessAdapter {
         logger: piObj.logger,
         classifierTimeout: config.classifierTimeout,
         evalLogFile: config.evalLogFile,
+        suppressEvalLog: Boolean(config.systemOne?.enabled),
       });
+      this.nativeEvaluator = nativeEval;
+      evaluator = nativeEval;
+    }
+
+    this.evaluator = evaluator;
     this.engine = new AutoGateCoreEngine({
       config,
       adapter,
-      evaluator: this.evaluator,
+      evaluator,
       remoteReviewEnabled: fallbackMode !== "native",
     });
+  }
+
+  public getEvalLogFile(): string | undefined {
+    return this.evalLogFile;
   }
 
   setContext(ctx: OmpContext) {
     if (ctx) {
       this.currentCtx = ctx;
-      if (this.evaluator instanceof OmpNativeEvaluator) {
-        this.evaluator.setContext(ctx);
-      }
+      this.nativeEvaluator?.setContext(ctx);
     }
   }
   setFallbackMode(mode: ReviewFallbackMode): void {
@@ -270,7 +284,13 @@ export default function autoGateOmpExtension(
     }
   });
 
-  registerToolCallHook(pi, engine, verdictStore, (ctx) => adapter.setContext(ctx));
+  registerToolCallHook(
+    pi,
+    engine,
+    verdictStore,
+    (ctx) => adapter.setContext(ctx),
+    adapter.getEvalLogFile(),
+  );
   registerAutogateClassifierCommand(pi, engine);
   registerAutogateFallbackCommand(pi, engine);
   registerEscalatePermissionTool(pi, engine);

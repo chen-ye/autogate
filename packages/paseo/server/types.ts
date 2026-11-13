@@ -24,6 +24,9 @@ export interface PaseoAgentInstance {
     append?(item: PaseoTimelineItem): Promise<unknown>;
   };
   send?(message: unknown): Promise<unknown>;
+  abort?(): Promise<unknown> | void;
+  stop?(): Promise<unknown> | void;
+  cancel?(): Promise<unknown> | void;
   waitFinish?(options?: {
     timeoutMs?: number;
   }): Promise<{ text?: string; content?: unknown; [key: string]: unknown }>;

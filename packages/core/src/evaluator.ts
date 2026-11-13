@@ -88,46 +88,51 @@ export class DirectApiEvaluator implements GateEvaluator {
       const fetchFn = opts.fetchImpl ?? fetch;
       const timeoutMs = opts.timeoutMs ?? 45000;
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-      try {
-        const response = await fetchFn(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": apiKey,
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: promptText,
-                  },
-                ],
-              },
-            ],
-            generationConfig: {
-              responseMimeType: "application/json",
-              responseSchema: CLASSIFIER_JSON_SCHEMA,
-            },
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => response.statusText);
-          throw new Error(`HTTP error ${response.status}: ${errorText}`);
-        }
-
-        const data: unknown = await response.json();
-        const candidateText = extractCandidateTextFromResponse(data);
-
-        return parseVerdict(candidateText);
-      } finally {
-        clearTimeout(timeoutId);
+      if (action.signal?.aborted) {
+        return {
+          verdict: "UNSURE",
+          reason: "DirectApiEvaluator error: Evaluation aborted by signal",
+        };
       }
+
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const combinedSignal = action.signal
+        ? AbortSignal.any([action.signal, timeoutSignal])
+        : timeoutSignal;
+
+      const response = await fetchFn(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: promptText,
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: CLASSIFIER_JSON_SCHEMA,
+          },
+        }),
+        signal: combinedSignal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => response.statusText);
+        throw new Error(`HTTP error ${response.status}: ${errorText}`);
+      }
+
+      const data: unknown = await response.json();
+      const candidateText = extractCandidateTextFromResponse(data);
+
+      return parseVerdict(candidateText);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return {

@@ -13,6 +13,7 @@ import {
   type HarnessAdapter,
   type PermissionEventData,
   type GateAction,
+  type GateEvaluator,
   type AutoGateConfig,
 } from "@autogate/core";
 import {
@@ -20,6 +21,7 @@ import {
   isEvaluationSession,
   recordEvaluationVerdict,
   evaluationSessions,
+  logEvaluationDecision,
 } from "./evaluator.js";
 import { OpenCodeV1PromptResolver } from "./prompt-resolver.js";
 import type { OpenCodeV1SessionClient, OpenCodeV1Event } from "./types.js";
@@ -113,10 +115,13 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
 
     const client = ctx.client as unknown as OpenCodeV1SessionClient;
     this.promptResolver = new OpenCodeV1PromptResolver(client);
+    const evaluator =
+      (options?.evaluator as GateEvaluator | undefined) ??
+      new OpenCodeV1SessionEvaluator(client, config);
     this.engine = new AutoGateCoreEngine({
       config,
       adapter,
-      evaluator: new OpenCodeV1SessionEvaluator(client, config),
+      evaluator,
       workspaceRoot,
       remoteReviewEnabled: true,
     });
@@ -179,6 +184,7 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
       this.engine.setUserPrompt(sessionID, resolvedPrompts.userPrompt);
     }
 
+    const signal = (request as { signal?: AbortSignal }).signal;
     const action: GateAction = {
       id: (request.id as string) || Math.random().toString(36).slice(2),
       harness: (request.harness as string) || "opencode",
@@ -193,8 +199,33 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
       subagentPrompt: resolvedPrompts.subagentPrompt,
       environment: this.config.environment,
       metadata: request.metadata,
+      ...(signal ? { signal } : {}),
     };
+    const evalStartTime = Date.now();
     const decision = await this.engine.evaluate(action);
+    const durationMs = Date.now() - evalStartTime;
+    if (decision.cascade) {
+      logEvaluationDecision(
+        {
+          timestamp: Date.now(),
+          sessionID,
+          toolName,
+          commandString:
+            commandString ?? JSON.stringify(request.patterns || request.metadata || {}),
+          userPrompt: action.userPrompt,
+          reasoning:
+            (typeof decision.metadata?.reasoning === "string"
+              ? decision.metadata.reasoning
+              : undefined) ?? decision.reason,
+          verdict: decision.verdict,
+          risk_level: decision.riskLevel,
+          user_authorization: decision.userAuthorization,
+          durationMs,
+          cascade: decision.cascade,
+        },
+        this.config.evalLogFile,
+      );
+    }
     const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
     const targetDir = (request.metadata?.directory as string) || workspaceRoot;
     await this.replyPermission(request.id as string, replyVal, decision.reason, targetDir);

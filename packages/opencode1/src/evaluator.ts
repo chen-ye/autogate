@@ -10,6 +10,7 @@ import type {
   GateEvaluator,
   GateAction,
   AutoGateConfig,
+  CascadeTrace,
 } from "@autogate/core";
 import {
   buildClassifierUserPrompt,
@@ -32,6 +33,7 @@ export interface EvaluationAuditEntry {
   risk_level?: RiskLevel;
   user_authorization?: UserAuthorization;
   durationMs: number;
+  cascade?: CascadeTrace;
 }
 
 export function logEvaluationDecision(entry: EvaluationAuditEntry, logFilePath?: string): void {
@@ -381,6 +383,12 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
       reason: "No client provided for classification",
     };
   }
+  if (input.signal?.aborted) {
+    return {
+      verdict: "UNSURE",
+      reason: "Classifier evaluation aborted by signal",
+    };
+  }
   const client = input.client;
 
   const sandboxDir = ensureSandboxDirectory();
@@ -391,6 +399,12 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
   const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
 
   const evalAgent = await resolveEvaluationAgent(client);
+  if (input.signal?.aborted) {
+    return {
+      verdict: "UNSURE",
+      reason: "Classifier evaluation aborted by signal",
+    };
+  }
   const evalTitle = `[auto-gate-eval] ${actionName}`;
   const sessionRes = await client.session.create({
     body: {
@@ -420,10 +434,42 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
   const startTime = Date.now();
   let capturedReasoning: string | undefined;
   let verdictResult: ClassifierResult | undefined;
+  let aborted = Boolean(input.signal?.aborted);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const onAbort = () => {
+    aborted = true;
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = undefined;
+    }
+    try {
+      client.session.abort?.({ path: { id: sessionID } })?.catch(() => {});
+    } catch {}
+    recordEvaluationVerdict(sessionID, {
+      verdict: "UNSURE",
+      reason: "Classifier evaluation aborted by signal",
+    });
+  };
+
+  if (aborted) {
+    onAbort();
+    clearEvaluationSession(sessionID);
+    await archiveEvaluationSession(client, sessionID, actionName, "UNSURE");
+    return {
+      verdict: "UNSURE",
+      reason: "Classifier evaluation aborted by signal",
+    };
+  }
+
+  if (input.signal) {
+    input.signal.addEventListener("abort", onAbort, { once: true });
+  }
+
+  let promptLoopPromise: Promise<void> | undefined;
 
   try {
     const timeoutMs = input.config?.classifierTimeout ?? 45000;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const verdictPromise = new Promise<ClassifierResult>((resolve) => {
       registerEvaluationSession(sessionID, resolve);
     });
@@ -441,29 +487,41 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
     });
 
     const modelRef = parseModelRef(input.model ?? input.config?.classifierModel);
-    const promptPromise = client.session.prompt({
-      path: { id: sessionID },
-      agent: evalAgent,
-      body: {
-        agent: evalAgent,
-        model: {
-          providerID: modelRef.providerID,
-          modelID: modelRef.modelID,
-        },
-        tools: { ...EVAL_SESSION_TOOLS },
-        system: PASSIVE_EVALUATOR_DIRECTIVE,
-        parts: [
-          {
-            type: "text",
-            text: userPromptText,
-          },
-        ],
-      },
-    });
+    const maxRetries = 2;
+    const repromptText =
+      "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
 
-    promptPromise
-      .then(async (promptRes) => {
-        if (!promptRes) return;
+    promptLoopPromise = (async () => {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (aborted || input.signal?.aborted) return;
+        const promptText = attempt === 0 ? userPromptText : repromptText;
+        const promptRes = await client.session
+          .prompt({
+            path: { id: sessionID },
+            agent: evalAgent,
+            body: {
+              agent: evalAgent,
+              model: {
+                providerID: modelRef.providerID,
+                modelID: modelRef.modelID,
+              },
+              tools: { ...EVAL_SESSION_TOOLS },
+              system: PASSIVE_EVALUATOR_DIRECTIVE,
+              parts: [
+                {
+                  type: "text",
+                  text: promptText,
+                },
+              ],
+            },
+          })
+          .catch(() => null);
+
+        if (!promptRes || aborted || input.signal?.aborted) {
+          if (attempt === 0 && !promptRes) return;
+          continue;
+        }
+
         const resObj = promptRes as Record<string, unknown>;
         const resData = (
           resObj.data && typeof resObj.data === "object" ? resObj.data : {}
@@ -487,106 +545,67 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
             ? resObj.parts
             : [];
         const verdict = await extractVerdictFromSession(client, sessionID, parts);
+        if (aborted || input.signal?.aborted) return;
         if (verdict) {
-          recordEvaluationVerdict(sessionID, verdict);
+          recordEvaluationVerdict(
+            sessionID,
+            capturedReasoning && input.config?.systemOne?.enabled
+              ? { ...verdict, metadata: { reasoning: capturedReasoning } }
+              : verdict,
+          );
           return;
         }
+      }
 
-        let attempts = 0;
-        const maxRetries = 2;
-        while (attempts < maxRetries) {
-          attempts++;
-          const repromptText =
-            "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
-          const repromptRes = await client.session
-            .prompt({
-              path: { id: sessionID },
-              agent: evalAgent,
-              body: {
-                agent: evalAgent,
-                model: {
-                  providerID: modelRef.providerID,
-                  modelID: modelRef.modelID,
-                },
-                tools: { ...EVAL_SESSION_TOOLS },
-                system: PASSIVE_EVALUATOR_DIRECTIVE,
-                parts: [
-                  {
-                    type: "text",
-                    text: repromptText,
-                  },
-                ],
-              },
-            })
-            .catch(() => null);
-          if (repromptRes) {
-            const repObj = repromptRes as Record<string, unknown>;
-            const repData = (
-              repObj.data && typeof repObj.data === "object" ? repObj.data : {}
-            ) as Record<string, unknown>;
-            const repReasoning =
-              typeof repData.reasoning === "string"
-                ? repData.reasoning
-                : typeof repObj.reasoning === "string"
-                  ? repObj.reasoning
-                  : typeof repData.thinking === "string"
-                    ? repData.thinking
-                    : typeof repObj.thinking === "string"
-                      ? repObj.thinking
-                      : undefined;
-            if (repReasoning) {
-              capturedReasoning = repReasoning;
-            }
-            const repromptParts = Array.isArray(repData.parts)
-              ? repData.parts
-              : Array.isArray(repObj.parts)
-                ? repObj.parts
-                : [];
-            const repromptVerdict = await extractVerdictFromSession(
-              client,
-              sessionID,
-              repromptParts,
-            );
-            if (repromptVerdict) {
-              recordEvaluationVerdict(sessionID, repromptVerdict);
-              return;
-            }
-          }
-        }
-
-        recordEvaluationVerdict(sessionID, {
-          verdict: "UNSURE",
-          reason: "Classifier failed to call classify_result tool after retries",
-        });
-      })
-      .catch(() => {});
+      if (aborted || input.signal?.aborted) return;
+      recordEvaluationVerdict(sessionID, {
+        verdict: "UNSURE",
+        reason: "Classifier failed to call classify_result tool after retries",
+        ...(capturedReasoning && input.config?.systemOne?.enabled
+          ? { metadata: { reasoning: capturedReasoning } }
+          : {}),
+      });
+    })().catch(() => {});
 
     verdictResult = await Promise.race([verdictPromise, timeoutPromise]);
     if (timeoutId) clearTimeout(timeoutId);
 
     return verdictResult;
   } finally {
-    clearEvaluationSession(sessionID);
+    if (input.signal) {
+      input.signal.removeEventListener("abort", onAbort);
+    }
+    if (timeoutId) clearTimeout(timeoutId);
+    evaluationResolvers.delete(sessionID);
+    if (promptLoopPromise) {
+      void promptLoopPromise.finally(() => {
+        evaluationSessions.delete(sessionID);
+      });
+    } else {
+      clearEvaluationSession(sessionID);
+    }
     const durationMs = Date.now() - startTime;
     const rawVerdict = verdictResult?.verdict;
     const finalVerdict: ClassifierVerdict =
       rawVerdict && isClassifierVerdict(rawVerdict) ? rawVerdict : "UNSURE";
     await archiveEvaluationSession(client, sessionID, actionName, finalVerdict);
-    logEvaluationDecision(
-      {
-        timestamp: Date.now(),
-        sessionID,
-        toolName: actionName,
-        commandString: typeof actionArgs === "string" ? actionArgs : JSON.stringify(actionArgs),
-        userPrompt,
-        reasoning: capturedReasoning ?? verdictResult?.reason,
-        verdict: finalVerdict,
-        risk_level: verdictResult?.risk_level,
-        user_authorization: verdictResult?.user_authorization,
-        durationMs,
-      },
-      input.config?.evalLogFile,
-    );
+    if (!aborted && !input.signal?.aborted && !input.config?.systemOne?.enabled) {
+      logEvaluationDecision(
+        {
+          timestamp: Date.now(),
+          sessionID,
+          toolName: actionName,
+          commandString: typeof actionArgs === "string" ? actionArgs : JSON.stringify(actionArgs),
+          userPrompt,
+          reasoning: capturedReasoning ?? verdictResult?.reason,
+          verdict: finalVerdict,
+          risk_level: verdictResult?.risk_level,
+          user_authorization: verdictResult?.user_authorization,
+          durationMs,
+        },
+        input.config?.evalLogFile,
+      );
+    }
   }
 }
 
@@ -607,6 +626,7 @@ export class OpenCodeV1SessionEvaluator implements GateEvaluator {
       environment: action.environment,
       model: this.config?.classifierModel,
       config: this.config,
+      signal: action.signal,
     });
   }
 }

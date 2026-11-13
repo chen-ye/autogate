@@ -4,6 +4,53 @@ export type ReviewFallbackMode = "native" | "ntfy";
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH";
 
+export type SystemOneExecutionMode = "race" | "cascade";
+
+export type EscalationReason =
+  | "s1_error"
+  | "s1_timeout"
+  | "s1_invalid_output"
+  | "s1_circuit_open"
+  | "context_drifted"
+  | "injection_flagged"
+  | "out_of_scope"
+  | "low_allow_prob"
+  | "low_block_prob"
+  | "low_odds_ratio"
+  | "s2_finished_first";
+
+export type ContextFingerprint = string & { readonly __brand: "ContextFingerprint" };
+
+export interface SystemOneThresholds {
+  readonly allowMinProb: number;
+  readonly blockMinProb: number;
+  readonly minOddsRatio: number;
+  readonly minInScopeNoul: number;
+  readonly maxInjectionNoul: number;
+}
+
+export interface SystemOneConfig {
+  readonly enabled: boolean;
+  readonly executionMode: SystemOneExecutionMode;
+  readonly endpoint: string;
+  readonly model: string;
+  readonly apiKey?: string;
+  readonly timeoutMs: number;
+  readonly thresholds: SystemOneThresholds;
+}
+
+export interface CascadeTrace {
+  readonly mode: SystemOneExecutionMode;
+  readonly winner: "system1" | "system2";
+  readonly escalationReason?: EscalationReason;
+  readonly s1LatencyMs?: number;
+  readonly s2LatencyMs?: number;
+  readonly s2Aborted?: boolean;
+  readonly s1Probs?: Readonly<Record<string, number>>;
+  readonly inScopeScore?: number;
+  readonly injectionScore?: number;
+}
+
 export type SessionId = string & { readonly __brand: "SessionId" };
 export type RequestId = string & { readonly __brand: "RequestId" };
 export type ActionId = string & { readonly __brand: "ActionId" };
@@ -43,18 +90,24 @@ export type ClassifierResult =
       readonly reason: string;
       readonly risk_level?: RiskLevel;
       readonly user_authorization?: UserAuthorization;
+      readonly cascade?: CascadeTrace;
+      readonly metadata?: Record<string, unknown>;
     }
   | {
       readonly verdict: "BLOCK";
       readonly reason: string;
       readonly risk_level?: RiskLevel;
       readonly user_authorization?: UserAuthorization;
+      readonly cascade?: CascadeTrace;
+      readonly metadata?: Record<string, unknown>;
     }
   | {
       readonly verdict: "UNSURE";
       readonly reason: string;
       readonly risk_level?: RiskLevel;
       readonly user_authorization?: UserAuthorization;
+      readonly cascade?: CascadeTrace;
+      readonly metadata?: Record<string, unknown>;
     };
 
 export const CLASSIFIER_JSON_SCHEMA = {
@@ -126,6 +179,7 @@ export interface AutoGateConfig {
    */
   reviewFallbackMode?: ReviewFallbackMode;
   evalLogFile?: string;
+  systemOne?: SystemOneConfig;
   omp?: OmpHarnessConfig;
   opencode?: OpenCodeHarnessConfig;
   paseo?: PaseoHarnessConfig;
@@ -197,6 +251,8 @@ export type GateDecision =
       readonly cached?: boolean;
       readonly reply?: "once" | "always";
       readonly safeTransformAlternative?: never;
+      readonly cascade?: CascadeTrace;
+      readonly metadata?: Record<string, unknown>;
     }
   | {
       readonly verdict: "BLOCK";
@@ -206,6 +262,8 @@ export type GateDecision =
       readonly safeTransformAlternative?: string;
       readonly cached?: false;
       readonly reply?: "reject";
+      readonly cascade?: CascadeTrace;
+      readonly metadata?: Record<string, unknown>;
     }
   | {
       readonly verdict: "UNSURE";
@@ -215,6 +273,8 @@ export type GateDecision =
       readonly reply?: "once" | "always" | "reject";
       readonly cached?: false;
       readonly safeTransformAlternative?: never;
+      readonly cascade?: CascadeTrace;
+      readonly metadata?: Record<string, unknown>;
     };
 
 export interface ReviewAction {
@@ -264,6 +324,7 @@ export interface EngineOptions {
   evaluator?: GateEvaluator;
   workspaceRoot?: string;
   remoteReviewEnabled?: boolean;
+  onStateChange?: () => void;
 }
 
 // Backward compatibility aliases

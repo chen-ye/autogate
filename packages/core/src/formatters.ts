@@ -3,6 +3,7 @@ import type {
   UserAuthorization,
   NtfyVerbosity,
   EnvironmentConfig,
+  CascadeTrace,
 } from "./types";
 
 export interface NotificationBodyInput {
@@ -20,6 +21,24 @@ export interface NotificationBodyInput {
   subagentPrompt?: string;
   reasoning?: string;
   environment?: EnvironmentConfig;
+  cascade?: CascadeTrace;
+}
+
+export function formatCascadeSummary(cascade: CascadeTrace): string {
+  const parts = [`${cascade.mode} -> ${cascade.winner}`];
+  if (cascade.escalationReason) {
+    parts.push(`reason=${cascade.escalationReason}`);
+  }
+  if (cascade.s1LatencyMs !== undefined) {
+    parts.push(`s1=${cascade.s1LatencyMs}ms`);
+  }
+  if (cascade.s2LatencyMs !== undefined) {
+    parts.push(`s2=${cascade.s2LatencyMs}ms`);
+  }
+  if (cascade.s2Aborted !== undefined) {
+    parts.push(`s2Aborted=${cascade.s2Aborted}`);
+  }
+  return parts.join(" | ");
 }
 
 export function formatNotificationTitle(verdictOrType: string, permission: string): string {
@@ -64,6 +83,9 @@ export function formatNotificationBody(input: NotificationBodyInput): string {
     }
     if (input.reason) {
       evalLines.push(`Reason: ${input.reason}`);
+    }
+    if (input.cascade) {
+      evalLines.push(`Cascade: ${formatCascadeSummary(input.cascade)}`);
     }
     if (input.warning) {
       evalLines.push(`Warning: ${input.warning}`);
@@ -123,6 +145,10 @@ export function formatNotificationBody(input: NotificationBodyInput): string {
     } else {
       lines.push(`Reason: ${input.reason}`);
     }
+  }
+
+  if (input.cascade) {
+    lines.push(`Cascade: ${formatCascadeSummary(input.cascade)}`);
   }
 
   if (input.warning) {

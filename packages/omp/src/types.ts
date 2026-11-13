@@ -14,6 +14,7 @@ export interface OmpEvaluatorOptions {
   fallbackSessionId?: string;
   classifierTimeout?: number;
   evalLogFile?: string;
+  suppressEvalLog?: boolean;
   getCtx?: () => unknown;
   logger?: OmpLogger;
 }

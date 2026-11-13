@@ -1217,5 +1217,93 @@ describe("PaseoNativeEvaluator", () => {
 
       await adapter.dispose();
     });
+
+    it("invokes evalAgent.abort() on action.signal abort and surfaces cascade trace in timeline badge", async () => {
+      let agentAborted = false;
+      const controller = new AbortController();
+
+      const mockPaseo = {
+        agents: {
+          create: async () => ({
+            id: "eval-abort-hook",
+            abort: async () => {
+              agentAborted = true;
+            },
+            waitForFinish: async () =>
+              new Promise((resolve) => {
+                setTimeout(() => resolve({ status: "idle", lastMessage: "{}" }), 500);
+              }),
+          }),
+        },
+      };
+
+      const evaluator = new PaseoNativeEvaluator(mockPaseo);
+      setTimeout(() => controller.abort("system1-won-race"), 10);
+
+      const res = await evaluator.evaluate(createMockAction({ signal: controller.signal }));
+      assert.strictEqual(res.verdict, "UNSURE");
+      assert.strictEqual(agentAborted, true);
+
+      // Verify CascadeTrace is surfaced in Paseo timeline badge
+      const server = new MockServer();
+      const targetAgent = new MockAgent("agent-cascade-badge");
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            answers: {
+              verdict: { probabilities: { ALLOW: 0.98, BLOCK: 0.02 } },
+              in_scope: { noul: 0.95 },
+              injection_risk: { noul: 0.01 },
+            },
+          }),
+          { status: 200 },
+        )) as typeof fetch;
+
+      try {
+        const adapter = new PaseoHarnessAdapter(server, {
+          paseo: {
+            agents: {
+              create: async () => ({
+                id: "slow-s2",
+                waitForFinish: async () =>
+                  new Promise((resolve) => {
+                    setTimeout(
+                      () =>
+                        resolve({
+                          status: "idle",
+                          lastMessage: JSON.stringify({ verdict: "ALLOW", reason: "s2" }),
+                        }),
+                      200,
+                    );
+                  }),
+              }),
+              ref: (id: string) => (id === "agent-cascade-badge" ? targetAgent : null),
+            },
+          },
+          systemOne: {
+            enabled: true,
+            executionMode: "race",
+            endpoint: "http://127.0.0.1:4006/v1/systemone",
+            model: "gemini-decision-1",
+            timeoutMs: 2000,
+          },
+        });
+
+        await server.emit("agent.permission_requested", {
+          agent: targetAgent,
+          request: { id: "req-cascade-badge", name: "bash", input: { command: "git status" } },
+        });
+
+        assert.strictEqual(targetAgent.timelineItems.length, 1);
+        assert.strictEqual(targetAgent.timelineItems[0].data.cascade?.winner, "system1");
+        assert.strictEqual(targetAgent.timelineItems[0].data.cascade?.mode, "race");
+        assert.strictEqual(targetAgent.timelineItems[0].data.cascade?.s2Aborted, true);
+
+        await adapter.dispose();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
   });
 });

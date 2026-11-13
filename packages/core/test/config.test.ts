@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { loadConfig, loadFileConfig } from "../src/config";
+import {
+  loadConfig,
+  loadFileConfig,
+  resolveConfigFilePath,
+  resolveConfigDir,
+  resolveRuntimeDir,
+  resolveControlFilePath,
+} from "../src/config";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -297,5 +304,91 @@ describe("config resolution", () => {
     const envConfig2 = loadConfig();
     expect(envConfig2.ntfyVerbosity).toBe("verbose");
     delete process.env.NTFY_VERBOSITY;
+  });
+
+  it("17. systemOne config defaults, file loading, and env overrides", () => {
+    const def = loadConfig();
+    expect(def.systemOne?.enabled).toBe(false);
+    expect(def.systemOne?.executionMode).toBe("race");
+    expect(def.systemOne?.endpoint).toBe("http://127.0.0.1:4006/v1/systemone");
+    expect(def.systemOne?.model).toBe("gemini-decision-1");
+    expect(def.systemOne?.timeoutMs).toBe(4000);
+    expect(def.systemOne?.thresholds).toEqual({
+      allowMinProb: 0.92,
+      blockMinProb: 0.85,
+      minOddsRatio: 4.0,
+      minInScopeNoul: 0.7,
+      maxInjectionNoul: 0.5,
+    });
+
+    const tmpFile = path.join(os.tmpdir(), `autogate-s1-cfg-${Date.now()}.json`);
+    tempFiles.push(tmpFile);
+    fs.writeFileSync(
+      tmpFile,
+      JSON.stringify({
+        systemOne: {
+          enabled: true,
+          executionMode: "cascade",
+          timeoutMs: 2500,
+          thresholds: { allowMinProb: 0.95 },
+        },
+      }),
+      "utf8",
+    );
+
+    const fromFile = loadConfig({ configFile: tmpFile });
+    expect(fromFile.systemOne?.enabled).toBe(true);
+    expect(fromFile.systemOne?.executionMode).toBe("cascade");
+    expect(fromFile.systemOne?.timeoutMs).toBe(2500);
+    expect(fromFile.systemOne?.thresholds.allowMinProb).toBe(0.95);
+    expect(fromFile.systemOne?.thresholds.blockMinProb).toBe(0.85);
+
+    process.env.AUTOGATE_SYSTEM_ONE_ENABLED = "false";
+    process.env.AUTOGATE_SYSTEM_ONE_MODE = "race";
+    const envOverride = loadConfig({ configFile: tmpFile });
+    expect(envOverride.systemOne?.enabled).toBe(false);
+    expect(envOverride.systemOne?.executionMode).toBe("race");
+  });
+
+  it("18. resolveConfigFilePath, resolveConfigDir, resolveRuntimeDir, and resolveControlFilePath follow candidate precedence", () => {
+    const fakeHome = path.join(os.tmpdir(), `autogate-paths-home-${Date.now()}`);
+    tempDirs.push(fakeHome);
+    os.homedir = () => fakeHome;
+    delete process.env.XDG_CONFIG_HOME;
+    delete process.env.AUTOGATE_CONFIG;
+
+    // Default ~/.config/autogate
+    expect(resolveConfigFilePath()).toBe(path.join(fakeHome, ".config", "autogate", "config.json"));
+    expect(resolveConfigDir()).toBe(path.join(fakeHome, ".config", "autogate"));
+    expect(resolveRuntimeDir()).toBe(path.join(fakeHome, ".config", "autogate", "runtime"));
+    expect(resolveControlFilePath()).toBe(
+      path.join(fakeHome, ".config", "autogate", "control.json"),
+    );
+
+    // XDG_CONFIG_HOME
+    const xdgDir = path.join(os.tmpdir(), `autogate-paths-xdg-${Date.now()}`);
+    tempDirs.push(xdgDir);
+    process.env.XDG_CONFIG_HOME = xdgDir;
+    expect(resolveConfigFilePath()).toBe(path.join(xdgDir, "autogate", "config.json"));
+    expect(resolveConfigDir()).toBe(path.join(xdgDir, "autogate"));
+    expect(resolveRuntimeDir()).toBe(path.join(xdgDir, "autogate", "runtime"));
+    expect(resolveControlFilePath()).toBe(path.join(xdgDir, "autogate", "control.json"));
+
+    // AUTOGATE_CONFIG env
+    const customEnvCfg = path.join(os.tmpdir(), `autogate-paths-env-${Date.now()}`, "custom.json");
+    process.env.AUTOGATE_CONFIG = customEnvCfg;
+    expect(resolveConfigFilePath()).toBe(path.resolve(customEnvCfg));
+    expect(resolveConfigDir()).toBe(path.dirname(path.resolve(customEnvCfg)));
+    expect(resolveRuntimeDir()).toBe(
+      path.join(path.dirname(path.resolve(customEnvCfg)), "runtime"),
+    );
+    expect(resolveControlFilePath()).toBe(
+      path.join(path.dirname(path.resolve(customEnvCfg)), "control.json"),
+    );
+
+    // options.configFile takes precedence over env
+    const optCfg = path.join(os.tmpdir(), `autogate-paths-opt-${Date.now()}`, "opt.json");
+    expect(resolveConfigFilePath({ configFile: optCfg })).toBe(path.resolve(optCfg));
+    expect(resolveConfigDir({ configFile: optCfg })).toBe(path.dirname(path.resolve(optCfg)));
   });
 });

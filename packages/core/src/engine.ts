@@ -11,9 +11,13 @@ import type {
   RiskLevel,
   UserAuthorization,
   PermissionEventData,
+  CascadeTrace,
+  ContextFingerprint,
 } from "./types";
 import { sanitizeUserPrompt } from "./classifier";
 import { formatNotificationTitle, formatNotificationBody } from "./formatters";
+import { CascadeEvaluator, computeContextFingerprint } from "./cascade";
+import { SystemOneEvaluator, createConfiguredEvaluator } from "./system-one";
 
 export const sharedRecentlyRejected = new Map<string, { timestamp: number; reason: string }>();
 export const sharedExplicitEscalations = new Map<
@@ -271,6 +275,7 @@ export interface AutoGateEngineOptions {
   evaluator?: GateEvaluator;
   workspaceRoot?: string;
   remoteReviewEnabled?: boolean;
+  onStateChange?: () => void;
 }
 
 export class AutoGateCoreEngine {
@@ -299,6 +304,7 @@ export class AutoGateCoreEngine {
   private stopRemoteListen?: () => void;
   private reviewFallbackMode: ReviewFallbackMode = "ntfy";
   private remoteReviewEnabled: boolean = true;
+  private onStateChange?: () => void;
 
   constructor(
     optionsOrConfig?: AutoGateEngineOptions | AutoGateConfig,
@@ -306,6 +312,7 @@ export class AutoGateCoreEngine {
     evaluator?: GateEvaluator,
   ) {
     let remoteReviewOption: boolean | undefined;
+    let baseEvaluator: GateEvaluator;
     if (
       optionsOrConfig &&
       typeof optionsOrConfig === "object" &&
@@ -313,19 +320,30 @@ export class AutoGateCoreEngine {
       ("config" in optionsOrConfig ||
         "evaluator" in optionsOrConfig ||
         "adapter" in optionsOrConfig ||
-        "remoteReviewEnabled" in optionsOrConfig)
+        "remoteReviewEnabled" in optionsOrConfig ||
+        "onStateChange" in optionsOrConfig)
     ) {
       const opts = optionsOrConfig as AutoGateEngineOptions;
       this.config = opts.config;
       this.remoteAdapter = opts.adapter ?? createDummyAdapter();
-      this.evaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.config);
+      baseEvaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.config);
       this.workspaceRoot = opts.workspaceRoot ?? this.config.environment?.trustedPaths?.[0];
       remoteReviewOption = opts.remoteReviewEnabled;
+      this.onStateChange = opts.onStateChange;
     } else {
       this.config = (optionsOrConfig as AutoGateConfig) || { autoMode: false };
       this.remoteAdapter = remoteAdapter ?? createDummyAdapter();
-      this.evaluator = evaluator ?? new DefaultGateEvaluator(this.config);
+      baseEvaluator = evaluator ?? new DefaultGateEvaluator(this.config);
     }
+    this.evaluator =
+      this.config.systemOne?.enabled &&
+      !(baseEvaluator instanceof CascadeEvaluator) &&
+      !(baseEvaluator instanceof SystemOneEvaluator)
+        ? createConfiguredEvaluator(this.config, baseEvaluator, {
+            getContextFingerprint: (act) => this.computeActionFingerprint(act),
+            refreshAction: (act) => this.refreshActionContext(act),
+          })
+        : baseEvaluator;
     this.workspaceRoot = this.workspaceRoot || this.config.environment?.trustedPaths?.[0];
     this.enabled = this.config.autoMode;
     this.consecutiveBlockThreshold = this.config.consecutiveBlockThreshold ?? 3;
@@ -339,6 +357,26 @@ export class AutoGateCoreEngine {
     } else {
       this.remoteReviewEnabled = true;
     }
+  }
+
+  public setOnStateChange(cb?: () => void): void {
+    this.onStateChange = cb;
+  }
+
+  private computeActionFingerprint(action: GateAction): ContextFingerprint {
+    const latestSessionPrompt = this.getUserPrompt(action.sessionID || undefined);
+    const promptMaterial = latestSessionPrompt
+      ? `${action.userPrompt}\n::session::${latestSessionPrompt}`
+      : action.userPrompt;
+    return computeContextFingerprint(promptMaterial, action.environment);
+  }
+
+  private refreshActionContext(action: GateAction): GateAction {
+    const latestPrompt = this.getUserPrompt(action.sessionID || undefined);
+    return {
+      ...action,
+      userPrompt: latestPrompt || action.userPrompt,
+    };
   }
 
   public isRemoteReviewEnabled(): boolean {
@@ -427,6 +465,18 @@ export class AutoGateCoreEngine {
 
   public getConsecutiveBlocks(): number {
     return this.consecutiveBlocks;
+  }
+
+  public getConsecutiveBlockThreshold(): number {
+    return this.consecutiveBlockThreshold;
+  }
+
+  public getInFlightRequests(): Array<{ id: string; sessionID?: string; directory?: string }> {
+    return Array.from(this.inFlightRequests.entries(), ([id, entry]) => ({
+      id,
+      ...(entry.sessionID !== undefined ? { sessionID: entry.sessionID } : {}),
+      ...(entry.directory !== undefined ? { directory: entry.directory } : {}),
+    }));
   }
 
   public resetConsecutiveBlocks(): void {
@@ -530,13 +580,16 @@ export class AutoGateCoreEngine {
       };
     }
 
-    // Resolve prompts if not already populated on action
+    // Resolve prompts & environment if not already populated on action
     if (!action.userPrompt) {
       const fallbackPrompt =
         (action.sessionID ? this.userPrompts.get(action.sessionID) : undefined) ||
         this.userPrompt ||
         "";
       action.userPrompt = sanitizeUserPrompt(fallbackPrompt);
+    }
+    if (!action.environment && this.config.environment) {
+      action.environment = this.config.environment;
     }
 
     // 5. Calls `this.evaluator.evaluate(action)`.
@@ -545,6 +598,13 @@ export class AutoGateCoreEngine {
       verdictResult = await this.evaluator.evaluate(action);
     } catch (err) {
       verdictResult = { verdict: "UNSURE", reason: `Classifier error: ${err}` };
+    }
+
+    if (action.signal?.aborted) {
+      return {
+        verdict: "BLOCK",
+        reason: "Action evaluation aborted by signal",
+      };
     }
 
     // 6. Handle verdict with compile-time exhaustiveness checking.
@@ -564,6 +624,7 @@ export class AutoGateCoreEngine {
             verdictResult.reason,
             verdictResult.risk_level,
             verdictResult.user_authorization,
+            verdictResult.cascade,
           ).catch(() => {});
         }
         return {
@@ -572,6 +633,8 @@ export class AutoGateCoreEngine {
           userAuthorization: verdictResult.user_authorization,
           reason: verdictResult.reason || "Allowed by AutoGate classifier policy",
           cached: false,
+          ...(verdictResult.cascade ? { cascade: verdictResult.cascade } : {}),
+          ...(verdictResult.metadata ? { metadata: verdictResult.metadata } : {}),
         };
       }
       case "BLOCK": {
@@ -597,6 +660,7 @@ export class AutoGateCoreEngine {
             message,
             verdictResult.risk_level,
             verdictResult.user_authorization,
+            verdictResult.cascade,
           ).catch(() => {});
         }
 
@@ -608,6 +672,8 @@ export class AutoGateCoreEngine {
           safeTransformAlternative: isTransformableAction(action, commandString)
             ? message
             : undefined,
+          ...(verdictResult.cascade ? { cascade: verdictResult.cascade } : {}),
+          ...(verdictResult.metadata ? { metadata: verdictResult.metadata } : {}),
         };
       }
       case "UNSURE": {
@@ -617,6 +683,8 @@ export class AutoGateCoreEngine {
             reason: verdictResult.reason || "Manual review required (local harness fallback)",
             riskLevel: verdictResult.risk_level,
             userAuthorization: verdictResult.user_authorization,
+            ...(verdictResult.cascade ? { cascade: verdictResult.cascade } : {}),
+            ...(verdictResult.metadata ? { metadata: verdictResult.metadata } : {}),
           };
         }
         return this.requestReview(
@@ -625,6 +693,8 @@ export class AutoGateCoreEngine {
           false,
           verdictResult.risk_level,
           verdictResult.user_authorization,
+          verdictResult.cascade,
+          verdictResult.metadata,
         );
       }
       default: {
@@ -640,11 +710,15 @@ export class AutoGateCoreEngine {
     isCircuitBreaker?: boolean,
     riskLevel?: RiskLevel,
     userAuth?: UserAuthorization,
+    cascade?: CascadeTrace,
+    metadata?: Record<string, unknown>,
   ): Promise<GateDecision> {
     if (action.signal?.aborted) {
       return {
         verdict: "BLOCK",
         reason: "Review request aborted by signal",
+        ...(cascade ? { cascade } : {}),
+        ...(metadata ? { metadata } : {}),
       };
     }
 
@@ -674,6 +748,7 @@ export class AutoGateCoreEngine {
       subagentPrompt: action.subagentPrompt,
       reasoning: action.metadata?.reasoning as string | undefined,
       environment: action.environment || this.config.environment,
+      cascade,
     });
     const payload: ReviewRequest = {
       id: action.id,
@@ -704,6 +779,7 @@ export class AutoGateCoreEngine {
         directory: action.workspaceRoot || this.workspaceRoot,
         message: messageBody,
       });
+      this.onStateChange?.();
 
       if (action.signal) {
         onAbort = () => {
@@ -765,7 +841,14 @@ export class AutoGateCoreEngine {
 
     const finalDecision = await Promise.race([decisionPromise, timeoutPromise]);
     if (timeoutTimer) clearTimeout(timeoutTimer);
-    return finalDecision;
+    if (!cascade && !metadata) {
+      return finalDecision;
+    }
+    return {
+      ...finalDecision,
+      ...(cascade ? { cascade } : {}),
+      ...(metadata ? { metadata } : {}),
+    };
   }
 
   public resolveReviewResponse(resp: ReviewResponse): void {
@@ -776,8 +859,7 @@ export class AutoGateCoreEngine {
     if (entry) {
       entry.abort.abort();
       this.inFlightRequests.delete(reqID);
-      const preserveBody =
-        this.config.ntfyVerbosity === "verbose" ? entry.message : undefined;
+      const preserveBody = this.config.ntfyVerbosity === "verbose" ? entry.message : undefined;
       this.remoteAdapter
         .updateStatus(
           reqID,
@@ -810,12 +892,14 @@ export class AutoGateCoreEngine {
   public handlePermissionReplied(data: { requestID?: string; id?: string; reply?: string }): void {
     const reqID = data.requestID ?? data.id;
     if (!reqID) return;
+    if (data.reply === "once" || data.reply === "always") {
+      this.resetConsecutiveBlocks();
+    }
     const entry = this.inFlightRequests.get(reqID);
     if (entry) {
       entry.abort.abort();
       this.inFlightRequests.delete(reqID);
-      const preserveBody =
-        this.config.ntfyVerbosity === "verbose" ? entry.message : undefined;
+      const preserveBody = this.config.ntfyVerbosity === "verbose" ? entry.message : undefined;
       this.remoteAdapter
         .updateStatus(
           reqID,
@@ -837,6 +921,7 @@ export class AutoGateCoreEngine {
     reason?: string,
     riskLevel?: RiskLevel,
     userAuth?: UserAuthorization,
+    cascade?: CascadeTrace,
   ): Promise<void> {
     const payload: ReviewRequest = {
       id: action.id,
@@ -861,6 +946,7 @@ export class AutoGateCoreEngine {
         subagentPrompt: action.subagentPrompt,
         reasoning: action.metadata?.reasoning as string | undefined,
         environment: action.environment || this.config.environment,
+        cascade,
       }),
       priority: verdict === "ALLOW" ? "low" : "default",
       tags: verdict === "ALLOW" ? ["white_check_mark"] : ["octagonal_sign"],

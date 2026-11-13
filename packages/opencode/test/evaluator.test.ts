@@ -214,5 +214,43 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
         globalThis.fetch = origFetch;
       }
     });
+
+    it("interrupts ephemeral session and skips reprompts when signal aborts", async () => {
+      const controller = new AbortController();
+      let interruptedSessionID: string | undefined;
+      let promptCalls = 0;
+
+      const mockClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_v2_abort" } }),
+          update: async () => ({}),
+          interrupt: async (opts: { sessionID: string; resume?: boolean }) => {
+            interruptedSessionID = opts.sessionID;
+            return {};
+          },
+          prompt: async () => {
+            promptCalls++;
+            await new Promise((r) => setTimeout(r, 80));
+            return { data: { parts: [] } };
+          },
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      setTimeout(() => controller.abort("system1-won-race"), 10);
+
+      const res = await classifyRequest({
+        client: mockClient,
+        actionName: "bash",
+        actionArgs: { command: "git status" },
+        signal: controller.signal,
+      });
+
+      expect(res.verdict).toBe("UNSURE");
+      expect(res.reason).toContain("aborted");
+      expect(interruptedSessionID).toBe("ses_v2_abort");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(promptCalls).toBe(1);
+    });
   });
 });

@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import type { AutoGateCoreEngine } from "../../core/src/index.ts";
 import type { GateAction, GateDecision } from "../../core/src/types.ts";
 
@@ -6,11 +9,23 @@ export const verdictStore = new Map<
   { verdict: string; policy: "allow" | "deny" | "prompt"; reason?: string }
 >();
 
+async function appendCascadeEvalLog(
+  entry: Record<string, unknown>,
+  evalLogFile?: string,
+): Promise<void> {
+  const targetFile = evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
+  try {
+    await fs.mkdir(path.dirname(targetFile), { recursive: true });
+    await fs.appendFile(targetFile, JSON.stringify(entry) + "\n", "utf8");
+  } catch {}
+}
+
 export function registerToolCallHook(
   pi: unknown,
   engine: AutoGateCoreEngine,
   store = verdictStore,
   setContext?: (ctx: Record<string, unknown>) => void,
+  evalLogFile?: string,
 ): void {
   const p = pi as
     | {
@@ -126,8 +141,45 @@ export function registerToolCallHook(
         toolCallId,
         verdict: decision.verdict,
         durationMs: hookDurationMs,
+        ...(decision.cascade ? { cascade: decision.cascade } : {}),
       });
     } catch {}
+    if (decision.cascade) {
+      const metaModel =
+        decision.metadata?.model && typeof decision.metadata.model === "object"
+          ? (decision.metadata.model as Record<string, unknown>)
+          : undefined;
+      const metaInference =
+        decision.metadata?.inference && typeof decision.metadata.inference === "object"
+          ? (decision.metadata.inference as Record<string, unknown>)
+          : undefined;
+      appendCascadeEvalLog(
+        {
+          timestamp: new Date().toISOString(),
+          userPrompt: action.userPrompt,
+          action: {
+            id: action.id,
+            toolName: action.toolName,
+            command: action.commandString,
+            targetPath: action.targetPath,
+            sessionID,
+          },
+          ...(metaModel ? { model: metaModel } : {}),
+          inference: {
+            ...(metaInference ?? {}),
+            durationMs: hookDurationMs,
+          },
+          decision: {
+            verdict: decision.verdict,
+            riskLevel: decision.riskLevel,
+            userAuthorization: decision.userAuthorization,
+            reason: decision.reason,
+          },
+          cascade: decision.cascade,
+        },
+        evalLogFile,
+      ).catch(() => {});
+    }
 
     if (decision.verdict === "ALLOW") {
       const record = { verdict: "ALLOW", policy: "allow" as const };

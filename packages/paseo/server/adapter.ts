@@ -278,8 +278,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
             }
           }
           if (typeof timelineAgent?.timeline?.append === "function") {
-            const evalAgentId = (decision as unknown as { metadata?: { evalAgentId?: unknown } })
-              .metadata?.evalAgentId;
+            const evalAgentId = decision.metadata?.evalAgentId;
             await timelineAgent.timeline.append({
               type: "plugin",
               id: "autogate-eval-" + action.id,
@@ -292,6 +291,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
                 command: action.commandString,
                 toolName: action.toolName,
                 evalAgentId: typeof evalAgentId === "string" ? evalAgentId : undefined,
+                ...(decision.cascade ? { cascade: decision.cascade } : {}),
               },
             });
           }
@@ -360,6 +360,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
             reason: decision.reason,
             risk_level: decision.riskLevel,
             user_authorization: decision.userAuthorization,
+            cascade: decision.cascade,
           }),
           priority: "high",
           tags: ["lock", "robot"],

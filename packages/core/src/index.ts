@@ -11,7 +11,16 @@ export * from "./config.js";
 export {
   loadConfig,
   loadFileConfig,
+  resolveConfigFilePath,
+  resolveConfigDir,
+  resolveRuntimeDir,
+  resolveControlFilePath,
   parseEnvironmentConfig,
+  parseSystemOneConfig,
+  DEFAULT_SYSTEM_ONE_ENDPOINT,
+  DEFAULT_SYSTEM_ONE_MODEL,
+  DEFAULT_SYSTEM_ONE_TIMEOUT_MS,
+  DEFAULT_SYSTEM_ONE_THRESHOLDS,
   isRecord,
   isStringArray,
 } from "./config.js";
@@ -27,6 +36,10 @@ export {
   buildClassifierPrompt,
   buildClassifierSystemPrompt,
   buildClassifierUserPrompt,
+  buildSystemOneState,
+  buildSystemOneStateWithMeta,
+  truncateUtf8Bytes,
+  SYSTEM_ONE_PROBE_MAX_BYTES,
   parseVerdict,
   deobfuscatePayload,
   PASSIVE_EVALUATOR_DIRECTIVE,
@@ -44,6 +57,15 @@ export {
   detectDirectFileTarget,
   extractCommandString,
 } from "./prober.js";
+export * from "./cascade.js";
+export { computeContextFingerprint, evaluateCascadePolicy, CascadeEvaluator } from "./cascade.js";
+export * from "./system-one.js";
+export {
+  SystemOneEvaluator,
+  buildSystemOneRequestPayload,
+  validateSystemOneResponse,
+  createConfiguredEvaluator,
+} from "./system-one.js";
 export * from "./engine.js";
 export {
   AutoGateEngine,

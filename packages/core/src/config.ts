@@ -2,14 +2,25 @@ import type {
   AutoGateConfig,
   EnvironmentConfig,
   NtfyVerbosity,
-  OmpHarnessConfig,
-  OpenCodeHarnessConfig,
-  PaseoHarnessConfig,
   ReviewFallbackMode,
+  SystemOneConfig,
+  SystemOneExecutionMode,
+  SystemOneThresholds,
 } from "./types";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+
+export const DEFAULT_SYSTEM_ONE_ENDPOINT = "http://127.0.0.1:4006/v1/systemone";
+export const DEFAULT_SYSTEM_ONE_MODEL = "gemini-decision-1";
+export const DEFAULT_SYSTEM_ONE_TIMEOUT_MS = 4000;
+export const DEFAULT_SYSTEM_ONE_THRESHOLDS: SystemOneThresholds = {
+  allowMinProb: 0.92,
+  blockMinProb: 0.85,
+  minOddsRatio: 4.0,
+  minInScopeNoul: 0.7,
+  maxInjectionNoul: 0.5,
+};
 
 function expandPath(p: string): string {
   if (typeof p !== "string") return p;
@@ -43,7 +54,112 @@ function parseHarnessRecord(val: unknown): Record<string, unknown> {
   return isRecord(val) ? val : {};
 }
 
-export function loadFileConfig(options?: Record<string, unknown>): Record<string, unknown> {
+function parseFiniteUnitNumber(val: unknown, fallback: number): number {
+  if (typeof val === "number" && Number.isFinite(val) && val >= 0 && val <= 1) {
+    return val;
+  }
+  return fallback;
+}
+
+function parsePositiveNumber(val: unknown, fallback: number): number {
+  if (typeof val === "number" && Number.isFinite(val) && val > 0) {
+    return val;
+  }
+  if (typeof val === "string" && val.trim().length > 0) {
+    const num = Number(val);
+    if (Number.isFinite(num) && num > 0) {
+      return num;
+    }
+  }
+  return fallback;
+}
+
+function parseBooleanValue(val: unknown): boolean | undefined {
+  if (typeof val === "boolean") return val;
+  if (typeof val === "string") {
+    const lower = val.toLowerCase().trim();
+    if (lower === "true" || lower === "1" || lower === "on") return true;
+    if (lower === "false" || lower === "0" || lower === "off") return false;
+  }
+  return undefined;
+}
+
+export function parseSystemOneConfig(
+  fileVal: unknown,
+  optVal: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): SystemOneConfig {
+  const fileObj = isRecord(fileVal) ? fileVal : {};
+  const optObj = isRecord(optVal) ? optVal : {};
+
+  const optEnabled = parseBooleanValue(optObj.enabled);
+  const envEnabled = parseBooleanValue(env.AUTOGATE_SYSTEM_ONE_ENABLED);
+  const fileEnabled = parseBooleanValue(fileObj.enabled);
+  const enabled = optEnabled ?? envEnabled ?? fileEnabled ?? false;
+
+  const rawMode = optObj.executionMode ?? env.AUTOGATE_SYSTEM_ONE_MODE ?? fileObj.executionMode;
+  const executionMode: SystemOneExecutionMode =
+    rawMode === "cascade" || rawMode === "race" ? rawMode : "race";
+
+  const rawEndpoint = optObj.endpoint ?? env.AUTOGATE_SYSTEM_ONE_ENDPOINT ?? fileObj.endpoint;
+  const endpoint =
+    typeof rawEndpoint === "string" && rawEndpoint.trim().length > 0
+      ? rawEndpoint.trim()
+      : DEFAULT_SYSTEM_ONE_ENDPOINT;
+
+  const rawModel = optObj.model ?? env.AUTOGATE_SYSTEM_ONE_MODEL ?? fileObj.model;
+  const model =
+    typeof rawModel === "string" && rawModel.trim().length > 0
+      ? rawModel.trim()
+      : DEFAULT_SYSTEM_ONE_MODEL;
+
+  const rawApiKey = optObj.apiKey ?? env.AUTOGATE_SYSTEM_ONE_API_KEY ?? fileObj.apiKey;
+  const apiKey =
+    typeof rawApiKey === "string" && rawApiKey.trim().length > 0 ? rawApiKey.trim() : undefined;
+
+  const timeoutMs = parsePositiveNumber(
+    optObj.timeoutMs ?? env.AUTOGATE_SYSTEM_ONE_TIMEOUT_MS ?? fileObj.timeoutMs,
+    DEFAULT_SYSTEM_ONE_TIMEOUT_MS,
+  );
+
+  const fileThresh = isRecord(fileObj.thresholds) ? fileObj.thresholds : {};
+  const optThresh = isRecord(optObj.thresholds) ? optObj.thresholds : {};
+
+  const thresholds: SystemOneThresholds = {
+    allowMinProb: parseFiniteUnitNumber(
+      optThresh.allowMinProb ?? fileThresh.allowMinProb,
+      DEFAULT_SYSTEM_ONE_THRESHOLDS.allowMinProb,
+    ),
+    blockMinProb: parseFiniteUnitNumber(
+      optThresh.blockMinProb ?? fileThresh.blockMinProb,
+      DEFAULT_SYSTEM_ONE_THRESHOLDS.blockMinProb,
+    ),
+    minOddsRatio: parsePositiveNumber(
+      optThresh.minOddsRatio ?? fileThresh.minOddsRatio,
+      DEFAULT_SYSTEM_ONE_THRESHOLDS.minOddsRatio,
+    ),
+    minInScopeNoul: parseFiniteUnitNumber(
+      optThresh.minInScopeNoul ?? fileThresh.minInScopeNoul,
+      DEFAULT_SYSTEM_ONE_THRESHOLDS.minInScopeNoul,
+    ),
+    maxInjectionNoul: parseFiniteUnitNumber(
+      optThresh.maxInjectionNoul ?? fileThresh.maxInjectionNoul,
+      DEFAULT_SYSTEM_ONE_THRESHOLDS.maxInjectionNoul,
+    ),
+  };
+
+  return {
+    enabled,
+    executionMode,
+    endpoint,
+    model,
+    ...(apiKey !== undefined ? { apiKey } : {}),
+    timeoutMs,
+    thresholds,
+  };
+}
+
+function getConfigFileCandidates(options?: Record<string, unknown>): string[] {
   const env = process.env;
   const customConfigPath =
     typeof options?.configFile === "string"
@@ -61,13 +177,41 @@ export function loadFileConfig(options?: Record<string, unknown>): Record<string
 
   const xdgConfigHome = env.XDG_CONFIG_HOME?.trim();
   if (xdgConfigHome) {
-    candidates.push(path.resolve(expandPath(path.join(xdgConfigHome, "autogate", "config.json"))));
+    const xdgConfigPath = path.resolve(
+      expandPath(path.join(xdgConfigHome, "autogate", "config.json")),
+    );
+    if (!candidates.includes(xdgConfigPath)) {
+      candidates.push(xdgConfigPath);
+    }
   } else {
     const fallbackConfigPath = path.join(os.homedir(), ".config", "autogate", "config.json");
     if (!candidates.includes(fallbackConfigPath)) {
       candidates.push(fallbackConfigPath);
     }
   }
+
+  return candidates;
+}
+
+export function resolveConfigFilePath(options?: Record<string, unknown>): string {
+  const candidates = getConfigFileCandidates(options);
+  return candidates[0] ?? path.join(os.homedir(), ".config", "autogate", "config.json");
+}
+
+export function resolveConfigDir(options?: Record<string, unknown>): string {
+  return path.dirname(resolveConfigFilePath(options));
+}
+
+export function resolveRuntimeDir(options?: Record<string, unknown>): string {
+  return path.join(resolveConfigDir(options), "runtime");
+}
+
+export function resolveControlFilePath(options?: Record<string, unknown>): string {
+  return path.join(resolveConfigDir(options), "control.json");
+}
+
+export function loadFileConfig(options?: Record<string, unknown>): Record<string, unknown> {
+  const candidates = getConfigFileCandidates(options);
   for (const candidate of candidates) {
     try {
       if (fs.existsSync(candidate)) {
@@ -295,6 +439,12 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
       fileTrustedPaths ?? ["~/Projects"],
   };
 
+  const parsedSystemOne = parseSystemOneConfig(fileConfig.systemOne, options?.systemOne, env);
+  const systemOne: SystemOneConfig =
+    options?.evaluator !== undefined && options?.systemOne === undefined
+      ? { ...parsedSystemOne, enabled: false }
+      : parsedSystemOne;
+
   return {
     autoMode,
     ntfyTopic,
@@ -309,6 +459,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     serverUrl,
     reviewFallbackMode,
     evalLogFile,
+    systemOne,
     omp: {
       ...parseHarnessRecord(fileConfig.omp),
       ...parseHarnessRecord(options?.omp),

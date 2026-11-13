@@ -50,6 +50,7 @@ export interface OpenCodeSessionClient {
 export interface OpenCodeClassifyInput extends ClassifyInput {
   client?: OpenCodeSessionClient;
   config?: AutoGateConfig;
+  signal?: AbortSignal;
 }
 
 export interface OpenCodeEvent {

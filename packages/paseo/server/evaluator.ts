@@ -97,6 +97,19 @@ function extractCandidateText(finishResult: unknown): string {
   return "";
 }
 
+function cancelEvalAgent(agent: PaseoAgentInstance | undefined): void {
+  if (!agent) return;
+  try {
+    if (typeof agent.abort === "function") {
+      Promise.resolve(agent.abort()).catch(() => {});
+    } else if (typeof agent.stop === "function") {
+      Promise.resolve(agent.stop()).catch(() => {});
+    } else if (typeof agent.cancel === "function") {
+      Promise.resolve(agent.cancel()).catch(() => {});
+    }
+  } catch {}
+}
+
 /**
  * Native Paseo Security Evaluator.
  *
@@ -209,6 +222,13 @@ export class PaseoNativeEvaluator implements GateEvaluator {
 
     let evalAgentId: string | undefined;
 
+    if (action.signal?.aborted) {
+      return {
+        verdict: "UNSURE",
+        reason: "PaseoNativeEvaluator error: Action evaluation aborted by signal",
+      };
+    }
+
     try {
       const paseo = await this.resolvePaseo();
       console.log("[AutoGate Native] resolvePaseo found:", Boolean(paseo?.agents?.create));
@@ -224,6 +244,12 @@ export class PaseoNativeEvaluator implements GateEvaluator {
       }
 
       const resolvedProvider = await this.resolveProvider(paseo, runtimeOptions);
+      if (action.signal?.aborted) {
+        return {
+          verdict: "UNSURE",
+          reason: "PaseoNativeEvaluator error: Action evaluation aborted by signal",
+        };
+      }
       const cwd = ensureEvaluationDirectory(this.options?.cwd || DEFAULT_EVAL_CWD);
 
       const userPromptText = buildClassifierUserPrompt({
@@ -301,6 +327,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
       const onActionAbort = () => {
+        cancelEvalAgent(evalAgent);
         controller.abort(action.signal?.reason || new Error("Action evaluation aborted"));
       };
 
@@ -313,6 +340,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
       }
 
       timeoutId = setTimeout(() => {
+        cancelEvalAgent(evalAgent);
         controller.abort(new Error(`Classifier evaluation timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 

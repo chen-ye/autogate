@@ -605,7 +605,9 @@ describe("AutoGateCoreEngine", () => {
     expect(pub.message).toContain("Session: ses-verbose-1");
     expect(pub.message).toContain("User Prompt:\nDeploy to production");
     expect(pub.message).toContain("Subagent Task:\n[Worker] run terraform apply");
-    expect(pub.message).toContain("--- Model Reasoning ---\nPotentially destructive infrastructure modification.");
+    expect(pub.message).toContain(
+      "--- Model Reasoning ---\nPotentially destructive infrastructure modification.",
+    );
     expect(pub.message).toContain("Domains: example.com");
 
     // Remote resolution
@@ -672,5 +674,43 @@ describe("AutoGateCoreEngine", () => {
     expect(decision.verdict).toBe("ALLOW");
     expect(adapter.updatedStatuses.length).toBe(1);
     expect(adapter.updatedStatuses[0].preserveBody).toBeUndefined();
+  });
+
+  it("exposes getConsecutiveBlockThreshold and getInFlightRequests read-only accessors", async () => {
+    const silentAdapter = new MockAdapter();
+    const accEngine = new AutoGateCoreEngine({
+      config: { ...config, consecutiveBlockThreshold: 5 },
+      evaluator: mockEvaluator,
+      adapter: silentAdapter,
+      workspaceRoot: "/workspace/acc",
+      remoteReviewEnabled: true,
+    });
+
+    expect(accEngine.getConsecutiveBlockThreshold()).toBe(5);
+    expect(accEngine.getInFlightRequests()).toEqual([]);
+
+    mockEvaluator.nextResult = { verdict: "UNSURE", reason: "Needs review" };
+    const evalPromise = accEngine.evaluate({
+      id: "act-acc-1",
+      harness: "opencode",
+      sessionID: "ses-acc-1",
+      toolName: "bash",
+      commandString: "echo test",
+      workspaceRoot: "/workspace/acc",
+      userPrompt: "test",
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(accEngine.getInFlightRequests()).toEqual([
+      {
+        id: "act-acc-1",
+        sessionID: "ses-acc-1",
+        directory: "/workspace/acc",
+      },
+    ]);
+
+    accEngine.resolveReviewResponse({ req_id: "act-acc-1", reply: "once", source: "ntfy" });
+    await evalPromise;
+    expect(accEngine.getInFlightRequests()).toEqual([]);
   });
 });

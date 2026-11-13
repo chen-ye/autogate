@@ -77,6 +77,7 @@ export interface OpenCodeV1SessionClient {
 export interface OpenCodeV1ClassifyInput extends ClassifyInput {
   client?: OpenCodeV1SessionClient;
   config?: AutoGateConfig;
+  signal?: AbortSignal;
 }
 
 export interface OpenCodeV1Event {

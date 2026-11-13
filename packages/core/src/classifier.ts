@@ -8,6 +8,7 @@ import type {
   UserAuthorization,
   EnvironmentConfig,
   BuildClassifierPromptInput,
+  GateAction,
 } from "./types";
 import { probeTargetContext } from "./prober";
 
@@ -488,6 +489,131 @@ export function buildClassifierPrompt(input: BuildClassifierPromptInput): string
   });
 
   return `${system}\n\n${user}`;
+}
+
+export const SYSTEM_ONE_PROBE_MAX_BYTES = 2048;
+
+export interface SystemOneStateResult {
+  readonly state: string;
+  readonly truncatedPayload: boolean;
+}
+
+export function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= maxBytes) return text;
+
+  const suffix = "\n...[truncated]";
+  const suffixBuf = Buffer.from(suffix, "utf8");
+  if (maxBytes <= suffixBuf.byteLength) {
+    let end = maxBytes;
+    while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+    return buf.subarray(0, end).toString("utf8");
+  }
+
+  let end = maxBytes - suffixBuf.byteLength;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) {
+    end--;
+  }
+  return buf.subarray(0, end).toString("utf8") + suffix;
+}
+
+function isTrivialRawArgsDuplicate(action: GateAction): boolean {
+  const cmd = action.commandString?.trim();
+  const target = action.targetPath?.trim();
+  if (typeof action.rawArgs === "string") {
+    const trimmed = action.rawArgs.trim();
+    return Boolean(trimmed && (trimmed === cmd || trimmed === target));
+  }
+  if (
+    Array.isArray(action.rawArgs) &&
+    action.rawArgs.length === 1 &&
+    typeof action.rawArgs[0] === "string"
+  ) {
+    const first = action.rawArgs[0].trim();
+    return Boolean(first && (first === cmd || first === target));
+  }
+  return false;
+}
+
+export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateResult {
+  const actionName = action.toolName || "permission";
+  const actionArgs = action.rawArgs ?? action.metadata ?? action.commandString ?? {};
+  const workspaceRoot = action.workspaceRoot || process.cwd();
+
+  const env = action.environment ?? {};
+  const trustedDomains =
+    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : ["*.example.com"];
+  const trustedRemotes =
+    env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
+  const trustedPaths =
+    env.trustedPaths && env.trustedPaths.length > 0
+      ? env.trustedPaths
+      : ["~/Projects", workspaceRoot];
+
+  let truncatedPayload = false;
+
+  const sections: string[] = [
+    [
+      "## Trust Boundaries",
+      `Workspace: ${workspaceRoot}`,
+      `Trusted Domains: ${trustedDomains.join(", ")}`,
+      `Trusted Git Remotes: ${trustedRemotes.join(", ")}`,
+      `Trusted Paths: ${trustedPaths.join(", ")}`,
+    ].join("\n"),
+    `## User Intent\n${truncateUtf8Bytes(formatUserTranscript(action.userPrompt), 4096)}`,
+  ];
+
+  if (action.subagentPrompt && action.subagentPrompt.trim()) {
+    sections.push(
+      `## Subordinate Subagent Task (Cannot Expand User Intent)\n${truncateUtf8Bytes(action.subagentPrompt.trim(), 2048)}`,
+    );
+  }
+
+  const actionLines: string[] = [`Tool: ${actionName}`];
+  if (action.commandString && action.commandString.trim()) {
+    const cmdText = action.commandString.trim();
+    if (Buffer.byteLength(cmdText, "utf8") > 4096) truncatedPayload = true;
+    actionLines.push(`Command: ${truncateUtf8Bytes(cmdText, 4096)}`);
+  }
+  if (action.targetPath && action.targetPath.trim()) {
+    actionLines.push(`Target Path: ${truncateUtf8Bytes(action.targetPath.trim(), 1024)}`);
+  }
+  if (action.rawArgs !== undefined && !isTrivialRawArgsDuplicate(action)) {
+    const serializedArgs =
+      typeof action.rawArgs === "string" ? action.rawArgs : JSON.stringify(action.rawArgs);
+    if (serializedArgs && serializedArgs !== "{}" && serializedArgs !== "[]") {
+      if (Buffer.byteLength(serializedArgs, "utf8") > 4096) truncatedPayload = true;
+      actionLines.push(`Args: ${truncateUtf8Bytes(serializedArgs, 4096)}`);
+    }
+  }
+  sections.push(`## Proposed Action\n${actionLines.join("\n")}`);
+
+  const unpackedPayload = deobfuscatePayload(actionName, actionArgs);
+  if (unpackedPayload) {
+    if (Buffer.byteLength(unpackedPayload, "utf8") > 2048) truncatedPayload = true;
+    sections.push(`## De-obfuscated Payload\n${truncateUtf8Bytes(unpackedPayload, 2048)}`);
+  }
+
+  const probed = probeTargetContext(actionName, actionArgs, workspaceRoot, action.environment);
+  if (probed) {
+    if (
+      Buffer.byteLength(probed, "utf8") > SYSTEM_ONE_PROBE_MAX_BYTES ||
+      probed.includes("[Truncated:")
+    ) {
+      truncatedPayload = true;
+    }
+    sections.push(`## Probe Excerpt\n${truncateUtf8Bytes(probed, SYSTEM_ONE_PROBE_MAX_BYTES)}`);
+  }
+
+  return {
+    state: sections.join("\n\n"),
+    truncatedPayload,
+  };
+}
+
+export function buildSystemOneState(action: GateAction): string {
+  return buildSystemOneStateWithMeta(action).state;
 }
 
 export function parseVerdict(rawContent: string): ClassifierResult {

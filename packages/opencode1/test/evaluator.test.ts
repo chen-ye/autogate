@@ -147,5 +147,43 @@ describe("@autogate/opencode1 evaluator OpenCode v1 support", () => {
       const body = promptOpts?.body as { parts?: unknown[] } | undefined;
       expect(Array.isArray(body?.parts)).toBe(true);
     });
+
+    it("aborts ephemeral v1 session and skips reprompts when signal aborts", async () => {
+      const controller = new AbortController();
+      let abortedSessionID: string | undefined;
+      let promptCalls = 0;
+
+      const mockClient = {
+        app: { agents: async () => ({ data: [{ name: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_v1_abort" } }),
+          update: async () => ({}),
+          abort: async (opts: { path: { id?: string } }) => {
+            abortedSessionID = opts.path.id;
+            return {};
+          },
+          prompt: async () => {
+            promptCalls++;
+            await new Promise((r) => setTimeout(r, 80));
+            return { data: { parts: [] } };
+          },
+        },
+      } as unknown as OpenCodeV1SessionClient;
+
+      setTimeout(() => controller.abort("system1-won-race"), 10);
+
+      const res = await classifyRequest({
+        client: mockClient,
+        actionName: "bash",
+        actionArgs: { command: "git status" },
+        signal: controller.signal,
+      });
+
+      expect(res.verdict).toBe("UNSURE");
+      expect(res.reason).toContain("aborted");
+      expect(abortedSessionID).toBe("ses_v1_abort");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(promptCalls).toBe(1);
+    });
   });
 });

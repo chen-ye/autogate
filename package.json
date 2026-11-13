@@ -8,9 +8,10 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
-    "lint": "bunx oxlint packages test",
-    "format": "bunx oxfmt --write packages test",
-    "format:check": "bunx oxfmt --check packages test"
+    "lint": "bunx oxlint packages scripts test",
+    "format": "bunx oxfmt --write packages scripts test",
+    "format:check": "bunx oxfmt --check packages scripts test",
+    "eval:cascade": "bun run scripts/eval-cascade.ts"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.8.0",

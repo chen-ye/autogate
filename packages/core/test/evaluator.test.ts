@@ -90,4 +90,39 @@ describe("DirectApiEvaluator", () => {
     expect(result.verdict).toBe("UNSURE");
     expect(result.reason).toContain("DirectApiEvaluator error");
   });
+
+  it("aborts in-flight fetch immediately when action.signal aborts", async () => {
+    const controller = new AbortController();
+    let fetchAborted = false;
+
+    const mockFetch: typeof fetch = async (_input, init) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          fetchAborted = true;
+          const err = new Error("Aborted by cascade");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    };
+
+    const evaluator = new DirectApiEvaluator({
+      apiKey: "test-api-key",
+      timeoutMs: 30000,
+      fetchImpl: mockFetch,
+    });
+
+    setTimeout(() => controller.abort("system1-won-race"), 10);
+
+    const start = performance.now();
+    const result = await evaluator.evaluate({
+      ...sampleAction,
+      signal: controller.signal,
+    });
+    const elapsed = performance.now() - start;
+
+    expect(fetchAborted).toBe(true);
+    expect(result.verdict).toBe("UNSURE");
+    expect(elapsed).toBeLessThan(200);
+  });
 });
