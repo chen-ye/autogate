@@ -1,3 +1,14 @@
+export * from "./agent.js";
+export {
+  EVAL_AGENT_ID,
+  FALLBACK_CLASSIFIER_MODEL,
+  parseYamlFrontmatter,
+  parseAgentMarkdown,
+  resolveEvalAgentPath,
+  loadEvalAgentDefinition,
+  getDefaultClassifierModel,
+  parseModelRef,
+} from "./agent.js";
 export * from "./types.js";
 export {
   parseSessionId,

@@ -9,7 +9,8 @@ import {
   isClassifierVerdict,
   isRiskLevel,
   isUserAuthorization,
-  buildClassifierSystemPrompt,
+  loadEvalAgentDefinition,
+  parseModelRef,
   type HarnessAdapter,
   type PermissionEventData,
   type GateAction,
@@ -500,33 +501,57 @@ export const plugin = definePlugin({
     );
 
     if (ctx.agent && typeof ctx.agent.transform === "function") {
-      const systemPrompt = buildClassifierSystemPrompt();
+      const evalAgent = loadEvalAgentDefinition();
+      const effectiveModel = config.classifierModel || evalAgent.model;
+      const modelRef = effectiveModel ? parseModelRef(effectiveModel) : undefined;
       await ctx.agent.transform(
         (editor: {
           update: (id: string, fn: (draft: Record<string, unknown>) => void) => void;
         }) => {
-          editor.update("auto-gate-eval", (draft) => {
-            const rawModel = config.classifierModel || "google/gemini-3.5-flash-lite";
-            const slashIdx = rawModel.indexOf("/");
-            const providerID = slashIdx > 0 ? rawModel.slice(0, slashIdx) : "google";
-            const rest = slashIdx > 0 ? rawModel.slice(slashIdx + 1) : rawModel;
-            const hashIdx = rest.indexOf("#");
-            const modelID = hashIdx > 0 ? rest.slice(0, hashIdx) : rest;
-            const variant = hashIdx > 0 ? rest.slice(hashIdx + 1) : undefined;
-
-            draft.name = "auto-gate-eval";
-            draft.description = "Autonomous security evaluation classifier for AutoGate";
-            draft.mode = "subagent";
-            draft.hidden = true;
-            draft.system = systemPrompt;
-            draft.steps = 3;
-            draft.model = variant
-              ? { providerID, id: modelID, variant }
-              : { providerID, id: modelID };
-            draft.permissions = [
-              { action: "*", resource: "*", effect: "deny" },
-              { action: "classify_result", resource: "*", effect: "allow" },
-            ];
+          editor.update(evalAgent.id, (draft) => {
+            draft.name = evalAgent.name;
+            if (evalAgent.description) {
+              draft.description = evalAgent.description;
+            }
+            draft.mode = evalAgent.mode;
+            draft.hidden = evalAgent.hidden;
+            draft.system = evalAgent.system;
+            if (evalAgent.color) {
+              draft.color = evalAgent.color;
+            }
+            if (evalAgent.steps !== undefined) {
+              draft.steps = evalAgent.steps;
+            }
+            if (modelRef) {
+              draft.model = modelRef.variant
+                ? {
+                    providerID: modelRef.providerID,
+                    id: modelRef.modelID,
+                    variant: modelRef.variant,
+                  }
+                : { providerID: modelRef.providerID, id: modelRef.modelID };
+            }
+            if (evalAgent.request) {
+              const existingReq =
+                draft.request && typeof draft.request === "object"
+                  ? (draft.request as Record<string, unknown>)
+                  : {};
+              const existingBody =
+                existingReq.body && typeof existingReq.body === "object"
+                  ? (existingReq.body as Record<string, unknown>)
+                  : {};
+              draft.request = {
+                ...existingReq,
+                ...(evalAgent.request.settings ? { settings: evalAgent.request.settings } : {}),
+                ...(evalAgent.request.headers ? { headers: evalAgent.request.headers } : {}),
+                ...(evalAgent.request.body
+                  ? { body: { ...existingBody, ...evalAgent.request.body } }
+                  : {}),
+              };
+            }
+            if (evalAgent.permissions && evalAgent.permissions.length > 0) {
+              draft.permissions = evalAgent.permissions.map((p) => ({ ...p }));
+            }
           });
         },
       );

@@ -13,12 +13,15 @@ import type {
   CascadeTrace,
 } from "@autogate/core";
 import {
+  EVAL_AGENT_ID,
   buildClassifierUserPrompt,
   parseVerdict,
+  parseModelRef,
   isRiskLevel,
   isUserAuthorization,
   isClassifierVerdict,
 } from "@autogate/core";
+export { parseModelRef };
 import { resolveServerPassword } from "./index.js";
 import type { OpenCodeClassifyInput, OpenCodeSessionClient } from "./types.js";
 export type { OpenCodeClassifyInput, OpenCodeSessionClient };
@@ -161,29 +164,6 @@ export function ensureSandboxDirectory(): string {
   }
 }
 
-export function parseModelRef(modelRef?: string): {
-  providerID: string;
-  modelID: string;
-  variant?: string;
-} {
-  const ref = modelRef?.trim() || "google/gemini-3.5-flash-lite";
-  const slashIdx = ref.indexOf("/");
-  const providerID = slashIdx > 0 ? ref.slice(0, slashIdx) : "google";
-  const rest = slashIdx > 0 ? ref.slice(slashIdx + 1) : ref;
-  const hashIdx = rest.indexOf("#");
-  let modelID = hashIdx > 0 ? rest.slice(0, hashIdx) : rest;
-  const variant = hashIdx > 0 ? rest.slice(hashIdx + 1) : undefined;
-  modelID = modelID
-    .replace(/\.flash/gi, "-flash")
-    .replace(/\.lite/gi, "-lite")
-    .replace(/\.pro/gi, "-pro");
-  return {
-    providerID,
-    modelID,
-    ...(variant ? { variant } : {}),
-  };
-}
-
 let cachedEvalAgent: string | undefined;
 
 export async function resolveEvaluationAgent(client?: OpenCodeSessionClient): Promise<string> {
@@ -198,16 +178,15 @@ export async function resolveEvaluationAgent(client?: OpenCodeSessionClient): Pr
         (a) =>
           typeof a === "object" &&
           a !== null &&
-          (("id" in a && a.id === "auto-gate-eval") ||
-            ("name" in a && a.name === "auto-gate-eval")),
+          (("id" in a && a.id === EVAL_AGENT_ID) || ("name" in a && a.name === EVAL_AGENT_ID)),
       )
     ) {
       cachedEvalAgent = "build";
       return "build";
     }
   } catch {}
-  cachedEvalAgent = "auto-gate-eval";
-  return "auto-gate-eval";
+  cachedEvalAgent = EVAL_AGENT_ID;
+  return EVAL_AGENT_ID;
 }
 
 function extractToolInput(part: Record<string, unknown>): Record<string, unknown> | null {

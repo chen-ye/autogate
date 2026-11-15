@@ -157,6 +157,7 @@ describe("@autogate/opencode runtime agent injection", () => {
       const evalAgent = updatedAgents["auto-gate-eval"];
       expect(evalAgent).toBeDefined();
       expect(evalAgent?.name).toBe("auto-gate-eval");
+      expect(evalAgent?.description).toBe("Autonomous security evaluation classifier for AutoGate");
       expect(evalAgent?.mode).toBe("subagent");
       expect(evalAgent?.hidden).toBe(true);
       expect(evalAgent?.steps).toBe(3);
@@ -164,8 +165,60 @@ describe("@autogate/opencode runtime agent injection", () => {
         providerID: "google",
         id: "gemini-3.5-flash-lite",
       });
+      expect(evalAgent?.request).toEqual({
+        body: {
+          temperature: 0.1,
+        },
+      });
+      expect(evalAgent?.permissions).toEqual([
+        { action: "*", resource: "*", effect: "deny" },
+        { action: "classify_result", resource: "*", effect: "allow" },
+      ]);
       expect(typeof evalAgent?.system).toBe("string");
       expect(String(evalAgent?.system ?? "").length).toBeGreaterThan(100);
+    } finally {
+      if (typeof cleanup === "function") await cleanup();
+    }
+  });
+
+  it("allows classifierModel option with #variant to override auto-gate-eval.md default model", async () => {
+    const updatedAgents: Record<string, Record<string, unknown>> = {};
+    const cleanup = await plugin.setup({
+      directory: "/tmp/test-ws-override",
+      options: {
+        classifierModel: "anthropic/claude-haiku-4-5#low",
+        ntfyServer: "http://127.0.0.1:59999",
+      },
+      agent: {
+        transform: async (
+          fn: (editor: {
+            update: (id: string, cb: (draft: Record<string, unknown>) => void) => void;
+          }) => void,
+        ) => {
+          fn({
+            update(id, cb) {
+              const draft: Record<string, unknown> = {
+                request: { headers: { "x-existing": "1" }, body: { maxTokens: 500 } },
+              };
+              cb(draft);
+              updatedAgents[id] = draft;
+            },
+          });
+        },
+      },
+    });
+
+    try {
+      const evalAgent = updatedAgents["auto-gate-eval"];
+      expect(evalAgent?.model).toEqual({
+        providerID: "anthropic",
+        id: "claude-haiku-4-5",
+        variant: "low",
+      });
+      expect(evalAgent?.request).toEqual({
+        headers: { "x-existing": "1" },
+        body: { maxTokens: 500, temperature: 0.1 },
+      });
     } finally {
       if (typeof cleanup === "function") await cleanup();
     }

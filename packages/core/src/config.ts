@@ -10,6 +10,7 @@ import type {
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { getDefaultClassifierModel } from "./agent";
 
 export const DEFAULT_SYSTEM_ONE_ENDPOINT = "http://127.0.0.1:4006/v1/systemone";
 export const DEFAULT_SYSTEM_ONE_MODEL = "gemini-decision-1";
@@ -360,7 +361,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
   const classifierModel =
     typeof rawModel === "string" && rawModel.trim().length > 0
       ? rawModel.trim()
-      : "google/gemini-3.5-flash-lite";
+      : getDefaultClassifierModel();
 
   const rawEvalLogFile = options?.evalLogFile ?? env.AUTOGATE_EVAL_LOG ?? fileConfig.evalLogFile;
   const evalLogFile =

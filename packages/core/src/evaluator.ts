@@ -1,5 +1,6 @@
 import type { GateEvaluator, GateAction, ClassifierResult } from "./types";
 import { CLASSIFIER_JSON_SCHEMA } from "./types";
+import { getDefaultClassifierModel } from "./agent";
 import { buildClassifierPrompt, parseVerdict } from "./classifier";
 
 export interface DirectApiEvaluatorOptions {
@@ -65,7 +66,7 @@ export class DirectApiEvaluator implements GateEvaluator {
         };
       }
 
-      let model = opts.model || process.env.CLASSIFIER_MODEL || "gemini-3.5-flash-lite";
+      let model = opts.model || process.env.CLASSIFIER_MODEL || getDefaultClassifierModel();
       if (model.startsWith("google/")) {
         model = model.slice(7);
       }
