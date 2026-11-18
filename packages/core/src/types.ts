@@ -202,6 +202,7 @@ export interface GateAction {
   toolName: string;
   commandString?: string;
   targetPath?: string;
+  patterns?: string[];
   rawArgs?: unknown;
   workspaceRoot: string;
   userPrompt: string;
@@ -218,6 +219,7 @@ export function createGateAction(input: {
   toolName: string;
   commandString?: string;
   targetPath?: string;
+  patterns?: string[];
   rawArgs?: unknown;
   workspaceRoot?: string;
   userPrompt?: string;
@@ -233,6 +235,7 @@ export function createGateAction(input: {
     toolName: input.toolName,
     commandString: input.commandString,
     targetPath: input.targetPath,
+    ...(input.patterns ? { patterns: input.patterns } : {}),
     rawArgs: input.rawArgs,
     workspaceRoot: input.workspaceRoot || process.cwd(),
     userPrompt: input.userPrompt || "",

@@ -235,12 +235,31 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
 
     this.runtimeSync.syncControlAndConfig();
 
+    const nonEmptyStringList = (val: unknown): string[] | undefined => {
+      if (!Array.isArray(val)) return undefined;
+      const strings = val.filter(
+        (item): item is string => typeof item === "string" && item.trim().length > 0,
+      );
+      return strings.length > 0 ? strings : undefined;
+    };
+
+    const resources = nonEmptyStringList(request.resources);
+    const patterns = nonEmptyStringList(request.patterns);
     const commandString =
-      typeof request.metadata?.command === "string"
+      typeof request.metadata?.command === "string" && request.metadata.command.trim().length > 0
         ? request.metadata.command
-        : Array.isArray(request.resources) && typeof request.resources[0] === "string"
-          ? request.resources[0]
-          : undefined;
+        : typeof request.metadata?.cmd === "string" && request.metadata.cmd.trim().length > 0
+          ? request.metadata.cmd
+          : (resources?.join(" ") ?? patterns?.join(" "));
+
+    const targetPath =
+      typeof request.metadata?.filepath === "string" && request.metadata.filepath.trim().length > 0
+        ? request.metadata.filepath
+        : typeof request.metadata?.path === "string" && request.metadata.path.trim().length > 0
+          ? request.metadata.path
+          : typeof request.metadata?.file === "string" && request.metadata.file.trim().length > 0
+            ? request.metadata.file
+            : undefined;
 
     const toolName = request.action || request.permission || request.source?.type || "permission";
 
@@ -266,9 +285,9 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       sessionID,
       toolName,
       commandString,
-      targetPath:
-        typeof request.metadata?.filepath === "string" ? request.metadata.filepath : undefined,
-      rawArgs: request.resources || request.patterns || request.metadata,
+      targetPath,
+      ...(patterns ? { patterns } : {}),
+      rawArgs: resources ?? patterns ?? request.metadata,
       workspaceRoot: (request.metadata?.directory as string) || workspaceRoot,
       userPrompt: resolvedPrompts.userPrompt,
       subagentPrompt: resolvedPrompts.subagentPrompt,
@@ -622,13 +641,21 @@ export const plugin = definePlugin({
             required: ["action", "reason"],
           },
           async execute(args: Record<string, unknown>, context: { sessionID?: string }) {
+            adapter.getRuntimeSync().syncControlAndConfig();
             const actionStr = typeof args.action === "string" ? args.action : "";
             const reasonStr = typeof args.reason === "string" ? args.reason : "";
-            if (context.sessionID) {
-              recordEscalationIntent(context.sessionID, actionStr, reasonStr);
+            const sessionID = typeof context.sessionID === "string" ? context.sessionID : "";
+            if (!recordEscalationIntent(sessionID, actionStr, reasonStr)) {
+              return {
+                content:
+                  "Unable to register manual verification intent: both a valid sessionID and a non-empty action are required.",
+              };
             }
+            const delivery = adapter.getEngine().isRemoteReviewEnabled()
+              ? "forwarded directly to the user's phone for manual approval"
+              : "handled via the native harness prompt for manual approval";
             return {
-              content: `Manual verification intent registered for '${actionStr}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
+              content: `Manual verification intent registered for '${actionStr.trim()}'. Please re-issue your tool call now; it will be ${delivery}.`,
             };
           },
         });

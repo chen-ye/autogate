@@ -66,7 +66,18 @@ describe("AutoGate OpenCode Plugin Integration", () => {
     const dispose = await OpenCodePluginExport.setup(mockCtx);
     expect(typeof registeredTools.some).toBe("function");
     expect(registeredTools.some((t) => t.name === "classify_result")).toBe(true);
-    expect(registeredTools.some((t) => t.name === "escalate_permission")).toBe(true);
+    const v2EscalateTool = registeredTools.find((t) => t.name === "escalate_permission");
+    expect(v2EscalateTool).toBeDefined();
+
+    const v2ExecRes = await v2EscalateTool.execute(
+      { action: "/etc/hosts", reason: "verify host entry" },
+      { sessionID: "sess-v2-esc" },
+    );
+    expect(v2ExecRes.content).toContain("Manual verification intent registered for '/etc/hosts'");
+    expect(sharedExplicitEscalations.get("sess-v2-esc")?.[0]).toMatchObject({
+      action: "/etc/hosts",
+      reason: "verify host entry",
+    });
 
     if (typeof dispose === "function") {
       await dispose();
@@ -174,8 +185,8 @@ describe("AutoGate OpenCode Plugin Integration", () => {
     expect(toolExecRes.output).toContain("Manual verification intent registered for '/etc/hosts'");
 
     expect(sharedExplicitEscalations.has(sessionID)).toBe(true);
-    expect(sharedExplicitEscalations.get(sessionID)?.action).toBe("/etc/hosts");
-    expect(sharedExplicitEscalations.get(sessionID)?.reason).toBe("verify network resolution");
+    expect(sharedExplicitEscalations.get(sessionID)?.[0]?.action).toBe("/etc/hosts");
+    expect(sharedExplicitEscalations.get(sessionID)?.[0]?.reason).toBe("verify network resolution");
 
     if (hooks.dispose) {
       await hooks.dispose();

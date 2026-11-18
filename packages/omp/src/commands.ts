@@ -169,16 +169,26 @@ export function registerEscalatePermissionTool(pi: unknown, engine: AutoGateCore
     ) {
       const cx = ctx as Record<string, unknown> | undefined;
       const par = params as Record<string, unknown> | undefined;
+      const sm = cx?.sessionManager as { getSessionId?: () => string } | undefined;
       const sessionID =
+        (typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined) ||
         (typeof cx?.sessionID === "string" ? cx.sessionID : undefined) ||
         (typeof cx?.sessionId === "string" ? cx.sessionId : undefined) ||
         (typeof par?.sessionID === "string" ? par.sessionID : "") ||
         "";
       const actionParam = typeof par?.action === "string" ? par.action : "";
       const reasonParam = typeof par?.reason === "string" ? par.reason : "";
-      engine.recordEscalationIntent(sessionID, actionParam, reasonParam);
+      if (!engine.recordEscalationIntent(sessionID, actionParam, reasonParam)) {
+        return {
+          output:
+            "Unable to register manual verification intent: both a valid sessionID and a non-empty action are required.",
+        };
+      }
+      const delivery = engine.isRemoteReviewEnabled()
+        ? "forwarded directly to the user's phone for manual approval"
+        : "handled via the native harness prompt for manual approval";
       return {
-        output: `Manual verification intent registered for '${actionParam}'. Please re-issue your tool call now; it will be forwarded directly to the user's phone for manual approval.`,
+        output: `Manual verification intent registered for '${actionParam.trim()}'. Please re-issue your tool call now; it will be ${delivery}.`,
       };
     },
   });

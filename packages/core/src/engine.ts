@@ -19,28 +19,59 @@ import { formatNotificationTitle, formatNotificationBody } from "./formatters";
 import { CascadeEvaluator, computeContextFingerprint } from "./cascade";
 import { SystemOneEvaluator, createConfiguredEvaluator } from "./system-one";
 
+export interface ExplicitEscalationEntry {
+  timestamp: number;
+  action: string;
+  reason: string;
+}
+
 export const sharedRecentlyRejected = new Map<string, { timestamp: number; reason: string }>();
-export const sharedExplicitEscalations = new Map<
-  string,
-  { timestamp: number; action: string; reason: string }
->();
+export const sharedExplicitEscalations = new Map<string, ExplicitEscalationEntry[]>();
 
 export function sweepExpiredState(now = Date.now()): void {
   for (const [k, v] of sharedRecentlyRejected.entries()) {
     if (now - v.timestamp > 60000) sharedRecentlyRejected.delete(k);
   }
-  for (const [k, v] of sharedExplicitEscalations.entries()) {
-    if (now - v.timestamp > 60000) sharedExplicitEscalations.delete(k);
+  for (const [k, entries] of sharedExplicitEscalations.entries()) {
+    const active = entries.filter((v) => now - v.timestamp <= 60000);
+    if (active.length === 0) {
+      sharedExplicitEscalations.delete(k);
+    } else if (active.length !== entries.length) {
+      sharedExplicitEscalations.set(k, active);
+    }
   }
 }
 
-export function recordEscalationIntent(sessionID: string, action: string, reason: string): void {
+function normalizeEscalationText(value: string): string {
+  let result = value.trim();
+  while (
+    result.length >= 2 &&
+    ((result.startsWith('"') && result.endsWith('"')) ||
+      (result.startsWith("'") && result.endsWith("'")))
+  ) {
+    result = result.slice(1, -1).trim();
+  }
+  return result.toLowerCase();
+}
+
+export function recordEscalationIntent(sessionID: string, action: string, reason: string): boolean {
   sweepExpiredState();
-  sharedExplicitEscalations.set(sessionID, {
+  const trimmedSessionID = sessionID.trim();
+  const trimmedAction = action.trim();
+  const trimmedReason = reason.trim();
+  const normAction = normalizeEscalationText(trimmedAction);
+  if (!trimmedSessionID || !normAction) {
+    return false;
+  }
+  const existing = sharedExplicitEscalations.get(trimmedSessionID) ?? [];
+  const filtered = existing.filter((entry) => normalizeEscalationText(entry.action) !== normAction);
+  filtered.push({
     timestamp: Date.now(),
-    action: action.trim(),
-    reason: reason.trim(),
+    action: trimmedAction,
+    reason: trimmedReason,
   });
+  sharedExplicitEscalations.set(trimmedSessionID, filtered);
+  return true;
 }
 
 function getRequestPermission(request: PermissionEventData | GateAction): string {
@@ -111,51 +142,165 @@ export function getActionKey(request: PermissionEventData | GateAction): string 
   return `${sessionID}:${perm}:${patterns}`;
 }
 
+function hasShellCompoundOperators(value: string): boolean {
+  return /[;&|`\r\n<>]|\$\(/.test(value);
+}
+
+function isSinglePathToken(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value === "/" ||
+    value === "./" ||
+    value === "../" ||
+    value === "~/" ||
+    /\s/.test(value) ||
+    hasShellCompoundOperators(value)
+  ) {
+    return false;
+  }
+  return (
+    value.startsWith("/") ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith("~/")
+  );
+}
+
+function buildEntryVariants(normEntry: string, toolName: string): string[] {
+  const variants = [normEntry];
+  const toolLower = toolName.trim().toLowerCase();
+  if (toolLower) {
+    for (const prefix of [`${toolLower} `, `${toolLower}: `]) {
+      if (normEntry.startsWith(prefix)) {
+        const stripped = normalizeEscalationText(normEntry.slice(prefix.length));
+        if (stripped && !variants.includes(stripped)) {
+          variants.push(stripped);
+        }
+      }
+    }
+  }
+  return variants;
+}
+
+function matchesExactOrCommandPath(
+  entryVariants: string[],
+  candidate: unknown,
+  allowCommandTokenMatch: boolean,
+): boolean {
+  if (typeof candidate !== "string") return false;
+  const normCand = normalizeEscalationText(candidate);
+  if (!normCand) return false;
+  if (entryVariants.includes(normCand)) {
+    return true;
+  }
+  if (allowCommandTokenMatch && !hasShellCompoundOperators(normCand)) {
+    const tokens = normCand.split(/\s+/);
+    if (entryVariants.some((ev) => isSinglePathToken(ev) && tokens.includes(ev))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectNonEmptyStringItems(val: unknown): string[] | undefined {
+  if (!Array.isArray(val)) return undefined;
+  const items = val.filter(
+    (item): item is string => typeof item === "string" && normalizeEscalationText(item).length > 0,
+  );
+  return items.length > 0 ? items : undefined;
+}
+
+function listIsCovered(entryVariants: string[], items: string[]): boolean {
+  const normJoined = normalizeEscalationText(items.join(" "));
+  if (normJoined && entryVariants.includes(normJoined)) {
+    return true;
+  }
+  return items.every((item) => matchesExactOrCommandPath(entryVariants, item, false));
+}
+
 function matchesAction(
   entryAction: string,
   request: PermissionEventData | GateAction,
   commandString: string,
 ): boolean {
-  const normEntry = entryAction
-    .trim()
-    .replace(/^["']|["']$/g, "")
-    .toLowerCase();
+  const normEntry = normalizeEscalationText(entryAction);
   if (!normEntry) return false;
 
-  const normCmd = commandString.trim().toLowerCase();
-  if (normCmd) {
-    if (normCmd === normEntry || normCmd.includes(normEntry) || normEntry.includes(normCmd)) {
+  const entryVariants = buildEntryVariants(normEntry, getRequestPermission(request));
+  const meta = request.metadata;
+
+  // Exact full-command match takes precedence even when OpenCode splits a compound
+  // command (e.g. "cd app && rm -rf dist") into per-subcommand patterns[].
+  for (const fullCmd of [commandString, meta?.command, meta?.cmd]) {
+    if (matchesExactOrCommandPath(entryVariants, fullCmd, false)) {
       return true;
     }
   }
 
-  if ("patterns" in request && Array.isArray(request.patterns)) {
-    for (const pat of request.patterns) {
-      const normPat = String(pat)
-        .trim()
-        .replace(/^["']|["']$/g, "")
-        .toLowerCase();
-      if (normPat) {
-        if (normPat === normEntry || normPat.includes(normEntry) || normEntry.includes(normPat)) {
+  const patternsList =
+    "patterns" in request ? collectNonEmptyStringItems(request.patterns) : undefined;
+  const resourcesList =
+    "resources" in request ? collectNonEmptyStringItems(request.resources) : undefined;
+  const rawArgsList =
+    "rawArgs" in request ? collectNonEmptyStringItems(request.rawArgs) : undefined;
+
+  // Reject multi-resource requests unless every resource/pattern is covered by the escalation entry.
+  for (const list of [patternsList, resourcesList, rawArgsList]) {
+    if (list && list.length > 1 && !listIsCovered(entryVariants, list)) {
+      return false;
+    }
+  }
+
+  if (matchesExactOrCommandPath(entryVariants, commandString, true)) {
+    return true;
+  }
+
+  if (
+    "targetPath" in request &&
+    matchesExactOrCommandPath(entryVariants, request.targetPath, false)
+  ) {
+    return true;
+  }
+
+  if (patternsList && listIsCovered(entryVariants, patternsList)) {
+    return true;
+  }
+
+  if (resourcesList && listIsCovered(entryVariants, resourcesList)) {
+    return true;
+  }
+
+  for (const field of [meta?.filepath, meta?.path, meta?.file]) {
+    if (matchesExactOrCommandPath(entryVariants, field, false)) {
+      return true;
+    }
+  }
+  for (const field of [meta?.command, meta?.cmd]) {
+    if (matchesExactOrCommandPath(entryVariants, field, true)) {
+      return true;
+    }
+  }
+
+  if ("rawArgs" in request && request.rawArgs !== undefined) {
+    const rawArgs = request.rawArgs;
+    if (typeof rawArgs === "string" && matchesExactOrCommandPath(entryVariants, rawArgs, true)) {
+      return true;
+    }
+    if (rawArgsList && listIsCovered(entryVariants, rawArgsList)) {
+      return true;
+    }
+    if (rawArgs && !Array.isArray(rawArgs) && typeof rawArgs === "object") {
+      const rec = rawArgs as Record<string, unknown>;
+      for (const field of [rec.filepath, rec.path, rec.file]) {
+        if (matchesExactOrCommandPath(entryVariants, field, false)) {
           return true;
         }
       }
-    }
-  }
-
-  const meta = request.metadata;
-  const filepath =
-    (typeof meta?.filepath === "string" ? meta.filepath : "") ||
-    (typeof meta?.path === "string" ? meta.path : "") ||
-    (typeof meta?.file === "string" ? meta.file : "");
-
-  if (filepath) {
-    const normFp = filepath
-      .trim()
-      .replace(/^["']|["']$/g, "")
-      .toLowerCase();
-    if (normFp === normEntry || normFp.includes(normEntry) || normEntry.includes(normFp)) {
-      return true;
+      for (const field of [rec.command, rec.cmd]) {
+        if (matchesExactOrCommandPath(entryVariants, field, true)) {
+          return true;
+        }
+      }
     }
   }
 
@@ -176,19 +321,36 @@ export function checkAndConsumeEscalation(
     return "Escalated via AUTOGATE_ESCALATE=1 environment variable";
   }
 
+  const now = Date.now();
   const sessionID = getRequestSessionID(request);
-  const sessionCandidates = [sessionID, parentSessionID].filter(
-    (s): s is string => typeof s === "string" && s.length > 0,
+  const sessionCandidates = Array.from(
+    new Set(
+      [sessionID, parentSessionID].filter(
+        (s): s is string => typeof s === "string" && s.length > 0,
+      ),
+    ),
   );
   for (const sid of sessionCandidates) {
-    const entry = sharedExplicitEscalations.get(sid);
-    if (entry) {
-      if (Date.now() - entry.timestamp > 60000) {
+    const entries = sharedExplicitEscalations.get(sid);
+    if (!entries || entries.length === 0) continue;
+
+    const active = entries.filter((entry) => now - entry.timestamp <= 60000);
+    const matchIdx = active.findIndex((entry) =>
+      matchesAction(entry.action, request, commandString),
+    );
+    if (matchIdx !== -1) {
+      const [matched] = active.splice(matchIdx, 1);
+      if (active.length === 0) {
         sharedExplicitEscalations.delete(sid);
-      } else if (matchesAction(entry.action, request, commandString)) {
-        sharedExplicitEscalations.delete(sid);
-        return entry.reason || "Manual review requested via escalate_permission tool";
+      } else {
+        sharedExplicitEscalations.set(sid, active);
       }
+      return matched.reason || "Manual review requested via escalate_permission tool";
+    }
+    if (active.length === 0) {
+      sharedExplicitEscalations.delete(sid);
+    } else if (active.length !== entries.length) {
+      sharedExplicitEscalations.set(sid, active);
     }
   }
 
@@ -225,6 +387,28 @@ export function checkAndConsumeEscalation(
   }
 
   return null;
+}
+
+function resolveNotificationTarget(action: GateAction): string | string[] {
+  if (action.commandString) {
+    return [action.commandString];
+  }
+  if (action.targetPath) {
+    return [action.targetPath];
+  }
+  if (Array.isArray(action.patterns) && action.patterns.length > 0) {
+    return action.patterns;
+  }
+  if (action.rawArgs !== undefined) {
+    if (Array.isArray(action.rawArgs)) {
+      const items = action.rawArgs.filter(
+        (v): v is string => typeof v === "string" && v.length > 0,
+      );
+      if (items.length > 0) return items;
+    }
+    return [String(action.rawArgs)];
+  }
+  return action.toolName;
 }
 
 export function isTransformableAction(
@@ -494,8 +678,8 @@ export class AutoGateCoreEngine {
     return checkAndConsumeEscalation(request, parentSessionID);
   }
 
-  public recordEscalationIntent(sessionID: string, action: string, reason: string): void {
-    recordEscalationIntent(sessionID, action, reason);
+  public recordEscalationIntent(sessionID: string, action: string, reason: string): boolean {
+    return recordEscalationIntent(sessionID, action, reason);
   }
 
   public async start(): Promise<(() => void) | undefined> {
@@ -561,12 +745,16 @@ export class AutoGateCoreEngine {
 
     // 4. Checks turn decision cache -> returns cached ALLOW if found.
     const sid = action.sessionID || "";
+    const patternsString =
+      Array.isArray(action.patterns) && action.patterns.length > 0
+        ? action.patterns.filter((p): p is string => typeof p === "string").join(" ")
+        : Array.isArray(action.metadata?.patterns)
+          ? action.metadata.patterns.filter((p): p is string => typeof p === "string").join(" ")
+          : "";
     const commandString =
       action.commandString ||
       (typeof action.metadata?.command === "string" ? action.metadata.command : "") ||
-      (Array.isArray(action.metadata?.patterns)
-        ? action.metadata.patterns.filter((p): p is string => typeof p === "string").join(" ")
-        : "") ||
+      patternsString ||
       (Array.isArray(action.rawArgs)
         ? action.rawArgs.filter((a): a is string => typeof a === "string").join(" ")
         : "");
@@ -726,13 +914,7 @@ export class AutoGateCoreEngine {
       await this.start();
     }
     const messageBody = formatNotificationBody({
-      target: action.commandString
-        ? [action.commandString]
-        : action.targetPath
-          ? [action.targetPath]
-          : action.rawArgs
-            ? [String(action.rawArgs)]
-            : action.toolName,
+      target: resolveNotificationTarget(action),
       reason,
       warning: isCircuitBreaker
         ? `Consecutive block threshold (${this.consecutiveBlocks} >= ${this.config.consecutiveBlockThreshold ?? 3}) reached.`
@@ -927,13 +1109,7 @@ export class AutoGateCoreEngine {
       id: action.id,
       title: formatNotificationTitle(verdict, action.toolName),
       message: formatNotificationBody({
-        target: action.commandString
-          ? [action.commandString]
-          : action.targetPath
-            ? [action.targetPath]
-            : action.rawArgs
-              ? [String(action.rawArgs)]
-              : action.toolName,
+        target: resolveNotificationTarget(action),
         reason,
         risk_level: riskLevel,
         user_authorization: userAuth,

@@ -78,6 +78,7 @@ export {
   createConfiguredEvaluator,
 } from "./system-one.js";
 export * from "./engine.js";
+export type { ExplicitEscalationEntry } from "./engine.js";
 export {
   AutoGateEngine,
   AutoGateCoreEngine,

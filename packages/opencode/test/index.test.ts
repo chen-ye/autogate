@@ -2,7 +2,17 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { resolveServerPassword, isEventForWorkspace, plugin } from "../src/index.js";
+import {
+  sharedExplicitEscalations,
+  sharedRecentlyRejected,
+  type GateEvaluator,
+} from "@autogate/core";
+import {
+  resolveServerPassword,
+  isEventForWorkspace,
+  OpenCodeHarnessAdapter,
+  plugin,
+} from "../src/index.js";
 
 describe("@autogate/opencode resolveServerPassword", () => {
   const origEnv = { ...process.env };
@@ -221,6 +231,184 @@ describe("@autogate/opencode runtime agent injection", () => {
       });
     } finally {
       if (typeof cleanup === "function") await cleanup();
+    }
+  });
+});
+
+describe("@autogate/opencode escalate_permission v2", () => {
+  const origEnv = { ...process.env };
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-esc-v2-"));
+    process.env.XDG_CONFIG_HOME = path.join(tempDir, "xdg");
+    fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, "autogate"), { recursive: true });
+    delete process.env.AUTOGATE_CONFIG;
+    delete process.env.AUTOGATE_FALLBACK;
+    sharedExplicitEscalations.clear();
+    sharedRecentlyRejected.clear();
+  });
+
+  afterEach(() => {
+    process.env = { ...origEnv };
+    sharedExplicitEscalations.clear();
+    sharedRecentlyRejected.clear();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("reports native vs ntfy delivery mode in escalate_permission tool response", async () => {
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, "autogate", "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ reviewFallbackMode: "native" }), "utf8");
+
+    const tools: Array<{
+      name: string;
+      execute: (
+        args: Record<string, unknown>,
+        ctx: { sessionID?: string },
+      ) => Promise<{ content: string }>;
+    }> = [];
+
+    const cleanup = await plugin.setup({
+      directory: tempDir,
+      options: {
+        ntfyServer: "http://127.0.0.1:59999",
+        evalLogFile: path.join(tempDir, "evals.jsonl"),
+      },
+      tool: {
+        transform: async (
+          fn: (editor: { add: (toolDef: (typeof tools)[number]) => void }) => void,
+        ) => {
+          fn({
+            add(toolDef) {
+              tools.push(toolDef);
+            },
+          });
+        },
+      },
+    });
+
+    try {
+      const escTool = tools.find((t) => t.name === "escalate_permission");
+      expect(escTool).toBeDefined();
+
+      const nativeRes = await escTool!.execute(
+        { action: "/etc/hosts", reason: "inspect hosts" },
+        { sessionID: "ses-v2-mode" },
+      );
+      expect(nativeRes.content).toContain("native harness prompt for manual approval");
+      expect(nativeRes.content).not.toContain("user's phone");
+
+      const emptyActionRes = await escTool!.execute(
+        { action: "   ", reason: "blank" },
+        { sessionID: "ses-v2-mode" },
+      );
+      expect(emptyActionRes.content).toContain("Unable to register manual verification intent");
+
+      const missingSessionRes = await escTool!.execute(
+        { action: "/etc/hosts", reason: "no session" },
+        {},
+      );
+      expect(missingSessionRes.content).toContain("Unable to register manual verification intent");
+
+      // Flip config to ntfy and re-run without restarting plugin
+      fs.writeFileSync(configPath, JSON.stringify({ reviewFallbackMode: "ntfy" }), "utf8");
+      const ntfyRes = await escTool!.execute(
+        { action: "rm -rf dist", reason: "clean dist" },
+        { sessionID: "ses-v2-mode" },
+      );
+      expect(ntfyRes.content).toContain(
+        "forwarded directly to the user's phone for manual approval",
+      );
+    } finally {
+      if (typeof cleanup === "function") await cleanup();
+    }
+  });
+
+  it("matches patterns-only permission.asked with empty resources[] and preserves multi-resource targets", async () => {
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, "autogate", "config.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ autoMode: true, reviewFallbackMode: "native" }),
+      "utf8",
+    );
+
+    const evaluatedCommands: Array<string | undefined> = [];
+    const mockEvaluator: GateEvaluator = {
+      name: "mock-eval",
+      async evaluate(action) {
+        evaluatedCommands.push(action.commandString);
+        return { verdict: "BLOCK", reason: "Should not allow multi-target piggyback" };
+      },
+    };
+    const replies: Array<{ requestID: string; decision: string }> = [];
+
+    const adapter = new OpenCodeHarnessAdapter(
+      {
+        directory: tempDir,
+        permission: {
+          reply: async (args) => {
+            replies.push({ requestID: args.requestID, decision: args.decision });
+          },
+        },
+      },
+      {
+        evaluator: mockEvaluator,
+        ntfyServer: "http://127.0.0.1:59999",
+        notifyOnVerdict: false,
+        evalLogFile: path.join(tempDir, "evals.jsonl"),
+      },
+    );
+
+    await adapter.start();
+    try {
+      adapter.getEngine().recordEscalationIntent("ses-pat-v2", "/etc/hosts", "verify resolution");
+
+      // Multi-pattern request including an un-escalated path must NOT match "/etc/hosts" alone
+      await adapter.handlePermissionAsked({
+        id: "perm-pat-multi",
+        sessionID: "ses-pat-v2",
+        action: "read",
+        resources: [],
+        patterns: ["/etc/hosts", "/etc/shadow"],
+        metadata: { directory: tempDir, filepath: "" },
+      });
+
+      expect(evaluatedCommands).toEqual(["/etc/hosts /etc/shadow"]);
+      expect(replies).toEqual([{ requestID: "perm-pat-multi", decision: "reject" }]);
+      expect(sharedExplicitEscalations.has("ses-pat-v2")).toBe(true);
+
+      // Single pattern request matches "/etc/hosts" and leaves prompt for native UI (no reply)
+      await adapter.handlePermissionAsked({
+        id: "perm-pat-v2",
+        sessionID: "ses-pat-v2",
+        action: "read",
+        resources: [],
+        patterns: ["/etc/hosts"],
+        metadata: { directory: tempDir },
+      });
+
+      expect(evaluatedCommands.length).toBe(1);
+      expect(replies.length).toBe(1);
+      expect(sharedExplicitEscalations.has("ses-pat-v2")).toBe(false);
+
+      // Exact compound shell command matches even when OpenCode splits subcommands into patterns[]
+      adapter
+        .getEngine()
+        .recordEscalationIntent("ses-pat-v2", "cd app && rm -rf dist", "clean app dist");
+      await adapter.handlePermissionAsked({
+        id: "perm-compound-v2",
+        sessionID: "ses-pat-v2",
+        action: "bash",
+        resources: [],
+        patterns: ["cd app", "rm -rf dist"],
+        metadata: { directory: tempDir, command: "cd app && rm -rf dist" },
+      });
+
+      expect(evaluatedCommands.length).toBe(1);
+      expect(replies.length).toBe(1);
+      expect(sharedExplicitEscalations.has("ses-pat-v2")).toBe(false);
+    } finally {
+      await adapter.dispose();
     }
   });
 });

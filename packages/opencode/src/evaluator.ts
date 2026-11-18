@@ -615,7 +615,7 @@ export class OpenCodeSessionEvaluator implements GateEvaluator {
       userPrompt: action.userPrompt,
       subagentPrompt: action.subagentPrompt,
       actionName: action.toolName,
-      actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
+      actionArgs: action.rawArgs ?? action.patterns ?? action.metadata ?? action.commandString,
       workspaceRoot: action.workspaceRoot,
       environment: action.environment,
       model: this.config?.classifierModel,

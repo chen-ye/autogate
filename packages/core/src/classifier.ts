@@ -418,7 +418,8 @@ function isTrivialRawArgsDuplicate(action: GateAction): boolean {
 
 export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateResult {
   const actionName = action.toolName || "permission";
-  const actionArgs = action.rawArgs ?? action.metadata ?? action.commandString ?? {};
+  const actionArgs =
+    action.rawArgs ?? action.patterns ?? action.metadata ?? action.commandString ?? {};
   const workspaceRoot = action.workspaceRoot || process.cwd();
 
   const env = action.environment ?? {};
@@ -458,6 +459,13 @@ export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateR
   }
   if (action.targetPath && action.targetPath.trim()) {
     actionLines.push(`Target Path: ${truncateUtf8Bytes(action.targetPath.trim(), 1024)}`);
+  }
+  if (Array.isArray(action.patterns) && action.patterns.length > 0) {
+    const patternText = action.patterns.join(" ");
+    if (patternText && patternText !== action.commandString?.trim()) {
+      if (Buffer.byteLength(patternText, "utf8") > 2048) truncatedPayload = true;
+      actionLines.push(`Patterns: ${truncateUtf8Bytes(patternText, 2048)}`);
+    }
   }
   if (action.rawArgs !== undefined && !isTrivialRawArgsDuplicate(action)) {
     const serializedArgs =
