@@ -9,15 +9,13 @@ import {
 import { OmpNativeEvaluator } from "../../../packages/omp/src/evaluator.ts";
 import autoGateOmpExtension from "../../../packages/omp/src/index.ts";
 import {
+  AuthStorage,
   createAgentSession,
+  ModelRegistry,
   SessionManager,
   Settings,
-} from "@oh-my-pi/pi-coding-agent";
-import {
-  AuthStorage,
   SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-coding-agent";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as fs from "node:fs/promises";
@@ -31,8 +29,15 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
   let modelRegistry: ModelRegistry;
   let activeSessions: any[] = [];
   let activeEngines: AutoGateCoreEngine[] = [];
+  let savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
+    savedEnv = {
+      NTFY_SERVER: process.env.NTFY_SERVER,
+      NTFY_TOPIC: process.env.NTFY_TOPIC,
+      NTFY_TOKEN: process.env.NTFY_TOKEN,
+      OPENCODE_AUTO_MODE: process.env.OPENCODE_AUTO_MODE,
+    };
     mockProvider = new MockInferenceProvider(0);
     activeSessions = [];
     activeEngines = [];
@@ -58,9 +63,9 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
       ],
     });
 
-    process.env.NTFY_SERVER = "https://ntfy.sh";
-    process.env.NTFY_TOPIC = "autogate-test-omp";
-    process.env.NTFY_TOKEN = "***REMOVED***";
+    process.env.NTFY_SERVER = process.env.NTFY_SERVER || "https://ntfy.sh";
+    process.env.NTFY_TOPIC = process.env.NTFY_TOPIC || "autogate-test-omp";
+    process.env.NTFY_TOKEN = process.env.NTFY_TOKEN || "test-token";
     process.env.OPENCODE_AUTO_MODE = "true";
   });
 
@@ -87,10 +92,13 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
         await mockProvider.stop();
       } catch {}
     }
-    delete process.env.NTFY_SERVER;
-    delete process.env.NTFY_TOPIC;
-    delete process.env.NTFY_TOKEN;
-    delete process.env.OPENCODE_AUTO_MODE;
+    for (const [key, val] of Object.entries(savedEnv)) {
+      if (val === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = val;
+      }
+    }
     try {
       await fs.rm(sandboxDir, { recursive: true, force: true });
     } catch {}
@@ -143,7 +151,7 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
     const ntfyAdapter = new NtfyAdapter({
       server: process.env.NTFY_SERVER || "https://ntfy.sh",
       topic: process.env.NTFY_TOPIC || "autogate-test-omp",
-      token: process.env.NTFY_TOKEN || "***REMOVED***",
+      token: process.env.NTFY_TOKEN || "test-token",
     });
     const config = {
       autoMode: true,
@@ -151,7 +159,7 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
       reviewFallbackMode: "ntfy" as const,
       ntfyServer: process.env.NTFY_SERVER || "https://ntfy.sh",
       ntfyTopic: process.env.NTFY_TOPIC || "autogate-test-omp",
-      ntfyToken: process.env.NTFY_TOKEN || "***REMOVED***",
+      ntfyToken: process.env.NTFY_TOKEN || "test-token",
     };
     const engine = new AutoGateCoreEngine({
       config,

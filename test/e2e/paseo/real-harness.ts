@@ -114,9 +114,8 @@ export class RealPaseoHarness {
     this.pluginPath = options?.pluginPath ?? path.resolve(process.cwd(), "packages/paseo");
     this.timeout = options?.timeout ?? 20000;
 
-    this.ntfyServer = options?.ntfyServer ?? "https://ntfy.sh";
-    this.ntfyToken =
-      options?.ntfyToken ?? process.env.NTFY_TOKEN ?? "***REMOVED***";
+    this.ntfyServer = options?.ntfyServer ?? process.env.NTFY_SERVER ?? "https://ntfy.sh";
+    this.ntfyToken = options?.ntfyToken ?? process.env.NTFY_TOKEN ?? "";
     this.ntfyTopic = options?.ntfyTopic ?? "autogate-test-paseo";
 
     this.mockProvider = new MockInferenceProvider(0);

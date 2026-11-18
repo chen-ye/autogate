@@ -3,6 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { createRealPaseoHarness, RealPaseoHarness } from "./real-harness";
 
+const hasLiveNtfy = Boolean(process.env.NTFY_SERVER && process.env.NTFY_TOKEN);
+
 describe("RealPaseoHarness", () => {
   let harness: RealPaseoHarness | undefined;
 
@@ -105,9 +107,9 @@ describe("RealPaseoHarness", () => {
   it("configures ntfy topic autogate-test-paseo, server, and token by default", async () => {
     const defaultHarness = new RealPaseoHarness();
     try {
-      expect(defaultHarness.ntfyServer).toBe("https://ntfy.sh");
+      expect(defaultHarness.ntfyServer).toBe(process.env.NTFY_SERVER ?? "https://ntfy.sh");
       expect(defaultHarness.ntfyTopic).toBe("autogate-test-paseo");
-      expect(defaultHarness.ntfyToken).toBe("***REMOVED***");
+      expect(defaultHarness.ntfyToken).toBe(process.env.NTFY_TOKEN ?? "");
     } finally {
       await defaultHarness.dispose();
     }
@@ -192,7 +194,7 @@ describe("RealPaseoHarness", () => {
     harness = undefined;
   }, 20000);
 
-  it("sends notification to autogate-test-paseo topic on ntfy.sh", async () => {
+  it.skipIf(!hasLiveNtfy)("sends notification to autogate-test-paseo topic on ntfy", async () => {
     harness = new RealPaseoHarness({
       ntfyTopic: "autogate-test-paseo",
     });
@@ -208,7 +210,7 @@ describe("RealPaseoHarness", () => {
       });
 
       if (res.status === 429) {
-        console.log("[SKIP] ntfy.sh 429 quota reached");
+        console.log("[SKIP] ntfy 429 quota reached");
         return;
       }
 

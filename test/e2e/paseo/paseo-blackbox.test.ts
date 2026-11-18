@@ -56,6 +56,8 @@ globalThis.eval = function (code) {
   return originalSpawn.call(Bun, cmd, options);
 };
 
+const hasLiveNtfy = Boolean(process.env.NTFY_SERVER && process.env.NTFY_TOKEN);
+
 describe("Paseo Pure Blackbox E2E Test Suite", () => {
   let harness: RealPaseoHarness | undefined;
 
@@ -81,7 +83,7 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
       str.includes("too many active subscriptions") ||
       str.includes("forbidden")
     ) {
-      console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
+      console.log("[SKIP] ntfy rate limited or forbidden (status:", status, ")");
       return true;
     }
     return false;
@@ -183,148 +185,170 @@ describe("Paseo Pure Blackbox E2E Test Suite", () => {
     expect(turn.turnCompleted).toBe(true);
   }, 30000);
 
-  it("Test 3 (UNSURE & Live Phone Tap): Agent runs high-risk command -> pushes to live ntfy.sh -> receives phone tap webhook -> unblocks", async () => {
-    try {
-      harness = await createRealPaseoHarness({
-        ntfyServer: "https://ntfy.sh",
-        ntfyTopic: "autogate-test-paseo",
-        ntfyToken: "***REMOVED***",
-      });
-
-      if (harness.isRateLimited) {
-        console.log("[SKIP] ntfy.sh rate limited (429 quota reached)");
+  it.skipIf(!hasLiveNtfy)(
+    "Test 3 (UNSURE & Live Phone Tap): Agent runs high-risk command -> pushes to live ntfy -> receives phone tap webhook -> unblocks",
+    async () => {
+      const ntfyServer = process.env.NTFY_SERVER;
+      const ntfyToken = process.env.NTFY_TOKEN;
+      if (!ntfyServer || !ntfyToken) {
+        console.log("[SKIP] NTFY_SERVER/NTFY_TOKEN not set");
         return;
       }
 
+      try {
+        harness = await createRealPaseoHarness({
+          ntfyServer,
+          ntfyTopic: "autogate-test-paseo",
+          ntfyToken,
+        });
+
+        if (harness.isRateLimited) {
+          console.log("[SKIP] ntfy rate limited (429 quota reached)");
+          return;
+        }
+
+        const agent = await harness.createAgent({
+          cwd: harness.workspaceDir,
+        });
+
+        // 1. Coding agent attempts force push to main
+        harness.mockProvider.pushResponse({
+          toolCall: {
+            name: "bash",
+            input: { command: "git push --force origin main" },
+          },
+        });
+        // 2. AutoGate evaluates as UNSURE
+        harness.mockProvider.pushResponse({
+          text: JSON.stringify({
+            risk_level: "HIGH",
+            user_authorization: "LOW",
+            verdict: "UNSURE",
+            reason: "Force push detected requiring review",
+          }),
+        });
+        // 3. Coding agent completion after approval
+        harness.mockProvider.pushResponse({
+          text: "Force push completed",
+        });
+
+        const promptStartTime = Date.now();
+        const promptPromise = harness.runAgentPrompt(agent, "Force push to main");
+
+        // Wait for live notification on ntfy
+        let targetAction: any;
+        try {
+          targetAction = await harness.waitForAction(undefined, 10000);
+        } catch (waitErr: any) {
+          if (checkRateLimit(waitErr) || harness.isRateLimited) {
+            try {
+              await agent.archive();
+            } catch {}
+            return;
+          }
+          throw waitErr;
+        }
+
+        // Verify notification dispatched to ntfy without blocking IPC timeout
+        expect(targetAction).toBeDefined();
+        expect(targetAction.actions.length).toBeGreaterThan(0);
+        expect(targetAction.actions[0].url).toContain(harness.ntfyServer);
+        const elapsedBeforeTap = Date.now() - promptStartTime;
+        expect(elapsedBeforeTap).toBeLessThan(15000);
+
+        // Simulate phone tap webhook
+        try {
+          await harness.simulatePhoneTap("once");
+        } catch (tapErr: any) {
+          if (checkRateLimit(tapErr) || harness.isRateLimited) {
+            try {
+              await agent.archive();
+            } catch {}
+            return;
+          }
+          throw tapErr;
+        }
+
+        const turn = await promptPromise;
+        const totalDuration = Date.now() - promptStartTime;
+        // Verify hook returned immediately without hitting Paseo's 30s IPC timeout
+        expect(totalDuration).toBeLessThan(25000);
+
+        // Verify AutoGate resolved with allow after phone tap
+        const allowEvent = turn.permissionEvents.find(
+          (p: any) => p.type === "permission_resolved" && p.resolution?.behavior === "allow",
+        );
+        expect(allowEvent).toBeDefined();
+        expect(allowEvent.resolution.behavior).toBe("allow");
+
+        const bashTool = turn.toolCalls.find((t: any) => t.name === "bash");
+        expect(bashTool).toBeDefined();
+        expect(turn.turnCompleted).toBe(true);
+      } catch (err: any) {
+        if (checkRateLimit(err) || harness?.isRateLimited) {
+          return;
+        }
+        throw err;
+      }
+    },
+    35000,
+  );
+
+  it.skipIf(!hasLiveNtfy)(
+    "Test 4 (Double Resolution Safety): Simulating a late phone tap on an already-resolved request logs cleanly without crashing",
+    async () => {
+      const ntfyServer = process.env.NTFY_SERVER;
+      const ntfyToken = process.env.NTFY_TOKEN;
+      if (!ntfyServer || !ntfyToken) {
+        console.log("[SKIP] NTFY_SERVER/NTFY_TOKEN not set");
+        return;
+      }
+
+      harness = await createRealPaseoHarness({
+        ntfyServer,
+        ntfyTopic: "autogate-test-paseo",
+        ntfyToken,
+      });
+
+      // 1. Simulate a late phone tap for an already resolved or non-existent requestId
+      const lateRequestId = "req-late-resolved-" + Date.now();
+      const responseUrl = `${harness.ntfyServer}/${harness.ntfyTopic}-response`;
+
+      const res = await fetch(responseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${harness.ntfyToken}`,
+        },
+        body: JSON.stringify({
+          req_id: lateRequestId,
+          reply: "once",
+        }),
+      });
+
+      // Ensure ntfy received the post or returned rate-limit
+      if (checkRateLimit(res)) {
+        return;
+      }
+      expect(res.ok).toBe(true);
+
+      // Wait a moment for plugin reverse listener to process the message
+      await Bun.sleep(1000);
+
+      // 2. Verify daemon is fully healthy and processes normal commands without crashing
+      const workspaces = await harness.client.workspaces.list();
+      expect(workspaces).toBeDefined();
+      expect(Array.isArray(workspaces.entries)).toBe(true);
+
+      // 3. Verify agent creation and execution continue functioning properly
       const agent = await harness.createAgent({
         cwd: harness.workspaceDir,
       });
-
-      // 1. Coding agent attempts force push to main
-      harness.mockProvider.pushResponse({
-        toolCall: {
-          name: "bash",
-          input: { command: "git push --force origin main" },
-        },
-      });
-      // 2. AutoGate evaluates as UNSURE
-      harness.mockProvider.pushResponse({
-        text: JSON.stringify({
-          risk_level: "HIGH",
-          user_authorization: "LOW",
-          verdict: "UNSURE",
-          reason: "Force push detected requiring review",
-        }),
-      });
-      // 3. Coding agent completion after approval
-      harness.mockProvider.pushResponse({
-        text: "Force push completed",
-      });
-
-      const promptStartTime = Date.now();
-      const promptPromise = harness.runAgentPrompt(agent, "Force push to main");
-
-      // Wait for live notification on ntfy.sh
-      let targetAction: any;
-      try {
-        targetAction = await harness.waitForAction(undefined, 10000);
-      } catch (waitErr: any) {
-        if (checkRateLimit(waitErr) || harness.isRateLimited) {
-          try {
-            await agent.archive();
-          } catch {}
-          return;
-        }
-        throw waitErr;
-      }
-
-      // Verify notification dispatched to ntfy.sh without blocking IPC timeout
-      expect(targetAction).toBeDefined();
-      expect(targetAction.actions.length).toBeGreaterThan(0);
-      expect(targetAction.actions[0].url).toContain("ntfy.sh");
-      const elapsedBeforeTap = Date.now() - promptStartTime;
-      expect(elapsedBeforeTap).toBeLessThan(15000);
-
-      // Simulate phone tap webhook
-      try {
-        await harness.simulatePhoneTap("once");
-      } catch (tapErr: any) {
-        if (checkRateLimit(tapErr) || harness.isRateLimited) {
-          try {
-            await agent.archive();
-          } catch {}
-          return;
-        }
-        throw tapErr;
-      }
-
-      const turn = await promptPromise;
-      const totalDuration = Date.now() - promptStartTime;
-      // Verify hook returned immediately without hitting Paseo's 30s IPC timeout
-      expect(totalDuration).toBeLessThan(25000);
-
-      // Verify AutoGate resolved with allow after phone tap
-      const allowEvent = turn.permissionEvents.find(
-        (p: any) => p.type === "permission_resolved" && p.resolution?.behavior === "allow",
-      );
-      expect(allowEvent).toBeDefined();
-      expect(allowEvent.resolution.behavior).toBe("allow");
-
-      const bashTool = turn.toolCalls.find((t: any) => t.name === "bash");
-      expect(bashTool).toBeDefined();
-      expect(turn.turnCompleted).toBe(true);
-    } catch (err: any) {
-      if (checkRateLimit(err) || harness?.isRateLimited) {
-        return;
-      }
-      throw err;
-    }
-  }, 35000);
-
-  it("Test 4 (Double Resolution Safety): Simulating a late phone tap on an already-resolved request logs cleanly without crashing", async () => {
-    harness = await createRealPaseoHarness({
-      ntfyServer: "https://ntfy.sh",
-      ntfyTopic: "autogate-test-paseo",
-      ntfyToken: "***REMOVED***",
-    });
-
-    // 1. Simulate a late phone tap for an already resolved or non-existent requestId
-    const lateRequestId = "req-late-resolved-" + Date.now();
-    const responseUrl = `${harness.ntfyServer}/${harness.ntfyTopic}-response`;
-
-    const res = await fetch(responseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${harness.ntfyToken}`,
-      },
-      body: JSON.stringify({
-        req_id: lateRequestId,
-        reply: "once",
-      }),
-    });
-
-    // Ensure ntfy received the post or returned rate-limit
-    if (checkRateLimit(res)) {
-      return;
-    }
-    expect(res.ok).toBe(true);
-
-    // Wait a moment for plugin reverse listener to process the message
-    await Bun.sleep(1000);
-
-    // 2. Verify daemon is fully healthy and processes normal commands without crashing
-    const workspaces = await harness.client.workspaces.list();
-    expect(workspaces).toBeDefined();
-    expect(Array.isArray(workspaces.entries)).toBe(true);
-
-    // 3. Verify agent creation and execution continue functioning properly
-    const agent = await harness.createAgent({
-      cwd: harness.workspaceDir,
-    });
-    expect(agent.id).toBeDefined();
-    await agent.archive();
-  }, 30000);
+      expect(agent.id).toBeDefined();
+      await agent.archive();
+    },
+    30000,
+  );
 
   it("Test 5 (Timeline Audit Badge & Isolation): Run a safe action through Paseo -> AutoGate records audit badge on agent timeline -> verify verdict ALLOW, correct command/tool, and zero subagent message leakage", async () => {
     harness = await createRealPaseoHarness({

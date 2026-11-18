@@ -11,3 +11,21 @@ dist/
 Thumbs.db
 *.log
 *.tmp
+
+# Secrets & Environment
+.env*
+!.env.example
+*.pem
+*.key
+
+# Agent & IDE State
+.opencode/
+.claude/
+.cursor/
+.vscode/
+
+# Local Databases & Audit Artifacts
+*.sqlite
+*.sqlite3
+*.db
+audit.json

@@ -2,15 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { MockInferenceProvider } from "../opencode/mock-provider";
 import { DirectApiEvaluator } from "@autogate/core";
 import {
+  AuthStorage,
   createAgentSession,
+  ModelRegistry,
   SessionManager,
   Settings,
-} from "@oh-my-pi/pi-coding-agent";
-import {
-  AuthStorage,
   SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-coding-agent";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import autoGateOmpExtension, { OmpHarnessAdapter } from "../../../packages/omp/src/index.ts";
 import { verdictStore } from "../../../packages/omp/src/hook.ts";
@@ -19,9 +17,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 
+const hasLiveNtfy = Boolean(process.env.NTFY_SERVER && process.env.NTFY_TOKEN);
+
 describe("True Black-box OMP E2E Test Suite", () => {
   let mockProvider: MockInferenceProvider;
   let activeAdapters: OmpHarnessAdapter[] = [];
+  let savedEnv: Record<string, string | undefined> = {};
 
   const trackedExtension = (pi: any, options?: Record<string, unknown>) => {
     const res = autoGateOmpExtension(pi, options);
@@ -33,6 +34,12 @@ describe("True Black-box OMP E2E Test Suite", () => {
   let modelRegistry: ModelRegistry;
 
   beforeEach(async () => {
+    savedEnv = {
+      NTFY_SERVER: process.env.NTFY_SERVER,
+      NTFY_TOPIC: process.env.NTFY_TOPIC,
+      NTFY_TOKEN: process.env.NTFY_TOKEN,
+      OPENCODE_AUTO_MODE: process.env.OPENCODE_AUTO_MODE,
+    };
     mockProvider = new MockInferenceProvider(0);
     sandboxDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-blackbox-test-"));
     authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
@@ -56,9 +63,9 @@ describe("True Black-box OMP E2E Test Suite", () => {
       ],
     });
 
-    process.env.NTFY_SERVER = "https://ntfy.sh";
-    process.env.NTFY_TOPIC = "autogate-test-omp";
-    process.env.NTFY_TOKEN = "***REMOVED***";
+    process.env.NTFY_SERVER = process.env.NTFY_SERVER || "https://ntfy.sh";
+    process.env.NTFY_TOPIC = process.env.NTFY_TOPIC || "autogate-test-omp";
+    process.env.NTFY_TOKEN = process.env.NTFY_TOKEN || "test-token";
     process.env.OPENCODE_AUTO_MODE = "true";
   });
 
@@ -69,10 +76,13 @@ describe("True Black-box OMP E2E Test Suite", () => {
       await adapter.dispose();
     }
     activeAdapters = [];
-    delete process.env.NTFY_SERVER;
-    delete process.env.NTFY_TOPIC;
-    delete process.env.NTFY_TOKEN;
-    delete process.env.OPENCODE_AUTO_MODE;
+    for (const [key, val] of Object.entries(savedEnv)) {
+      if (val === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = val;
+      }
+    }
     try {
       await fs.rm(sandboxDir, { recursive: true, force: true });
     } catch {}
@@ -238,103 +248,111 @@ describe("True Black-box OMP E2E Test Suite", () => {
     }
   }, 30000);
 
-  it("Test 3 (Black-box Live ntfy.sh Mobile Approval): Tests live ntfy.sh roundtrip on fixed topic autogate-test-omp", async () => {
-    const topic = process.env.NTFY_TOPIC || "autogate-test-omp";
-    const token = process.env.NTFY_TOKEN || "***REMOVED***";
-    const server = process.env.NTFY_SERVER || "https://ntfy.sh";
-    const ntfyAdapter = new NtfyAdapter({
-      server,
-      topic,
-      token,
-    });
-
-    const reqId = "req-bb-roundtrip-" + Date.now();
-    let receivedReply: any = null;
-    let unsubscribe: (() => void) | undefined;
-
-    const checkRateLimit = (resOrErr: any, text?: string) => {
-      const status = resOrErr?.status;
-      const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
-      if (
-        status === 429 ||
-        status === 403 ||
-        str.includes("429") ||
-        str.includes("403") ||
-        str.includes("quota") ||
-        str.includes("rate limit") ||
-        str.includes("rate-limit") ||
-        str.includes("limit") ||
-        str.includes("forbidden")
-      ) {
-        console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
-        return true;
+  it.skipIf(!hasLiveNtfy)(
+    "Test 3 (Black-box Live ntfy Mobile Approval): Tests live ntfy roundtrip on fixed topic autogate-test-omp",
+    async () => {
+      const topic = process.env.NTFY_TOPIC || "autogate-test-omp";
+      const token = process.env.NTFY_TOKEN;
+      const server = process.env.NTFY_SERVER;
+      if (!server || !token) {
+        console.log("[SKIP] NTFY_SERVER/NTFY_TOKEN not set");
+        return;
       }
-      return false;
-    };
+      const ntfyAdapter = new NtfyAdapter({
+        server,
+        topic,
+        token,
+      });
 
-    try {
-      unsubscribe = await ntfyAdapter.listen(async (resp) => {
-        if (resp.req_id === reqId) {
-          receivedReply = resp;
+      const reqId = "req-bb-roundtrip-" + Date.now();
+      let receivedReply: any = null;
+      let unsubscribe: (() => void) | undefined;
+
+      const checkRateLimit = (resOrErr: any, text?: string) => {
+        const status = resOrErr?.status;
+        const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
+        if (
+          status === 429 ||
+          status === 403 ||
+          str.includes("429") ||
+          str.includes("403") ||
+          str.includes("quota") ||
+          str.includes("rate limit") ||
+          str.includes("rate-limit") ||
+          str.includes("limit") ||
+          str.includes("forbidden")
+        ) {
+          console.log("[SKIP] ntfy rate limited or forbidden (status:", status, ")");
+          return true;
         }
-      });
+        return false;
+      };
 
-      await ntfyAdapter.publish({
-        id: reqId,
-        harness: "omp",
-        sessionID: "ses-bb-3",
-        toolName: "bash",
-        commandString: "npm test",
-        workspaceRoot: sandboxDir,
-        userPrompt: "run tests",
-        title: "[REVIEW] bash",
-        message: "Target: npm test\nReason: Blackbox live roundtrip test",
-        priority: "high",
-        tags: ["lock", "robot"],
-        actions: [
-          { id: "appr", label: "Approve", reply: "once" },
-          { id: "deny", label: "Deny", reply: "reject" },
-        ],
-      });
+      try {
+        unsubscribe = await ntfyAdapter.listen(async (resp) => {
+          if (resp.req_id === reqId) {
+            receivedReply = resp;
+          }
+        });
 
-      await new Promise((r) => setTimeout(r, 2000));
+        await ntfyAdapter.publish({
+          id: reqId,
+          harness: "omp",
+          sessionID: "ses-bb-3",
+          toolName: "bash",
+          commandString: "npm test",
+          workspaceRoot: sandboxDir,
+          userPrompt: "run tests",
+          title: "[REVIEW] bash",
+          message: "Target: npm test\nReason: Blackbox live roundtrip test",
+          priority: "high",
+          tags: ["lock", "robot"],
+          actions: [
+            { id: "appr", label: "Approve", reply: "once" },
+            { id: "deny", label: "Deny", reply: "reject" },
+          ],
+        });
 
-      const getRes = await fetch(`${server}/${topic}/json?poll=1`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const getTxt = await getRes.text().catch(() => "");
-      if (checkRateLimit(getRes, getTxt)) return;
-      expect(getRes.ok).toBe(true);
-      expect(getTxt).toContain(reqId);
+        await new Promise((r) => setTimeout(r, 2000));
 
-      const replyRes = await fetch(`${server}/${topic}-response`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ req_id: reqId, reply: "once" }),
-      });
-      const replyTxt = await replyRes.text().catch(() => "");
-      if (checkRateLimit(replyRes, replyTxt)) return;
-      expect(replyRes.ok).toBe(true);
+        const getRes = await fetch(`${server}/${topic}/json?poll=1`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const getTxt = await getRes.text().catch(() => "");
+        if (checkRateLimit(getRes, getTxt)) return;
+        expect(getRes.ok).toBe(true);
+        expect(getTxt).toContain(reqId);
 
-      for (let i = 0; i < 20; i++) {
-        if (receivedReply) break;
-        await new Promise((r) => setTimeout(r, 500));
+        const replyRes = await fetch(`${server}/${topic}-response`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ req_id: reqId, reply: "once" }),
+        });
+        const replyTxt = await replyRes.text().catch(() => "");
+        if (checkRateLimit(replyRes, replyTxt)) return;
+        expect(replyRes.ok).toBe(true);
+
+        for (let i = 0; i < 20; i++) {
+          if (receivedReply) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        expect(receivedReply).toBeDefined();
+        expect(receivedReply.req_id).toBe(reqId);
+      } catch (err: any) {
+        if (checkRateLimit(err)) return;
+        throw err;
+      } finally {
+        if (unsubscribe) {
+          unsubscribe();
+        }
       }
-
-      expect(receivedReply).toBeDefined();
-      expect(receivedReply.req_id).toBe(reqId);
-    } catch (err: any) {
-      if (checkRateLimit(err)) return;
-      throw err;
-    } finally {
-      if (unsubscribe) {
-        unsubscribe();
-      }
-    }
-  }, 30000);
+    },
+    30000,
+  );
 
   it("Test 4 (Black-box Native Fallback Mode): UNSURE verdict with native fallback mode records UNSURE / prompt policy without ntfy notification", async () => {
     mockProvider.pushResponse({

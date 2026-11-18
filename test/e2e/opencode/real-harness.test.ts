@@ -3,6 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { createRealOpenCodeHarness, RealOpenCodeHarness } from "./real-harness";
 
+const hasLiveNtfy = Boolean(process.env.NTFY_SERVER && process.env.NTFY_TOKEN);
+
 describe("RealOpenCodeHarness", () => {
   let harness: RealOpenCodeHarness | undefined;
 
@@ -61,11 +63,11 @@ describe("RealOpenCodeHarness", () => {
     const harness2 = new RealOpenCodeHarness();
 
     try {
-      expect(harness1.ntfyServer).toBe("https://ntfy.sh");
-      expect(harness1.ntfyToken).toBe(process.env.NTFY_TOKEN || "***REMOVED***");
+      expect(harness1.ntfyServer).toBe(process.env.NTFY_SERVER || "https://ntfy.sh");
+      expect(harness1.ntfyToken).toBe(process.env.NTFY_TOKEN ?? "");
       expect(harness1.ntfyTopic).toMatch(/^autogate-e2e-\d+-[a-f0-9]{6}$/);
 
-      expect(harness2.ntfyServer).toBe("https://ntfy.sh");
+      expect(harness2.ntfyServer).toBe(process.env.NTFY_SERVER || "https://ntfy.sh");
       expect(harness2.ntfyTopic).toMatch(/^autogate-e2e-\d+-[a-f0-9]{6}$/);
       expect(harness1.ntfyTopic).not.toBe(harness2.ntfyTopic);
     } finally {
@@ -74,61 +76,65 @@ describe("RealOpenCodeHarness", () => {
     }
   });
 
-  it("connects to live ntfy.sh SSE stream, receives notifications, parses Action headers, and executes simulatePhoneTap", async () => {
-    harness = await createRealOpenCodeHarness();
+  it.skipIf(!hasLiveNtfy)(
+    "connects to live ntfy SSE stream, receives notifications, parses Action headers, and executes simulatePhoneTap",
+    async () => {
+      harness = await createRealOpenCodeHarness();
 
-    try {
-      await harness.connectNtfyStream();
-    } catch (err: any) {
-      if (harness.isRateLimited || String(err?.message || "").includes("429")) {
-        console.log("[SKIP] ntfy.sh rate limited (429 quota reached)");
+      try {
+        await harness.connectNtfyStream();
+      } catch (err: any) {
+        if (harness.isRateLimited || String(err?.message || "").includes("429")) {
+          console.log("[SKIP] ntfy rate limited (429 quota reached)");
+          return;
+        }
+        throw err;
+      }
+
+      const testReqId = `req-live-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`;
+      const responseTopic = `${harness.ntfyTopic}-response`;
+
+      // Publish live notification with action buttons to ntfy
+      const actionsHeader = [
+        `http, Approve, ${harness.ntfyServer}/${responseTopic}, body='{"req_id": "${testReqId}", "reply": "once"}', method=POST, headers.Authorization=Bearer ${harness.ntfyToken}`,
+        `http, Always Approve, ${harness.ntfyServer}/${responseTopic}, body='{"req_id": "${testReqId}", "reply": "always"}', method=POST, headers.Authorization=Bearer ${harness.ntfyToken}`,
+        `http, Deny, ${harness.ntfyServer}/${responseTopic}, body='{"req_id": "${testReqId}", "reply": "reject"}', method=POST, headers.Authorization=Bearer ${harness.ntfyToken}`,
+      ].join("; ");
+
+      const pubRes = await fetch(`${harness.ntfyServer}/${harness.ntfyTopic}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${harness.ntfyToken}`,
+          Title: "Review Required",
+          Actions: actionsHeader,
+        },
+        body: "Security review requested for bash command: rm -rf build",
+      });
+
+      if (pubRes.status === 429) {
+        console.log("[SKIP] ntfy publish rate limited (429 quota reached)");
         return;
       }
-      throw err;
-    }
+      expect(pubRes.ok).toBe(true);
 
-    const testReqId = `req-live-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`;
-    const responseTopic = `${harness.ntfyTopic}-response`;
+      // Await live action parsing from SSE stream
+      const targetAction = await harness.waitForAction(testReqId, 10000);
+      expect(targetAction).toBeDefined();
+      expect(targetAction.label).toBe("Approve");
+      expect(targetAction.url).toBe(`${harness.ntfyServer}/${responseTopic}`);
+      expect(targetAction.method).toBe("POST");
+      expect(targetAction.headers["Authorization"]).toBe(`Bearer ${harness.ntfyToken}`);
+      expect(targetAction.actions.length).toBe(3);
+      expect(Array.isArray(targetAction)).toBe(true);
+      expect(targetAction[0].label).toBe("Approve");
+      expect(targetAction[1].label).toBe("Always Approve");
+      expect(targetAction[2].label).toBe("Deny");
 
-    // Publish live notification with action buttons to ntfy.sh
-    const actionsHeader = [
-      `http, Approve, https://ntfy.sh/${responseTopic}, body='{"req_id": "${testReqId}", "reply": "once"}', method=POST, headers.Authorization=Bearer ${harness.ntfyToken}`,
-      `http, Always Approve, https://ntfy.sh/${responseTopic}, body='{"req_id": "${testReqId}", "reply": "always"}', method=POST, headers.Authorization=Bearer ${harness.ntfyToken}`,
-      `http, Deny, https://ntfy.sh/${responseTopic}, body='{"req_id": "${testReqId}", "reply": "reject"}', method=POST, headers.Authorization=Bearer ${harness.ntfyToken}`,
-    ].join("; ");
-
-    const pubRes = await fetch(`${harness.ntfyServer}/${harness.ntfyTopic}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${harness.ntfyToken}`,
-        Title: "Review Required",
-        Actions: actionsHeader,
-      },
-      body: "Security review requested for bash command: rm -rf build",
-    });
-
-    if (pubRes.status === 429) {
-      console.log("[SKIP] ntfy.sh publish rate limited (429 quota reached)");
-      return;
-    }
-    expect(pubRes.ok).toBe(true);
-
-    // Await live action parsing from SSE stream
-    const targetAction = await harness.waitForAction(testReqId, 10000);
-    expect(targetAction).toBeDefined();
-    expect(targetAction.label).toBe("Approve");
-    expect(targetAction.url).toBe(`https://ntfy.sh/${responseTopic}`);
-    expect(targetAction.method).toBe("POST");
-    expect(targetAction.headers["Authorization"]).toBe(`Bearer ${harness.ntfyToken}`);
-    expect(targetAction.actions.length).toBe(3);
-    expect(Array.isArray(targetAction)).toBe(true);
-    expect(targetAction[0].label).toBe("Approve");
-    expect(targetAction[1].label).toBe("Always Approve");
-    expect(targetAction[2].label).toBe("Deny");
-
-    // Execute phone tap
-    await harness.simulatePhoneTap(testReqId, "once");
-  }, 30000);
+      // Execute phone tap
+      await harness.simulatePhoneTap(testReqId, "once");
+    },
+    30000,
+  );
 
   it("simulatePhoneTap dispatches to OpenCode server with generated Basic Auth when action targets permission reply endpoint", async () => {
     harness = await createRealOpenCodeHarness();
@@ -167,25 +173,29 @@ describe("RealOpenCodeHarness", () => {
     }
   }, 30000);
 
-  it("handles AbortSignal on connectNtfyStream and cleanly terminates on dispose()", async () => {
-    harness = await createRealOpenCodeHarness();
-    const abortCtrl = new AbortController();
+  it.skipIf(!hasLiveNtfy)(
+    "handles AbortSignal on connectNtfyStream and cleanly terminates on dispose()",
+    async () => {
+      harness = await createRealOpenCodeHarness();
+      const abortCtrl = new AbortController();
 
-    try {
-      await harness.connectNtfyStream(abortCtrl.signal);
-    } catch (err: any) {
-      if (harness.isRateLimited || String(err?.message || "").includes("429")) {
-        console.log("[SKIP] ntfy.sh rate limited (429 quota reached)");
-        return;
+      try {
+        await harness.connectNtfyStream(abortCtrl.signal);
+      } catch (err: any) {
+        if (harness.isRateLimited || String(err?.message || "").includes("429")) {
+          console.log("[SKIP] ntfy rate limited (429 quota reached)");
+          return;
+        }
+        throw err;
       }
-      throw err;
-    }
 
-    // Abort controller cleanly
-    abortCtrl.abort();
-    await harness.dispose();
-    harness = undefined;
-  }, 20000);
+      // Abort controller cleanly
+      abortCtrl.abort();
+      await harness.dispose();
+      harness = undefined;
+    },
+    20000,
+  );
 
   it("tracks active harnesses in static registry and removes them upon disposal", async () => {
     harness = await createRealOpenCodeHarness();

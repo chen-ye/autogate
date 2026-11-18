@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { AutoGateCoreEngine, DirectApiEvaluator, NtfyAdapter } from "@autogate/core";
 
+const hasLiveNtfy = Boolean(process.env.NTFY_SERVER && process.env.NTFY_TOKEN);
+
 describe("OMP Live Gate E2E Test Suite (Zero Mocks)", () => {
   const topic = `autogate_live_omp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   let ntfyAdapter: NtfyAdapter;
@@ -8,9 +10,9 @@ describe("OMP Live Gate E2E Test Suite (Zero Mocks)", () => {
 
   beforeEach(() => {
     ntfyAdapter = new NtfyAdapter({
-      server: "https://ntfy.sh",
+      server: process.env.NTFY_SERVER || "https://ntfy.sh",
       topic: topic,
-      token: "***REMOVED***",
+      token: process.env.NTFY_TOKEN || "test-token",
     });
     engine = new AutoGateCoreEngine({
       config: {
@@ -125,94 +127,103 @@ describe("OMP Live Gate E2E Test Suite (Zero Mocks)", () => {
     expect(decision.safeTransformAlternative).toContain("git stash");
   });
 
-  it("Scenario 5: Live Mobile Push Roundtrip against https://ntfy.sh", async () => {
-    const reqId = "req-live-roundtrip-" + Date.now();
-    let receivedReply: any = null;
-    let unsubscribe: (() => void) | undefined;
-
-    const checkRateLimit = (resOrErr: any, text?: string) => {
-      const status = resOrErr?.status;
-      const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
-      if (
-        status === 429 ||
-        status === 403 ||
-        str.includes("429") ||
-        str.includes("403") ||
-        str.includes("quota") ||
-        str.includes("rate limit") ||
-        str.includes("rate-limit") ||
-        str.includes("limit") ||
-        str.includes("forbidden")
-      ) {
-        console.log("[SKIP] ntfy.sh rate limited or forbidden (status:", status, ")");
-        if (unsubscribe) unsubscribe();
-        return true;
+  it.skipIf(!hasLiveNtfy)(
+    "Scenario 5: Live Mobile Push Roundtrip against configured ntfy server",
+    async () => {
+      const server = process.env.NTFY_SERVER;
+      const token = process.env.NTFY_TOKEN;
+      if (!server || !token) {
+        console.log("[SKIP] NTFY_SERVER/NTFY_TOKEN not set");
+        return;
       }
-      return false;
-    };
+      const reqId = "req-live-roundtrip-" + Date.now();
+      let receivedReply: any = null;
+      let unsubscribe: (() => void) | undefined;
 
-    try {
-      unsubscribe = await ntfyAdapter.listen(async (resp) => {
-        if (resp.req_id === reqId) {
-          receivedReply = resp;
+      const checkRateLimit = (resOrErr: any, text?: string) => {
+        const status = resOrErr?.status;
+        const str = String(resOrErr?.message || resOrErr || text || "").toLowerCase();
+        if (
+          status === 429 ||
+          status === 403 ||
+          str.includes("429") ||
+          str.includes("403") ||
+          str.includes("quota") ||
+          str.includes("rate limit") ||
+          str.includes("rate-limit") ||
+          str.includes("limit") ||
+          str.includes("forbidden")
+        ) {
+          console.log("[SKIP] ntfy rate limited or forbidden (status:", status, ")");
+          if (unsubscribe) unsubscribe();
+          return true;
         }
-      });
+        return false;
+      };
 
-      await ntfyAdapter.publish({
-        id: reqId,
-        harness: "omp",
-        sessionID: "ses-live-5",
-        toolName: "bash",
-        commandString: "npm test",
-        workspaceRoot: process.cwd(),
-        userPrompt: "run tests",
-        title: "[REVIEW] bash",
-        message: "Target: npm test\nReason: Live test review request",
-        priority: "high",
-        tags: ["lock", "robot"],
-        actions: [
-          { id: "appr", label: "Approve", reply: "once" },
-          { id: "deny", label: "Deny", reply: "reject" },
-        ],
-      });
+      try {
+        unsubscribe = await ntfyAdapter.listen(async (resp) => {
+          if (resp.req_id === reqId) {
+            receivedReply = resp;
+          }
+        });
 
-      await new Promise((r) => setTimeout(r, 2000));
+        await ntfyAdapter.publish({
+          id: reqId,
+          harness: "omp",
+          sessionID: "ses-live-5",
+          toolName: "bash",
+          commandString: "npm test",
+          workspaceRoot: process.cwd(),
+          userPrompt: "run tests",
+          title: "[REVIEW] bash",
+          message: "Target: npm test\nReason: Live test review request",
+          priority: "high",
+          tags: ["lock", "robot"],
+          actions: [
+            { id: "appr", label: "Approve", reply: "once" },
+            { id: "deny", label: "Deny", reply: "reject" },
+          ],
+        });
 
-      const getRes = await fetch(`https://ntfy.sh/${topic}/json?poll=1`, {
-        headers: { Authorization: "Bearer ***REMOVED***" },
-      });
-      const getTxt = await getRes.text().catch(() => "");
-      if (checkRateLimit(getRes, getTxt)) return;
-      expect(getRes.ok).toBe(true);
-      expect(getTxt).toContain(reqId);
+        await new Promise((r) => setTimeout(r, 2000));
 
-      const replyRes = await fetch(`https://ntfy.sh/${topic}-response`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer ***REMOVED***",
-        },
-        body: JSON.stringify({ req_id: reqId, reply: "once" }),
-      });
-      const replyTxt = await replyRes.text().catch(() => "");
-      if (checkRateLimit(replyRes, replyTxt)) return;
-      expect(replyRes.ok).toBe(true);
+        const getRes = await fetch(`${server}/${topic}/json?poll=1`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const getTxt = await getRes.text().catch(() => "");
+        if (checkRateLimit(getRes, getTxt)) return;
+        expect(getRes.ok).toBe(true);
+        expect(getTxt).toContain(reqId);
 
-      for (let i = 0; i < 20; i++) {
-        if (receivedReply) break;
-        await new Promise((r) => setTimeout(r, 500));
+        const replyRes = await fetch(`${server}/${topic}-response`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ req_id: reqId, reply: "once" }),
+        });
+        const replyTxt = await replyRes.text().catch(() => "");
+        if (checkRateLimit(replyRes, replyTxt)) return;
+        expect(replyRes.ok).toBe(true);
+
+        for (let i = 0; i < 20; i++) {
+          if (receivedReply) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        expect(receivedReply).toBeDefined();
+        expect(receivedReply.req_id).toBe(reqId);
+        expect(receivedReply.reply).toBe("once");
+      } catch (err: any) {
+        if (checkRateLimit(err)) return;
+        throw err;
+      } finally {
+        if (unsubscribe) {
+          unsubscribe();
+        }
       }
-
-      expect(receivedReply).toBeDefined();
-      expect(receivedReply.req_id).toBe(reqId);
-      expect(receivedReply.reply).toBe("once");
-    } catch (err: any) {
-      if (checkRateLimit(err)) return;
-      throw err;
-    } finally {
-      if (unsubscribe) {
-        unsubscribe();
-      }
-    }
-  });
+    },
+  );
 });

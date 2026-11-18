@@ -426,10 +426,12 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     : undefined;
 
   const environment: EnvironmentConfig = {
-    trustedDomains: optEnv.trustedDomains ??
+    trustedDomains:
+      optEnv.trustedDomains ??
       envTrustedDomains ??
       fileEnv.trustedDomains ??
-      fileTrustedDomains ?? ["*.example.com"],
+      fileTrustedDomains ??
+      [],
     trustedGitRemotes: optEnv.trustedGitRemotes ??
       envTrustedRemotes ??
       fileEnv.trustedGitRemotes ??

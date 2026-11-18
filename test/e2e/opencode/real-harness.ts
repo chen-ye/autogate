@@ -188,6 +188,7 @@ export class RealOpenCodeHarness {
   public serverPid?: number;
   public serverPort?: number;
   private readonly isTemporaryWorkspace: boolean;
+  private readonly hasExplicitNtfy: boolean;
   private readonly savedEnv: Record<string, string | undefined>;
   private ntfyStreamController?: AbortController;
   private ntfyStreamReader?: ReadableStreamDefaultReader<Uint8Array>;
@@ -212,12 +213,19 @@ export class RealOpenCodeHarness {
     this.ntfyServer =
       options?.ntfyServer ||
       (options?.pluginConfig?.ntfyServer as string) ||
+      process.env.NTFY_SERVER ||
       "https://ntfy.sh";
     this.ntfyToken =
-      options?.ntfyToken ||
-      (options?.pluginConfig?.ntfyToken as string) ||
-      process.env.NTFY_TOKEN ||
-      "***REMOVED***";
+      options?.ntfyToken ??
+      (options?.pluginConfig?.ntfyToken as string | undefined) ??
+      process.env.NTFY_TOKEN ??
+      "";
+    this.hasExplicitNtfy = Boolean(
+      options?.ntfyServer ||
+      options?.pluginConfig?.ntfyServer ||
+      process.env.NTFY_SERVER ||
+      this.ntfyToken,
+    );
     this.ntfyTopic =
       options?.ntfyTopic ||
       (options?.pluginConfig?.ntfyTopic as string) ||
@@ -847,7 +855,7 @@ export class RealOpenCodeHarness {
       model?: { providerID: string; modelID: string };
     },
   ): Promise<any> {
-    if (!this.ntfyStreamConnected && !this.isRateLimited) {
+    if (this.hasExplicitNtfy && !this.ntfyStreamConnected && !this.isRateLimited) {
       try {
         await this.connectNtfyStream();
       } catch (err: any) {

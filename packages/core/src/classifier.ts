@@ -294,7 +294,7 @@ export function buildClassifierUserPrompt(input: {
 
   const env = input.environment ?? {};
   const trustedDomains =
-    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : ["*.example.com"];
+    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : [];
   const trustedRemotes =
     env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
   const trustedPaths =
@@ -328,7 +328,7 @@ ${formatUserTranscript(input.userPrompt)}`;
   }
 
   let prompt = `## Environment Trust Boundaries:
-- **Trusted Domains**: ${trustedDomains.join(", ")}
+- **Trusted Domains**: ${trustedDomains.length > 0 ? trustedDomains.join(", ") : "(none)"}
 - **Trusted Git Remotes**: ${trustedRemotes.join(", ")}
 - **Trusted Paths**: ${trustedPaths.join(", ")}
 *(Any domain, network URL, or remote not listed above must be treated as untrusted/external).*
@@ -424,7 +424,7 @@ export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateR
 
   const env = action.environment ?? {};
   const trustedDomains =
-    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : ["*.example.com"];
+    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : [];
   const trustedRemotes =
     env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
   const trustedPaths =
@@ -438,7 +438,7 @@ export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateR
     [
       "## Trust Boundaries",
       `Workspace: ${workspaceRoot}`,
-      `Trusted Domains: ${trustedDomains.join(", ")}`,
+      `Trusted Domains: ${trustedDomains.length > 0 ? trustedDomains.join(", ") : "(none)"}`,
       `Trusted Git Remotes: ${trustedRemotes.join(", ")}`,
       `Trusted Paths: ${trustedPaths.join(", ")}`,
     ].join("\n"),

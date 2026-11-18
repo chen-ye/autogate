@@ -132,7 +132,7 @@ AutoGate uses a single canonical configuration file located at `~/.config/autoga
 ### Repository Setup
 
 ```bash
-git clone https://github.com/your-org/autogate.git
+git clone https://github.com/chen-ye/autogate.git
 cd autogate
 bun install
 ```
@@ -163,7 +163,7 @@ paseo plugin logs autogate
 
 In Paseo environments, AutoGate utilizes `PaseoNativeEvaluator` instead of relying on external API calls:
 
-- **Provider Reuse (No Parallel Pipeline)**: Discovers and reuses host-configured models and corporate proxies from Paseo (such as OMP's `enterprise-llm` gateway or configured `metadataGeneration` models). This eliminates the need for `AUTOGATE_API_KEY` or separate inference endpoints in enterprise environments.
+- **Provider Reuse (No Parallel Pipeline)**: Discovers and reuses host-configured models and corporate proxies from Paseo (such as enterprise LLM gateways or configured `metadataGeneration` models). This eliminates the need for `AUTOGATE_API_KEY` or separate inference endpoints in enterprise environments.
 - **Strict Security Isolation**: Spawns ephemeral evaluation agents with zero parentage (`parent: undefined`), isolated scratch directory (`/tmp/autogate-eval`), `autoArchive: true`, and `notifyOnFinish: false`. The evaluator agent cannot mutate files or leak subagent messages to the target agent.
 - **Active Tool Denial & Recursion Guard**: Evaluator sessions are strictly forbidden from executing tools. If an evaluator session ever attempts a tool call, AutoGate actively and immediately rejects it with `behavior: "deny"` and message `"AutoGate Security: Evaluator sessions are strictly forbidden from executing tools."`.
 - **Mode Locking (`modeId: "ask"`)**: Evaluator sessions explicitly run with `modeId: "ask"`, preventing providers from defaulting to unattended `full` (yolo) mode where tool execution could bypass permission checks. Evaluator agents omit `toolPolicy` so providers avoid unsupported preapproval errors while enforcing interactive permission gates.
