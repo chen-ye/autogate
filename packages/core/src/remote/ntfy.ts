@@ -15,12 +15,18 @@ export class NtfyAdapter implements RemoteAdapter {
 
   constructor(options?: NtfyAdapterOptions) {
     this.server = (options?.server || "https://ntfy.sh").replace(/\/$/, "");
-    this.topic =
-      options?.topic ||
-      process.env.AUTOGATE_NTFY_TOPIC ||
-      process.env.NTFY_TOPIC ||
-      process.env.OPENCODE_NTFY_TOPIC ||
-      "autogate";
+    const topic =
+      options?.topic?.trim() ||
+      process.env.AUTOGATE_NTFY_TOPIC?.trim() ||
+      process.env.NTFY_TOPIC?.trim() ||
+      process.env.OPENCODE_NTFY_TOPIC?.trim() ||
+      "";
+    if (!topic) {
+      throw new Error(
+        "NtfyAdapter requires a non-empty topic via options.topic, AUTOGATE_NTFY_TOPIC, NTFY_TOPIC, or OPENCODE_NTFY_TOPIC.",
+      );
+    }
+    this.topic = topic;
     this.token = options?.token;
   }
 

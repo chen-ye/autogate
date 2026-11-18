@@ -38,11 +38,14 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       config.omp?.reviewFallbackMode ??
       config.reviewFallbackMode ??
       "ntfy";
-    const adapter = new NtfyAdapter({
-      server: config.ntfyServer,
-      topic: config.ntfyTopic,
-      token: config.ntfyToken,
-    });
+    const ntfyEnabled = Boolean(config.ntfyTopic);
+    const adapter = ntfyEnabled
+      ? new NtfyAdapter({
+          server: config.ntfyServer,
+          topic: config.ntfyTopic,
+          token: config.ntfyToken,
+        })
+      : undefined;
     const piObj = (pi && typeof pi === "object" ? pi : {}) as { logger?: OmpLogger };
 
     let evaluator: GateEvaluator;
@@ -71,7 +74,7 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       config,
       adapter,
       evaluator,
-      remoteReviewEnabled: fallbackMode !== "native",
+      remoteReviewEnabled: ntfyEnabled && fallbackMode !== "native",
     });
   }
 

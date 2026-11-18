@@ -350,7 +350,7 @@ export class OpenCodeRuntimeSync {
       updated = true;
     }
 
-    const nextFallback = reloaded.reviewFallbackMode ?? "ntfy";
+    const nextFallback = reloaded.ntfyTopic ? (reloaded.reviewFallbackMode ?? "ntfy") : "native";
     const hasExplicitRemote = typeof this.options?.remoteReviewEnabled === "boolean";
     if (
       !hasExplicitRemote &&

@@ -1048,4 +1048,47 @@ describe("AutoGateCoreEngine recordEscalationIntent", () => {
     // Only "cd app && rm -rf dist" was consumed; "cd app" remains queued
     expect(sharedExplicitEscalations.get(sid)?.some((e) => e.action === "cd app")).toBe(true);
   });
+
+  it("disables remote review and falls back to UNSURE when no adapter or ntfyTopic is configured", async () => {
+    const evaluator = new MockEvaluator();
+    evaluator.nextResult = { verdict: "UNSURE", reason: "Needs review" };
+
+    const eng = new AutoGateCoreEngine({
+      config: {
+        autoMode: true,
+        reviewFallbackMode: "ntfy",
+        notifyOnVerdict: false,
+      },
+      evaluator,
+    });
+
+    expect(eng.isRemoteReviewEnabled()).toBe(false);
+    expect(eng.getFallbackMode()).toBe("native");
+
+    const decision = await eng.evaluate({
+      id: "act-no-ntfy-1",
+      harness: "generic",
+      sessionID: "ses-no-ntfy",
+      toolName: "bash",
+      commandString: "npm publish",
+      workspaceRoot: "/workspace",
+      userPrompt: "publish",
+    });
+    expect(decision.verdict).toBe("UNSURE");
+
+    const reviewDecision = await eng.requestReview(
+      {
+        id: "act-no-ntfy-2",
+        harness: "generic",
+        sessionID: "ses-no-ntfy",
+        toolName: "bash",
+        commandString: "npm publish",
+        workspaceRoot: "/workspace",
+        userPrompt: "publish",
+      },
+      "Explicit review",
+    );
+    expect(reviewDecision.verdict).toBe("UNSURE");
+    expect(reviewDecision.reason).toBe("Explicit review");
+  });
 });

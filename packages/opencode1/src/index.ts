@@ -102,11 +102,13 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
       "http://localhost:4097";
     this.serverUrl = serverUrl;
     config.serverUrl = serverUrl;
-    const adapter = new NtfyAdapter({
-      server: config.ntfyServer,
-      topic: config.ntfyTopic,
-      token: config.ntfyToken,
-    });
+    const adapter = config.ntfyTopic
+      ? new NtfyAdapter({
+          server: config.ntfyServer,
+          topic: config.ntfyTopic,
+          token: config.ntfyToken,
+        })
+      : undefined;
 
     const workspaceRoot =
       resolveWorkspaceDirectory(ctx.directory) ??
@@ -118,10 +120,11 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
     const evaluator =
       (options?.evaluator as GateEvaluator | undefined) ??
       new OpenCodeV1SessionEvaluator(client, config);
-    const remoteReviewEnabled =
-      typeof options?.remoteReviewEnabled === "boolean"
+    const remoteReviewEnabled = config.ntfyTopic
+      ? typeof options?.remoteReviewEnabled === "boolean"
         ? options.remoteReviewEnabled
-        : config.reviewFallbackMode !== "native";
+        : config.reviewFallbackMode !== "native"
+      : false;
     this.engine = new AutoGateCoreEngine({
       config,
       adapter,
@@ -299,14 +302,14 @@ export async function AutoGatePlugin(
 
   const config = loadConfig(options);
   console.log(
-    `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
+    `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic ?? "disabled"})`,
   );
   try {
     await ctx.client.app.log({
       body: {
         service: "auto-gate",
         level: "info",
-        message: `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic})`,
+        message: `AutoGate Plugin initialized (model: ${config.classifierModel}, topic: ${config.ntfyTopic ?? "disabled"})`,
       },
     });
   } catch {}

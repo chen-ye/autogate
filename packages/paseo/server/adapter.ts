@@ -36,7 +36,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
   private options?: PaseoPluginOptions;
   private config: AutoGateConfig;
   private engine: AutoGateCoreEngine;
-  private ntfyAdapter: NotifierAdapter;
+  private ntfyAdapter?: NotifierAdapter;
   private pendingRequests: Map<string, PendingPermissionRequest> = new Map();
   private unregisterRequested?: () => void;
   private unregisterResolved?: () => void;
@@ -55,12 +55,14 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     this.config = config;
 
     this.ntfyAdapter =
-      (options?.adapter as NotifierAdapter) ??
-      new NtfyAdapter({
-        server: config.ntfyServer,
-        topic: config.ntfyTopic,
-        token: config.ntfyToken,
-      });
+      (options?.adapter as NotifierAdapter | undefined) ??
+      (config.ntfyTopic
+        ? new NtfyAdapter({
+            server: config.ntfyServer,
+            topic: config.ntfyTopic,
+            token: config.ntfyToken,
+          })
+        : undefined);
 
     const directApiEvaluator = new DirectApiEvaluator({
       apiKey:
@@ -127,7 +129,7 @@ export class PaseoHarnessAdapter implements HarnessAdapter {
     return this.engine;
   }
 
-  public getAdapter(): NotifierAdapter {
+  public getAdapter(): NotifierAdapter | undefined {
     return this.ntfyAdapter;
   }
 

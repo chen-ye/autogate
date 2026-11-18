@@ -280,7 +280,7 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     env.OPENCODE_NTFY_TOPIC ??
     fileConfig.ntfyTopic;
   const ntfyTopic =
-    typeof rawTopic === "string" && rawTopic.trim().length > 0 ? rawTopic.trim() : "autogate";
+    typeof rawTopic === "string" && rawTopic.trim().length > 0 ? rawTopic.trim() : undefined;
 
   const rawServer =
     options?.ntfyServer ??

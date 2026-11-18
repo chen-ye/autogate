@@ -52,6 +52,9 @@ describe("@autogate/opencode runtime sync", () => {
     delete process.env.AUTOGATE_AUTO_MODE;
     delete process.env.OPENCODE_AUTO_MODE;
     delete process.env.AUTOGATE_FALLBACK;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.AUTOGATE_NTFY_TOPIC;
+    delete process.env.OPENCODE_NTFY_TOPIC;
     process.env.XDG_CONFIG_HOME = xdgConfigHome;
   });
 
@@ -71,6 +74,7 @@ describe("@autogate/opencode runtime sync", () => {
       {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
+        ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
         evalLogFile,
       },
@@ -128,6 +132,7 @@ describe("@autogate/opencode runtime sync", () => {
       {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
+        ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
         evalLogFile,
       },
@@ -292,6 +297,7 @@ describe("@autogate/opencode runtime sync", () => {
       {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
+        ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
         evalLogFile,
       },
@@ -342,6 +348,7 @@ describe("@autogate/opencode runtime sync", () => {
       {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
+        ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
         evalLogFile,
         reviewFallbackMode: "ntfy",
@@ -461,6 +468,7 @@ describe("@autogate/opencode runtime sync", () => {
       {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
+        ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
         evalLogFile,
       },
@@ -474,5 +482,40 @@ describe("@autogate/opencode runtime sync", () => {
 
     await adapter2.dispose();
     expect(fs.existsSync(statePath)).toBe(false);
+  });
+
+  it("7. disables ntfy and forces native fallback when ntfyTopic is omitted", async () => {
+    fs.writeFileSync(
+      configFilePath,
+      JSON.stringify({ autoMode: true, reviewFallbackMode: "ntfy" }),
+      "utf8",
+    );
+
+    const mockEvaluator = new MockEvaluator();
+    const adapter = new OpenCodeHarnessAdapter(
+      { directory: workspaceDir },
+      {
+        evaluator: mockEvaluator,
+        ntfyServer: "http://127.0.0.1:59999",
+        notifyOnVerdict: false,
+        evalLogFile,
+      },
+    );
+
+    await adapter.start();
+    try {
+      expect(adapter.getEngine().isRemoteReviewEnabled()).toBe(false);
+      expect(adapter.getEngine().getFallbackMode()).toBe("native");
+
+      adapter.getRuntimeSync().syncControlAndConfig();
+      expect(adapter.getEngine().isRemoteReviewEnabled()).toBe(false);
+      expect(adapter.getEngine().getFallbackMode()).toBe("native");
+
+      const state = readRuntimeState(adapter.getRuntimeSync().getStateFilePath());
+      expect(state.remoteReviewEnabled).toBe(false);
+      expect(state.reviewFallbackMode).toBe("native");
+    } finally {
+      await adapter.dispose();
+    }
   });
 });

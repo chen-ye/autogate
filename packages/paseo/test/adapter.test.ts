@@ -122,15 +122,26 @@ class MockGateEvaluator implements GateEvaluator {
 }
 
 describe("PaseoHarnessAdapter", () => {
-  it("initializes AutoGateCoreEngine with remoteReviewEnabled: false and pure dual-channel mode", () => {
-    const server = new MockServer();
-    const adapter = new PaseoHarnessAdapter(server);
-    const engine = adapter.getEngine();
+  it("initializes AutoGateCoreEngine with remoteReviewEnabled: false and disables ntfy when ntfyTopic is unset", () => {
+    const origEnv = { ...process.env };
+    process.env.XDG_CONFIG_HOME = `/tmp/autogate-nonexistent-xdg-${Date.now()}`;
+    delete process.env.AUTOGATE_CONFIG;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.AUTOGATE_NTFY_TOPIC;
+    delete process.env.OPENCODE_NTFY_TOPIC;
+    try {
+      const server = new MockServer();
+      const adapter = new PaseoHarnessAdapter(server);
+      const engine = adapter.getEngine();
 
-    assert.strictEqual(engine.isRemoteReviewEnabled(), false);
-    assert.strictEqual(engine.getFallbackMode(), "native");
-    assert.strictEqual(adapter.name, "paseo");
-    assert.ok(adapter.getPendingRequests());
+      assert.strictEqual(engine.isRemoteReviewEnabled(), false);
+      assert.strictEqual(engine.getFallbackMode(), "native");
+      assert.strictEqual(adapter.getAdapter(), undefined);
+      assert.strictEqual(adapter.name, "paseo");
+      assert.ok(adapter.getPendingRequests());
+    } finally {
+      process.env = origEnv;
+    }
   });
 
   it("supports config.paseo?.notifyOnVerdict override", () => {

@@ -163,7 +163,7 @@ export type NtfyVerbosity = "normal" | "verbose";
 
 export interface AutoGateConfig {
   autoMode: boolean;
-  ntfyTopic: string;
+  ntfyTopic?: string;
   ntfyServer: string;
   ntfyToken?: string;
   ntfyVerbosity?: NtfyVerbosity;

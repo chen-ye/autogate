@@ -465,6 +465,7 @@ export interface AutoGateEngineOptions {
 export class AutoGateCoreEngine {
   private config: AutoGateConfig;
   private remoteAdapter: NotifierAdapter;
+  private hasRemoteAdapter: boolean;
   private evaluator: GateEvaluator;
   private enabled: boolean;
   private userPrompt: string = "";
@@ -509,6 +510,7 @@ export class AutoGateCoreEngine {
     ) {
       const opts = optionsOrConfig as AutoGateEngineOptions;
       this.config = opts.config;
+      this.hasRemoteAdapter = Boolean(opts.adapter);
       this.remoteAdapter = opts.adapter ?? createDummyAdapter();
       baseEvaluator = opts.evaluator ?? new DefaultGateEvaluator(opts.config);
       this.workspaceRoot = opts.workspaceRoot ?? this.config.environment?.trustedPaths?.[0];
@@ -516,6 +518,7 @@ export class AutoGateCoreEngine {
       this.onStateChange = opts.onStateChange;
     } else {
       this.config = (optionsOrConfig as AutoGateConfig) || { autoMode: false };
+      this.hasRemoteAdapter = Boolean(remoteAdapter);
       this.remoteAdapter = remoteAdapter ?? createDummyAdapter();
       baseEvaluator = evaluator ?? new DefaultGateEvaluator(this.config);
     }
@@ -535,7 +538,7 @@ export class AutoGateCoreEngine {
     if (remoteReviewOption !== undefined) {
       this.remoteReviewEnabled = remoteReviewOption;
       this.reviewFallbackMode = remoteReviewOption ? "ntfy" : "native";
-    } else if (this.config?.reviewFallbackMode === "native") {
+    } else if (!this.hasRemoteAdapter || this.config?.reviewFallbackMode === "native") {
       this.remoteReviewEnabled = false;
       this.reviewFallbackMode = "native";
     } else {
@@ -905,6 +908,17 @@ export class AutoGateCoreEngine {
       return {
         verdict: "BLOCK",
         reason: "Review request aborted by signal",
+        ...(cascade ? { cascade } : {}),
+        ...(metadata ? { metadata } : {}),
+      };
+    }
+
+    if (!this.hasRemoteAdapter) {
+      return {
+        verdict: "UNSURE",
+        reason: reason || "Manual review required (ntfy disabled: ntfyTopic not configured)",
+        riskLevel,
+        userAuthorization: userAuth,
         ...(cascade ? { cascade } : {}),
         ...(metadata ? { metadata } : {}),
       };

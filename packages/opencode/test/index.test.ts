@@ -245,6 +245,9 @@ describe("@autogate/opencode escalate_permission v2", () => {
     fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, "autogate"), { recursive: true });
     delete process.env.AUTOGATE_CONFIG;
     delete process.env.AUTOGATE_FALLBACK;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.AUTOGATE_NTFY_TOPIC;
+    delete process.env.OPENCODE_NTFY_TOPIC;
     sharedExplicitEscalations.clear();
     sharedRecentlyRejected.clear();
   });
@@ -272,6 +275,7 @@ describe("@autogate/opencode escalate_permission v2", () => {
       directory: tempDir,
       options: {
         ntfyServer: "http://127.0.0.1:59999",
+        ntfyTopic: "test-esc-topic",
         evalLogFile: path.join(tempDir, "evals.jsonl"),
       },
       tool: {

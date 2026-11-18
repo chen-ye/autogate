@@ -7,6 +7,7 @@ import {
   resolveRuntimeDir,
   resolveControlFilePath,
 } from "../src/config";
+import { NtfyAdapter } from "../src/remote/ntfy";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -22,6 +23,7 @@ describe("config resolution", () => {
     process.env.NTFY_SERVER = "";
     delete process.env.AUTOGATE_CONFIG;
     delete process.env.AUTOGATE_NTFY_TOPIC;
+    delete process.env.OPENCODE_NTFY_TOPIC;
     const emptyConfigDir = path.join(os.tmpdir(), `empty-xdg-config-${Date.now()}`);
     tempDirs.push(emptyConfigDir);
     process.env.XDG_CONFIG_HOME = emptyConfigDir;
@@ -51,7 +53,7 @@ describe("config resolution", () => {
   it("1. Default configuration: loadConfig() returns standard defaults", () => {
     process.env.NTFY_SERVER = "https://ntfy.sh";
     const config = loadConfig();
-    expect(config.ntfyTopic).toBe("autogate");
+    expect(config.ntfyTopic).toBeUndefined();
     expect(config.ntfyServer).toBe("https://ntfy.sh");
     expect(config.autoMode).toBe(true);
     expect(config.reviewFallbackMode).toBe("ntfy");
@@ -118,7 +120,7 @@ describe("config resolution", () => {
 
     try {
       const config = loadConfig({ configFile: tmpFile });
-      expect(config.ntfyTopic).toBe("autogate");
+      expect(config.ntfyTopic).toBeUndefined();
       expect(config.autoMode).toBe(true);
       expect(warned).toBe(true);
     } finally {
@@ -214,7 +216,7 @@ describe("config resolution", () => {
     expect(fileConfig.ntfyTopic).toBeUndefined();
 
     const config = loadConfig();
-    expect(config.ntfyTopic).toBe("autogate");
+    expect(config.ntfyTopic).toBeUndefined();
   });
 
   it("12. options.omp deeply merges with fileConfig.omp", () => {
@@ -283,7 +285,7 @@ describe("config resolution", () => {
     expect(fileConfig.ntfyTopic).toBeUndefined();
 
     const config = loadConfig();
-    expect(config.ntfyTopic).toBe("autogate");
+    expect(config.ntfyTopic).toBeUndefined();
   });
 
   it("15. ntfyVerbosity defaults to 'normal'", () => {
@@ -390,5 +392,16 @@ describe("config resolution", () => {
     const optCfg = path.join(os.tmpdir(), `autogate-paths-opt-${Date.now()}`, "opt.json");
     expect(resolveConfigFilePath({ configFile: optCfg })).toBe(path.resolve(optCfg));
     expect(resolveConfigDir({ configFile: optCfg })).toBe(path.dirname(path.resolve(optCfg)));
+  });
+
+  it("19. NtfyAdapter throws when constructed without an explicit topic", () => {
+    expect(() => new NtfyAdapter({ server: "https://ntfy.example.com" })).toThrow();
+    expect(() => new NtfyAdapter({ topic: "   " })).toThrow();
+
+    const ok = new NtfyAdapter({
+      server: "https://ntfy.example.com",
+      topic: "custom-entropy-topic",
+    });
+    expect(ok.topic).toBe("custom-entropy-topic");
   });
 });
