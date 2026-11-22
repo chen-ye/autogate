@@ -18,6 +18,8 @@ import {
   isRiskLevel,
   isUserAuthorization,
   isClassifierVerdict,
+  resolveClassifierActionArgs,
+  resolveRequestActionArgs,
 } from "@autogate/core";
 import type { OpenCodeV1ClassifyInput, OpenCodeV1SessionClient } from "./types.js";
 export type { OpenCodeV1ClassifyInput, OpenCodeV1SessionClient };
@@ -394,8 +396,9 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
   const sandboxDir = ensureSandboxDirectory();
   const userPrompt = input.userPrompt ?? "";
   const subagentPrompt = input.subagentPrompt;
-  const actionName = input.actionName ?? input.request?.permission ?? "permission";
-  const actionArgs = input.actionArgs ?? input.request?.patterns ?? input.request?.metadata ?? {};
+  const actionName =
+    input.actionName ?? input.request?.action ?? input.request?.permission ?? "permission";
+  const actionArgs = resolveRequestActionArgs(input.request, input.actionArgs);
   const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
 
   const evalAgent = await resolveEvaluationAgent(client);
@@ -621,7 +624,7 @@ export class OpenCodeV1SessionEvaluator implements GateEvaluator {
       userPrompt: action.userPrompt,
       subagentPrompt: action.subagentPrompt,
       actionName: action.toolName,
-      actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
+      actionArgs: resolveClassifierActionArgs(action),
       workspaceRoot: action.workspaceRoot,
       environment: action.environment,
       model: this.config?.classifierModel,

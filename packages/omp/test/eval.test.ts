@@ -630,4 +630,90 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
 
     expect(result.verdict).toBe("ALLOW");
   });
+
+  it("OmpNativeEvaluator uses resolveClassifierActionArgs for targetPath-only and array rawArgs", async () => {
+    const tmpWs = await fs.mkdtemp(path.join(os.tmpdir(), "autogate-omp-wire-"));
+    try {
+      const targetFile = path.join(tmpWs, "note.txt");
+      await fs.writeFile(targetFile, "hello\n", "utf8");
+
+      let capturedUserPrompt = "";
+      const spy = spyOn(piAi, "completeSimple").mockImplementationOnce(async (_model, input) => {
+        const msg = input.messages?.[0];
+        capturedUserPrompt = typeof msg?.content === "string" ? msg.content : "";
+        return {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              name: "classify_result",
+              arguments: {
+                risk_level: "LOW",
+                user_authorization: "HIGH",
+                verdict: "ALLOW",
+                reason: "ok",
+              },
+            },
+          ],
+          stopReason: "toolUse",
+        } as any;
+      });
+
+      try {
+        const evaluator = new OmpNativeEvaluator({ model: { id: "test-model" }, apiKey: "k" });
+        const result = await evaluator.evaluate({
+          id: "act-omp-wire",
+          harness: "omp",
+          sessionID: "ses-omp-w",
+          toolName: "read",
+          targetPath: targetFile,
+          workspaceRoot: tmpWs,
+          userPrompt: "Read note",
+        });
+
+        expect(result.verdict).toBe("ALLOW");
+        expect(capturedUserPrompt).toContain("exists on disk (file)");
+        expect(capturedUserPrompt).toContain("note.txt");
+
+        // Also test array rawArgs anti-shadowing projection
+        spy.mockImplementationOnce(async (_model, input) => {
+          const msg = input.messages?.[0];
+          capturedUserPrompt = typeof msg?.content === "string" ? msg.content : "";
+          return {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                name: "classify_result",
+                arguments: {
+                  risk_level: "HIGH",
+                  user_authorization: "NONE",
+                  verdict: "BLOCK",
+                  reason: "blocked",
+                },
+              },
+            ],
+            stopReason: "toolUse",
+          } as any;
+        });
+
+        const arrayResult = await evaluator.evaluate({
+          id: "act-omp-wire-arr",
+          harness: "omp",
+          sessionID: "ses-omp-w",
+          toolName: "bash",
+          commandString: "git status",
+          rawArgs: ["git status", "rm -rf /"],
+          workspaceRoot: tmpWs,
+          userPrompt: "Check status",
+        });
+        expect(arrayResult.verdict).toBe("BLOCK");
+        expect(capturedUserPrompt).toContain("git status ; rm -rf /");
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await fs.rm(tmpWs, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -360,6 +360,81 @@ describe("SystemOneEvaluator & compact S1 state", () => {
     if (!outcome.ok) {
       expect(outcome.reason).toBe("s1_timeout");
       expect(outcome.isTransportError).toBe(true);
+    }
+  });
+
+  it("inspects metadata.command script even when rawArgs is OpenCode glob pattern ['python3 *']", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-s1-oc-"));
+    try {
+      const scriptsDir = path.join(tmpDir, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      fs.writeFileSync(path.join(scriptsDir, "deploy.py"), "print('deploying app')\n");
+
+      const action: GateAction = {
+        id: "act-oc-glob",
+        harness: "opencode",
+        sessionID: "ses-oc",
+        toolName: "bash",
+        commandString: "python3 scripts/deploy.py",
+        patterns: ["python3 *"],
+        rawArgs: ["python3 *"],
+        workspaceRoot: tmpDir,
+        userPrompt: "Run deploy script",
+        metadata: {
+          command: "python3 scripts/deploy.py",
+          directory: tmpDir,
+        },
+      };
+
+      const { state } = buildSystemOneStateWithMeta(action);
+      expect(state).toContain("Target Script Inspected");
+      expect(state).toContain("print('deploying app')");
+      expect(state).not.toContain("`*` does not exist");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("applies default ~/Projects trustedPaths parity in System 1 when environment is undefined", () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-s1-home-"));
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-s1-ws-"));
+    const homedirSpy = spyOn(os, "homedir").mockReturnValue(fakeHome);
+
+    try {
+      const projScript = path.join(fakeHome, "Projects", "demo", "run.sh");
+      fs.mkdirSync(path.dirname(projScript), { recursive: true });
+      fs.writeFileSync(projScript, "#!/bin/bash\necho trusted_project\n");
+
+      const s1Trusted = buildSystemOneState({
+        id: "act-s1-default-trust",
+        harness: "opencode",
+        sessionID: "ses-dt",
+        toolName: "bash",
+        commandString: "bash ~/Projects/demo/run.sh",
+        workspaceRoot: wsDir,
+        userPrompt: "Run demo",
+      });
+      expect(s1Trusted).toContain("Trusted Paths: ~/Projects");
+      expect(s1Trusted).toContain("Target Script Inspected");
+      expect(s1Trusted).toContain("echo trusted_project");
+
+      const outsideScript = path.resolve(import.meta.dir, "../src/agent.ts");
+
+      const s1Untrusted = buildSystemOneState({
+        id: "act-s1-untrusted",
+        harness: "opencode",
+        sessionID: "ses-ut",
+        toolName: "bash",
+        commandString: `bun run ${outsideScript}`,
+        workspaceRoot: wsDir,
+        userPrompt: "Run untrusted",
+      });
+      expect(s1Untrusted).toContain("outside trusted paths (content unverified)");
+      expect(s1Untrusted).not.toContain("EVAL_AGENT_ID");
+    } finally {
+      homedirSpy.mockRestore();
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+      fs.rmSync(wsDir, { recursive: true, force: true });
     }
   });
 });

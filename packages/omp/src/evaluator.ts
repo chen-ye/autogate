@@ -5,6 +5,7 @@ import {
   isClassifierVerdict,
   isRiskLevel,
   isUserAuthorization,
+  resolveClassifierActionArgs,
 } from "@autogate/core";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -178,7 +179,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         userPrompt: action.userPrompt,
         subagentPrompt: action.subagentPrompt,
         actionName: action.toolName,
-        actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
+        actionArgs: resolveClassifierActionArgs(action),
         workspaceRoot: action.workspaceRoot,
         environment: action.environment,
       });

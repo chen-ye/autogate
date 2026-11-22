@@ -8,6 +8,7 @@ import {
   archiveEvaluationSession,
   extractVerdictFromSession,
   recordEvaluationVerdict,
+  OpenCodeSessionEvaluator,
   type OpenCodeSessionClient,
 } from "../src/evaluator.js";
 
@@ -251,6 +252,49 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
       expect(interruptedSessionID).toBe("ses_v2_abort");
       await new Promise((r) => setTimeout(r, 100));
       expect(promptCalls).toBe(1);
+    });
+
+    it("OpenCodeSessionEvaluator normalizes rawArgs glob patterns with metadata.command for prober", async () => {
+      const scriptsDir = path.join(tempDir, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      fs.writeFileSync(path.join(scriptsDir, "deploy.py"), "print('v2_deploy_ok')\n");
+
+      const capturedPrompts: string[] = [];
+      const mockClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_v2_wiring" } }),
+          update: async () => ({}),
+          prompt: async (opts: { sessionID: string; text: string }) => {
+            capturedPrompts.push(opts.text);
+            recordEvaluationVerdict(opts.sessionID, {
+              verdict: "ALLOW",
+              risk_level: "LOW",
+              user_authorization: "HIGH",
+              reason: "OK",
+            });
+            return { data: { parts: [] } };
+          },
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      const evaluator = new OpenCodeSessionEvaluator(mockClient);
+      const res = await evaluator.evaluate({
+        id: "act-v2-wire",
+        harness: "opencode",
+        sessionID: "ses-orig",
+        toolName: "bash",
+        commandString: "python3 scripts/deploy.py",
+        patterns: ["python3 *"],
+        rawArgs: ["python3 *"],
+        workspaceRoot: tempDir,
+        userPrompt: "Deploy",
+        metadata: { command: "python3 scripts/deploy.py", directory: tempDir },
+      });
+
+      expect(res.verdict).toBe("ALLOW");
+      expect(capturedPrompts[0]).toContain("Target Script Inspected");
+      expect(capturedPrompts[0]).toContain("print('v2_deploy_ok')");
     });
   });
 });
