@@ -7,6 +7,7 @@ import {
   archiveEvaluationSession,
   extractVerdictFromSession,
   recordEvaluationVerdict,
+  OpenCodeV1SessionEvaluator,
   type OpenCodeV1SessionClient,
 } from "../src/evaluator.js";
 
@@ -184,6 +185,54 @@ describe("@autogate/opencode1 evaluator OpenCode v1 support", () => {
       expect(abortedSessionID).toBe("ses_v1_abort");
       await new Promise((r) => setTimeout(r, 100));
       expect(promptCalls).toBe(1);
+    });
+
+    it("OpenCodeV1SessionEvaluator normalizes rawArgs glob patterns with metadata.command for prober", async () => {
+      const scriptsDir = path.join(tempDir, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      fs.writeFileSync(path.join(scriptsDir, "deploy.py"), "print('v1_deploy_ok')\n");
+
+      const capturedPrompts: string[] = [];
+      const mockClient = {
+        app: { agents: async () => ({ data: [{ name: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_v1_wiring" } }),
+          update: async () => ({}),
+          prompt: async (opts: {
+            path: { id?: string };
+            body: { parts: Array<{ type: string; text: string }> };
+          }) => {
+            capturedPrompts.push(opts.body.parts[0]?.text ?? "");
+            if (opts.path.id) {
+              recordEvaluationVerdict(opts.path.id, {
+                verdict: "ALLOW",
+                risk_level: "LOW",
+                user_authorization: "HIGH",
+                reason: "OK",
+              });
+            }
+            return { data: { parts: [] } };
+          },
+        },
+      } as unknown as OpenCodeV1SessionClient;
+
+      const evaluator = new OpenCodeV1SessionEvaluator(mockClient);
+      const res = await evaluator.evaluate({
+        id: "act-v1-wire",
+        harness: "opencode",
+        sessionID: "ses-orig",
+        toolName: "bash",
+        commandString: "python3 scripts/deploy.py",
+        patterns: ["python3 *"],
+        rawArgs: ["python3 *"],
+        workspaceRoot: tempDir,
+        userPrompt: "Deploy",
+        metadata: { command: "python3 scripts/deploy.py", directory: tempDir },
+      });
+
+      expect(res.verdict).toBe("ALLOW");
+      expect(capturedPrompts[0]).toContain("Target Script Inspected");
+      expect(capturedPrompts[0]).toContain("print('v1_deploy_ok')");
     });
   });
 });

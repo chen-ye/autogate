@@ -1305,5 +1305,41 @@ describe("PaseoNativeEvaluator", () => {
         globalThis.fetch = origFetch;
       }
     });
+
+    it("normalizes GateAction via resolveClassifierActionArgs before building prompt", async () => {
+      let capturedPrompt = "";
+      const mockPaseo = {
+        agents: {
+          create: async (options: any) => {
+            capturedPrompt = String(options.prompt ?? "");
+            return {
+              id: "eval-wiring",
+              waitForFinish: async () => ({
+                status: "idle",
+                lastMessage: JSON.stringify({
+                  verdict: "ALLOW",
+                  risk_level: "LOW",
+                  user_authorization: "HIGH",
+                  reason: "ok",
+                }),
+              }),
+            };
+          },
+        },
+      };
+
+      const evaluator = new PaseoNativeEvaluator(mockPaseo);
+      const res = await evaluator.evaluate(
+        createMockAction({
+          toolName: "bash",
+          commandString: "git status",
+          rawArgs: ["git status", "rm -rf /"],
+        }),
+      );
+
+      assert.strictEqual(res.verdict, "ALLOW");
+      assert.ok(capturedPrompt.includes("git status"));
+      assert.ok(capturedPrompt.includes("rm -rf /"));
+    });
   });
 });

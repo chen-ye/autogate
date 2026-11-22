@@ -40,6 +40,8 @@ export {
   isRiskLevel,
   isUserAuthorization,
   isClassifierVerdict,
+  resolveClassifierActionArgs,
+  resolveRequestActionArgs,
   formatUserTranscript,
   formatActionDetails,
   stripOrchestratorMetaRules,
@@ -65,8 +67,12 @@ export {
   getCodeBlockLanguage,
   inlineScriptContent,
   detectScriptTarget,
+  detectScriptTargets,
   detectDirectFileTarget,
   extractCommandString,
+  expandHomePath,
+  resolveProbedPath,
+  isSensitiveProbedPath,
 } from "./prober.js";
 export * from "./cascade.js";
 export { computeContextFingerprint, evaluateCascadePolicy, CascadeEvaluator } from "./cascade.js";

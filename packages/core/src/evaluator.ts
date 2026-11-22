@@ -1,7 +1,7 @@
 import type { GateEvaluator, GateAction, ClassifierResult } from "./types";
 import { CLASSIFIER_JSON_SCHEMA } from "./types";
 import { getDefaultClassifierModel } from "./agent";
-import { buildClassifierPrompt, parseVerdict } from "./classifier";
+import { buildClassifierPrompt, parseVerdict, resolveClassifierActionArgs } from "./classifier";
 
 export interface DirectApiEvaluatorOptions {
   apiKey?: string;
@@ -75,7 +75,7 @@ export class DirectApiEvaluator implements GateEvaluator {
         userPrompt: action.userPrompt,
         subagentPrompt: action.subagentPrompt,
         actionName: action.toolName,
-        actionArgs: action.rawArgs ?? action.patterns ?? action.metadata ?? action.commandString,
+        actionArgs: resolveClassifierActionArgs(action),
         workspaceRoot: action.workspaceRoot,
         environment: action.environment,
       });

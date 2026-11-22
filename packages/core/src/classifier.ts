@@ -1,17 +1,312 @@
 import type {
   ClassifierVerdict,
   ClassifierResult,
-  ClassifyInput,
   RiskLevel,
   UserAuthorization,
   EnvironmentConfig,
   BuildClassifierPromptInput,
   GateAction,
+  PermissionEventData,
 } from "./types";
 import { loadEvalAgentDefinition, PASSIVE_EVALUATOR_DIRECTIVE } from "./agent";
-import { probeTargetContext } from "./prober";
+import {
+  probeTargetContext,
+  isShellActionName,
+  isPatternCoveredByText,
+  maxBacktickRun,
+  sanitizeCodeFenceLanguage,
+} from "./prober";
 
 export { PASSIVE_EVALUATOR_DIRECTIVE };
+
+function resolveEffectiveTrustBoundaries(
+  environment: EnvironmentConfig | undefined,
+  workspaceRoot: string,
+): {
+  trustedDomains: string[];
+  trustedRemotes: string[];
+  trustedPaths: string[];
+  effectiveEnv: EnvironmentConfig;
+} {
+  const env = environment ?? {};
+  const trustedDomains =
+    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : [];
+  const trustedRemotes =
+    env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
+  const trustedPaths =
+    env.trustedPaths && env.trustedPaths.length > 0
+      ? env.trustedPaths
+      : ["~/Projects", workspaceRoot];
+
+  return {
+    trustedDomains,
+    trustedRemotes,
+    trustedPaths,
+    effectiveEnv: { ...env, trustedPaths },
+  };
+}
+
+function projectArrayWithAntiShadowing(
+  rawArray: unknown[],
+  cmd: string | undefined,
+  target: string | undefined,
+  meta: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const rawItems = rawArray.filter(
+    (item): item is string => typeof item === "string" && item.trim().length > 0,
+  );
+  const rawJoined = rawItems.join(" ").trim();
+  const metaCmd =
+    typeof meta?.command === "string" && meta.command.trim()
+      ? meta.command.trim()
+      : typeof meta?.cmd === "string" && meta.cmd.trim()
+        ? meta.cmd.trim()
+        : undefined;
+  const candidateCmd = metaCmd ?? (cmd && cmd !== rawJoined ? cmd : undefined);
+
+  let effectiveCommand: string | undefined;
+  if (candidateCmd) {
+    const allowWildcard = rawArray.length <= 1;
+    const uncovered = rawItems.filter(
+      (item) => !isPatternCoveredByText(item, candidateCmd, { allowWildcard, mode: "shell" }),
+    );
+    effectiveCommand =
+      uncovered.length > 0 ? `${candidateCmd} ; ${uncovered.join(" ; ")}` : candidateCmd;
+  }
+
+  const effectiveTarget = rawArray.length <= 1 ? target : undefined;
+
+  return {
+    ...(effectiveCommand ? { command: effectiveCommand } : {}),
+    ...(effectiveTarget ? { path: effectiveTarget } : {}),
+    patterns: rawArray,
+    ...(meta ? { metadata: meta } : {}),
+  };
+}
+
+function extractMetaFallbacks(meta: Record<string, unknown> | undefined): {
+  metaCmd: string | undefined;
+  metaTarget: string | undefined;
+} {
+  const metaCmd =
+    typeof meta?.command === "string" && meta.command.trim()
+      ? meta.command.trim()
+      : typeof meta?.cmd === "string" && meta.cmd.trim()
+        ? meta.cmd.trim()
+        : undefined;
+  const metaTarget =
+    typeof meta?.filepath === "string" && meta.filepath.trim()
+      ? meta.filepath.trim()
+      : typeof meta?.path === "string" && meta.path.trim()
+        ? meta.path.trim()
+        : typeof meta?.file === "string" && meta.file.trim()
+          ? meta.file.trim()
+          : undefined;
+  return { metaCmd, metaTarget };
+}
+
+export function resolveClassifierActionArgs(action: GateAction): unknown {
+  const meta =
+    action.metadata && typeof action.metadata === "object" && !Array.isArray(action.metadata)
+      ? action.metadata
+      : undefined;
+  const { metaCmd, metaTarget } = extractMetaFallbacks(meta);
+
+  const cmd =
+    (typeof action.commandString === "string"
+      ? action.commandString.trim() || undefined
+      : undefined) ?? metaCmd;
+  const target =
+    (typeof action.targetPath === "string" ? action.targetPath.trim() || undefined : undefined) ??
+    metaTarget;
+  const actionPatterns = Array.isArray(action.patterns)
+    ? action.patterns.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    : undefined;
+  const hasActionPatterns = Boolean(actionPatterns && actionPatterns.length > 0);
+
+  const raw = action.rawArgs;
+
+  if (Array.isArray(raw)) {
+    const rawStrSet = new Set(
+      raw.filter((item): item is string => typeof item === "string").map((s) => s.trim()),
+    );
+    const mergedArray =
+      hasActionPatterns && actionPatterns!.some((p) => !rawStrSet.has(p.trim()))
+        ? [...raw, ...actionPatterns!.filter((p) => !rawStrSet.has(p.trim()))]
+        : raw;
+    return projectArrayWithAntiShadowing(mergedArray, cmd, target, meta);
+  }
+
+  if (typeof raw === "object" && raw !== null) {
+    const obj = raw as Record<string, unknown>;
+    const hasCmdField =
+      (typeof obj.command === "string" && obj.command.trim().length > 0) ||
+      (Array.isArray(obj.command) && obj.command.length > 0) ||
+      (typeof obj.cmd === "string" && obj.cmd.trim().length > 0) ||
+      (Array.isArray(obj.cmd) && obj.cmd.length > 0) ||
+      (typeof obj.code === "string" && obj.code.trim().length > 0) ||
+      (typeof obj.script === "string" && obj.script.trim().length > 0);
+
+    const hasTargetField =
+      (typeof obj.path === "string" && obj.path.trim().length > 0) ||
+      (typeof obj.file === "string" && obj.file.trim().length > 0) ||
+      (typeof obj.filePath === "string" && obj.filePath.trim().length > 0) ||
+      (typeof obj.filepath === "string" && obj.filepath.trim().length > 0);
+
+    const objPatterns = Array.isArray(obj.patterns)
+      ? obj.patterns.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+      : [];
+    const mergedPatterns = hasActionPatterns
+      ? Array.from(new Set([...objPatterns, ...actionPatterns!]))
+      : objPatterns;
+    const needPatternsBackfill = hasActionPatterns && mergedPatterns.length > objPatterns.length;
+
+    const needCmdBackfill = Boolean(cmd && !hasCmdField);
+    const needTargetBackfill = Boolean(target && !hasTargetField);
+
+    if (!needCmdBackfill && !needTargetBackfill && !needPatternsBackfill) {
+      return raw;
+    }
+
+    let backfilledCmd = cmd;
+    if (needCmdBackfill && cmd && mergedPatterns.length > 0) {
+      const allowWildcard = mergedPatterns.length <= 1;
+      const uncovered = mergedPatterns.filter(
+        (p) => !isPatternCoveredByText(p, cmd, { allowWildcard, mode: "shell" }),
+      );
+      if (uncovered.length > 0) {
+        backfilledCmd = `${cmd} ; ${uncovered.join(" ; ")}`;
+      }
+    }
+
+    return {
+      ...obj,
+      ...(needCmdBackfill ? { command: backfilledCmd } : {}),
+      ...(needTargetBackfill ? { path: target } : {}),
+      ...(needPatternsBackfill ? { patterns: mergedPatterns } : {}),
+    };
+  }
+
+  if (typeof raw === "string") {
+    const rawTrimmed = raw.trim();
+    const cmdAddsContext = Boolean(cmd && cmd !== rawTrimmed);
+    const targetAddsContext = Boolean(target && target !== rawTrimmed);
+    const patternsAddContext = Boolean(
+      hasActionPatterns &&
+      !(actionPatterns!.length === 1 && actionPatterns![0].trim() === rawTrimmed),
+    );
+
+    if (!cmdAddsContext && !targetAddsContext && !patternsAddContext) {
+      return raw;
+    }
+
+    if (isShellActionName(action.toolName)) {
+      let effectiveCommand = raw;
+      if (cmdAddsContext && cmd) {
+        const covered = isPatternCoveredByText(rawTrimmed, cmd, {
+          allowWildcard: true,
+          mode: "shell",
+        });
+        effectiveCommand = covered ? cmd : `${cmd} ; ${rawTrimmed}`;
+      }
+      const combinedPatterns = patternsAddContext
+        ? Array.from(new Set([rawTrimmed, ...actionPatterns!]))
+        : cmdAddsContext
+          ? [rawTrimmed]
+          : undefined;
+      return {
+        command: effectiveCommand,
+        ...(targetAddsContext ? { path: target } : {}),
+        ...(combinedPatterns ? { patterns: combinedPatterns } : {}),
+        ...(meta ? { metadata: meta } : {}),
+      };
+    }
+
+    return {
+      path: target ?? raw,
+      ...(cmdAddsContext ? { command: cmd } : {}),
+      ...(patternsAddContext ? { patterns: actionPatterns } : {}),
+      ...(meta ? { metadata: meta } : {}),
+    };
+  }
+
+  if (raw === undefined || raw === null) {
+    if (hasActionPatterns) {
+      return projectArrayWithAntiShadowing(actionPatterns!, cmd, target, meta);
+    }
+    if (!cmd && !target && !meta) {
+      return {};
+    }
+    return {
+      ...(cmd ? { command: cmd } : {}),
+      ...(target ? { path: target } : {}),
+      ...(meta ? { metadata: meta } : {}),
+    };
+  }
+
+  return raw;
+}
+
+export function resolveRequestActionArgs(
+  request?: PermissionEventData,
+  actionArgs?: unknown,
+): unknown {
+  if (actionArgs !== undefined) {
+    return actionArgs;
+  }
+  if (!request) {
+    return {};
+  }
+
+  const nonEmptyStrings = (val: unknown): string[] | undefined => {
+    if (!Array.isArray(val)) return undefined;
+    const items = val.filter(
+      (item): item is string => typeof item === "string" && item.trim().length > 0,
+    );
+    return items.length > 0 ? items : undefined;
+  };
+
+  const resources = nonEmptyStrings(request.resources);
+  const patterns = nonEmptyStrings(request.patterns);
+  const meta =
+    request.metadata && typeof request.metadata === "object" && !Array.isArray(request.metadata)
+      ? request.metadata
+      : undefined;
+
+  const commandString =
+    typeof request.commandString === "string" && request.commandString.trim()
+      ? request.commandString
+      : typeof meta?.command === "string" && meta.command.trim()
+        ? meta.command
+        : typeof meta?.cmd === "string" && meta.cmd.trim()
+          ? meta.cmd
+          : (resources?.join(" ") ?? patterns?.join(" "));
+
+  const targetPath =
+    typeof request.targetPath === "string" && request.targetPath.trim()
+      ? request.targetPath
+      : typeof meta?.filepath === "string" && meta.filepath.trim()
+        ? meta.filepath
+        : typeof meta?.path === "string" && meta.path.trim()
+          ? meta.path
+          : typeof meta?.file === "string" && meta.file.trim()
+            ? meta.file
+            : undefined;
+
+  return resolveClassifierActionArgs({
+    id: request.id || "request",
+    harness: request.harness || "generic",
+    sessionID: request.sessionID || "",
+    toolName: request.action || request.permission || request.toolName || "permission",
+    commandString,
+    targetPath,
+    patterns,
+    rawArgs: resources ?? patterns ?? meta,
+    workspaceRoot: request.directory || meta?.directory || process.cwd(),
+    userPrompt: "",
+    metadata: meta,
+  });
+}
 
 export function formatUserTranscript(userPrompt?: string): string {
   if (!userPrompt || !userPrompt.trim()) {
@@ -41,6 +336,9 @@ export function isClassifierVerdict(val: unknown): val is ClassifierVerdict {
 export function formatActionDetails(actionName: string, actionArgs: unknown): string {
   if (!actionArgs) return "";
 
+  const actionLower = (actionName || "").trim().toLowerCase();
+  const isShellAction = isShellActionName(actionName);
+
   let commandStr: string | null = null;
   let directory: string | null = null;
   let pathStr: string | null = null;
@@ -49,17 +347,25 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
     commandStr = actionArgs;
     pathStr = actionArgs;
   } else if (Array.isArray(actionArgs)) {
-    if (actionArgs.length > 0) {
-      const joined = actionArgs.filter((a) => typeof a === "string").join(" ");
-      commandStr = joined;
-      pathStr = joined;
+    const items = actionArgs.filter(
+      (a): a is string => typeof a === "string" && a.trim().length > 0,
+    );
+    if (items.length > 0) {
+      commandStr = items.join(isShellAction ? " ; " : ", ");
+      pathStr = items.join(", ");
     }
   } else if (typeof actionArgs === "object" && actionArgs !== null) {
     const obj = actionArgs as Record<string, unknown>;
     if (typeof obj.command === "string") {
       commandStr = obj.command;
+    } else if (Array.isArray(obj.command)) {
+      commandStr = obj.command.filter((a): a is string => typeof a === "string").join(" ");
     } else if (typeof obj.cmd === "string") {
       commandStr = obj.cmd;
+    } else if (Array.isArray(obj.cmd)) {
+      commandStr = obj.cmd.filter((a): a is string => typeof a === "string").join(" ");
+    } else if (typeof obj.script === "string") {
+      commandStr = obj.script;
     } else if (typeof obj.code === "string") {
       commandStr = obj.code;
     }
@@ -68,17 +374,41 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
       pathStr = obj.path.trim();
     } else if (typeof obj.filePath === "string" && obj.filePath.trim()) {
       pathStr = obj.filePath.trim();
+    } else if (typeof obj.filepath === "string" && obj.filepath.trim()) {
+      pathStr = obj.filepath.trim();
     } else if (typeof obj.file === "string" && obj.file.trim()) {
       pathStr = obj.file.trim();
     }
-    if (
-      Array.isArray(obj.patterns) &&
-      obj.patterns.length > 0 &&
-      typeof obj.patterns[0] === "string"
-    ) {
-      const patternsJoined = obj.patterns.join(" ");
-      commandStr = commandStr ?? patternsJoined;
-      pathStr = pathStr ?? patternsJoined;
+
+    if (Array.isArray(obj.patterns)) {
+      const patternItems = obj.patterns.filter(
+        (p): p is string => typeof p === "string" && p.trim().length > 0,
+      );
+      if (patternItems.length > 0) {
+        const shellJoined = patternItems.join(" ; ");
+        const fsJoined = patternItems.join(", ");
+        const allowWildcard = patternItems.length === 1;
+        if (!commandStr) {
+          commandStr = isShellAction ? shellJoined : fsJoined;
+        } else {
+          const uncovered = patternItems.filter(
+            (p) => !isPatternCoveredByText(p, commandStr!, { allowWildcard, mode: "shell" }),
+          );
+          if (uncovered.length > 0) {
+            commandStr = `${commandStr} ; ${uncovered.join(" ; ")}`;
+          }
+        }
+        if (!pathStr) {
+          pathStr = fsJoined;
+        } else {
+          const uncoveredPath = patternItems.filter(
+            (p) => !isPatternCoveredByText(p, pathStr!, { allowWildcard: false, mode: "fs" }),
+          );
+          if (uncoveredPath.length > 0) {
+            pathStr = `${pathStr}, ${uncoveredPath.join(", ")}`;
+          }
+        }
+      }
     }
 
     const meta =
@@ -96,7 +426,7 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
     }
   }
 
-  if (actionName === "external_directory") {
+  if (actionLower === "external_directory") {
     const target =
       pathStr ||
       directory ||
@@ -106,10 +436,10 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
   }
 
   if (
-    actionName.startsWith("fs:") ||
-    actionName === "read" ||
-    actionName === "edit" ||
-    actionName === "write"
+    actionLower.startsWith("fs:") ||
+    actionLower === "read" ||
+    actionLower === "edit" ||
+    actionLower === "write"
   ) {
     const target =
       pathStr ||
@@ -123,24 +453,27 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
     return details;
   }
 
-  if (actionName === "eval") {
+  if (actionLower === "eval") {
     const isObj = typeof actionArgs === "object" && actionArgs !== null;
     const argObj = isObj ? (actionArgs as Record<string, unknown>) : undefined;
-    const lang =
+    const rawLang =
       typeof argObj?.language === "string"
         ? argObj.language
         : typeof argObj?.lang === "string"
           ? argObj.lang
           : "javascript";
+    const lang = sanitizeCodeFenceLanguage(rawLang);
     const code = commandStr || (typeof argObj?.code === "string" ? argObj.code : "");
     if (code) {
-      return `- **Eval Code (${lang})**:\n\`\`\`${lang}\n${code.trim()}\n\`\`\``;
+      const fence = "`".repeat(Math.max(3, maxBacktickRun(code) + 1));
+      return `- **Eval Code (${lang})**:\n${fence}${lang}\n${code.trim()}\n${fence}`;
     }
   }
 
-  if (actionName === "bash" || actionName === "shell:run") {
+  if (isShellAction) {
     if (commandStr) {
-      let details = `- **Command**:\n\`\`\`bash\n${commandStr.trim()}\n\`\`\``;
+      const fence = "`".repeat(Math.max(3, maxBacktickRun(commandStr) + 1));
+      let details = `- **Command**:\n${fence}bash\n${commandStr.trim()}\n${fence}`;
       if (directory) {
         details += `\n- **Target Directory**: \`${directory}\``;
       }
@@ -202,6 +535,35 @@ export function sanitizeUserPrompt(rawPrompt?: string): string {
   return prompt;
 }
 
+function extractFlagPayloads(
+  cmd: string,
+  runnerRegexSource: string,
+  flagRegexSource: string,
+): string[] {
+  const results: string[] = [];
+  const pattern = new RegExp(
+    `(?:^|[\\s;&|(])(?:[A-Za-z0-9_./~-]*\\/)?${runnerRegexSource}(?:\\s+(?:-[a-zA-Z]+|--[a-zA-Z0-9-]+))*\\s+${flagRegexSource}\\s+(?:"((?:\\\\.|[^"\\\\])+)"|'([^']+)')`,
+    "gi",
+  );
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(cmd)) !== null) {
+    const rawPayload =
+      match[1] !== undefined ? match[1].replace(/\\(["\\])/g, "$1") : (match[2] ?? "");
+    if (rawPayload.trim()) {
+      results.push(rawPayload.trim());
+    }
+  }
+  return results;
+}
+
+function formatDeobfuscatedEntry(label: string, payload: string): string {
+  if (payload.includes("\n") || payload.includes("\r") || payload.includes("```")) {
+    const fence = "`".repeat(Math.max(3, maxBacktickRun(payload) + 1));
+    return `${label}:\n${fence}text\n${payload}\n${fence}`;
+  }
+  return `${label}: "${payload}"`;
+}
+
 /**
  * De-obfuscates command wrappers, sub-shells, base64 payloads, and script flags
  * so the classifier inspects real-world impact rather than the outer wrapper.
@@ -213,15 +575,40 @@ export function deobfuscatePayload(actionName: string, actionArgs: unknown): str
   if (typeof actionArgs === "string") {
     cmd = actionArgs;
   } else if (Array.isArray(actionArgs)) {
-    cmd = actionArgs.filter((a) => typeof a === "string").join(" ");
+    cmd = actionArgs.filter((a): a is string => typeof a === "string").join(" ; ");
   } else if (typeof actionArgs === "object") {
     const obj = actionArgs as Record<string, unknown>;
     if (typeof obj.command === "string") {
       cmd = obj.command;
-    } else if (Array.isArray(obj.patterns)) {
-      cmd = obj.patterns.join(" ");
+    } else if (Array.isArray(obj.command)) {
+      cmd = obj.command.filter((a): a is string => typeof a === "string").join(" ");
     } else if (typeof obj.cmd === "string") {
       cmd = obj.cmd;
+    } else if (Array.isArray(obj.cmd)) {
+      cmd = obj.cmd.filter((a): a is string => typeof a === "string").join(" ");
+    } else if (typeof obj.script === "string") {
+      cmd = obj.script;
+    } else if (typeof obj.code === "string") {
+      cmd = obj.code;
+    }
+
+    if (Array.isArray(obj.patterns)) {
+      const patternItems = obj.patterns.filter(
+        (p): p is string => typeof p === "string" && p.trim().length > 0,
+      );
+      if (patternItems.length > 0) {
+        const allowWildcard = patternItems.length === 1;
+        if (!cmd) {
+          cmd = patternItems.join(" ; ");
+        } else {
+          const uncovered = patternItems.filter(
+            (p) => !isPatternCoveredByText(p, cmd, { allowWildcard, mode: "shell" }),
+          );
+          if (uncovered.length > 0) {
+            cmd = `${cmd} ; ${uncovered.join(" ; ")}`;
+          }
+        }
+      }
     }
   }
 
@@ -236,7 +623,7 @@ export function deobfuscatePayload(actionName: string, actionArgs: unknown): str
   if (b64PipeMatch && b64PipeMatch[1]) {
     try {
       const decoded = Buffer.from(b64PipeMatch[1], "base64").toString("utf8");
-      findings.push(`Decoded base64 shell pipeline: "${decoded.trim()}"`);
+      findings.push(formatDeobfuscatedEntry("Decoded base64 shell pipeline", decoded.trim()));
     } catch {}
   }
 
@@ -245,32 +632,35 @@ export function deobfuscatePayload(actionName: string, actionArgs: unknown): str
   if (pyB64Match && pyB64Match[1]) {
     try {
       const decoded = Buffer.from(pyB64Match[1], "base64").toString("utf8");
-      findings.push(`Decoded Python base64 exec payload: "${decoded.trim()}"`);
+      findings.push(formatDeobfuscatedEntry("Decoded Python base64 exec payload", decoded.trim()));
     } catch {}
   }
 
-  // 3. Detect wrapper sub-shells: (bash|sh|zsh) -c "..."
-  const shellWrapMatch = cmd.match(/(?:ba|z|da)?sh\s+-c\s+["']([^"']+)["']/i);
-  if (shellWrapMatch && shellWrapMatch[1]) {
-    findings.push(`Unpacked inner sub-shell command: "${shellWrapMatch[1].trim()}"`);
+  // 3. Detect wrapper sub-shells: (bash|sh|zsh) -c / -lc / -cl / -l -c "..."
+  for (const payload of extractFlagPayloads(cmd, "(?:ba|z|da|k|tc)?sh", "-[a-zA-Z]*c[a-zA-Z]*")) {
+    findings.push(formatDeobfuscatedEntry("Unpacked inner sub-shell command", payload));
   }
 
   // 4. Detect Python inline commands: python3? -c "..."
-  const pyWrapMatch = cmd.match(/python[23]?\s+-c\s+["']([^"']+)["']/i);
-  if (pyWrapMatch && pyWrapMatch[1]) {
-    findings.push(`Unpacked Python inline script: "${pyWrapMatch[1].trim()}"`);
+  for (const payload of extractFlagPayloads(
+    cmd,
+    "python[23]?(?:\\.\\d+)?",
+    "-[a-zA-Z]*c[a-zA-Z]*",
+  )) {
+    findings.push(formatDeobfuscatedEntry("Unpacked Python inline script", payload));
   }
 
-  // 5. Detect Node/Bun inline eval: (node|bun)\s+(-e|--eval)\s+["']([^"']+)["']
-  const nodeWrapMatch = cmd.match(/(?:node|bun)\s+(?:-e|--eval)\s+["']([^"']+)["']/i);
-  if (nodeWrapMatch && nodeWrapMatch[1]) {
-    findings.push(`Unpacked Node/Bun inline script: "${nodeWrapMatch[1].trim()}"`);
+  // 5. Detect Node/Bun inline eval: (node|bun) (-e|--eval|-p|--print) "..."
+  for (const payload of extractFlagPayloads(cmd, "(?:node|bun)", "(?:-e|--eval|-p|--print)")) {
+    findings.push(formatDeobfuscatedEntry("Unpacked Node/Bun inline script", payload));
   }
 
   // 6. Detect piped remote executions: curl/wget ... | bash/sh/python
   const pipeExecMatch = cmd.match(/(?:curl|wget)\s+[^|]+\|\s*(?:ba|z|da)?sh/i);
   if (pipeExecMatch) {
-    findings.push(`Piped remote script directly into shell: "${pipeExecMatch[0].trim()}"`);
+    findings.push(
+      formatDeobfuscatedEntry("Piped remote script directly into shell", pipeExecMatch[0].trim()),
+    );
   }
 
   return findings.length > 0 ? findings.join("\n") : null;
@@ -292,22 +682,15 @@ export function buildClassifierUserPrompt(input: {
   const actionArgs = input.actionArgs ?? {};
   const workspaceRoot = input.workspaceRoot || process.cwd();
 
-  const env = input.environment ?? {};
-  const trustedDomains =
-    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : [];
-  const trustedRemotes =
-    env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
-  const trustedPaths =
-    env.trustedPaths && env.trustedPaths.length > 0
-      ? env.trustedPaths
-      : ["~/Projects", workspaceRoot];
+  const { trustedDomains, trustedRemotes, trustedPaths, effectiveEnv } =
+    resolveEffectiveTrustBoundaries(input.environment, workspaceRoot);
 
   const unpackedPayload = deobfuscatePayload(actionName, actionArgs);
   const probedTargetContext = probeTargetContext(
     actionName,
     actionArgs,
     workspaceRoot,
-    input.environment,
+    effectiveEnv,
   );
 
   let transcriptSection = "";
@@ -354,8 +737,9 @@ ${formatActionDetails(actionName, actionArgs)}`;
 }
 
 export function buildClassifierPrompt(input: BuildClassifierPromptInput): string {
-  const actionName = input.actionName ?? input.request?.permission ?? "permission";
-  const actionArgs = input.actionArgs ?? input.request?.patterns ?? input.request?.metadata ?? {};
+  const actionName =
+    input.actionName ?? input.request?.action ?? input.request?.permission ?? "permission";
+  const actionArgs = resolveRequestActionArgs(input.request, input.actionArgs);
   const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
 
   const system = buildClassifierSystemPrompt();
@@ -418,19 +802,24 @@ function isTrivialRawArgsDuplicate(action: GateAction): boolean {
 
 export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateResult {
   const actionName = action.toolName || "permission";
-  const actionArgs =
-    action.rawArgs ?? action.patterns ?? action.metadata ?? action.commandString ?? {};
+  const actionArgs = resolveClassifierActionArgs(action);
   const workspaceRoot = action.workspaceRoot || process.cwd();
 
-  const env = action.environment ?? {};
-  const trustedDomains =
-    env.trustedDomains && env.trustedDomains.length > 0 ? env.trustedDomains : [];
-  const trustedRemotes =
-    env.trustedGitRemotes && env.trustedGitRemotes.length > 0 ? env.trustedGitRemotes : ["origin"];
-  const trustedPaths =
-    env.trustedPaths && env.trustedPaths.length > 0
-      ? env.trustedPaths
-      : ["~/Projects", workspaceRoot];
+  const { trustedDomains, trustedRemotes, trustedPaths, effectiveEnv } =
+    resolveEffectiveTrustBoundaries(action.environment, workspaceRoot);
+
+  const meta =
+    action.metadata && typeof action.metadata === "object" && !Array.isArray(action.metadata)
+      ? action.metadata
+      : undefined;
+  const { metaCmd, metaTarget } = extractMetaFallbacks(meta);
+  const effectiveCmdText =
+    (typeof action.commandString === "string"
+      ? action.commandString.trim() || undefined
+      : undefined) ?? metaCmd;
+  const effectiveTargetText =
+    (typeof action.targetPath === "string" ? action.targetPath.trim() || undefined : undefined) ??
+    metaTarget;
 
   let truncatedPayload = false;
 
@@ -452,17 +841,17 @@ export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateR
   }
 
   const actionLines: string[] = [`Tool: ${actionName}`];
-  if (action.commandString && action.commandString.trim()) {
-    const cmdText = action.commandString.trim();
-    if (Buffer.byteLength(cmdText, "utf8") > 4096) truncatedPayload = true;
-    actionLines.push(`Command: ${truncateUtf8Bytes(cmdText, 4096)}`);
+  if (effectiveCmdText) {
+    if (Buffer.byteLength(effectiveCmdText, "utf8") > 4096) truncatedPayload = true;
+    actionLines.push(`Command: ${truncateUtf8Bytes(effectiveCmdText, 4096)}`);
   }
-  if (action.targetPath && action.targetPath.trim()) {
-    actionLines.push(`Target Path: ${truncateUtf8Bytes(action.targetPath.trim(), 1024)}`);
+  if (effectiveTargetText) {
+    if (Buffer.byteLength(effectiveTargetText, "utf8") > 1024) truncatedPayload = true;
+    actionLines.push(`Target Path: ${truncateUtf8Bytes(effectiveTargetText, 1024)}`);
   }
   if (Array.isArray(action.patterns) && action.patterns.length > 0) {
-    const patternText = action.patterns.join(" ");
-    if (patternText && patternText !== action.commandString?.trim()) {
+    const patternText = action.patterns.join(isShellActionName(actionName) ? " ; " : ", ");
+    if (patternText && patternText !== effectiveCmdText) {
       if (Buffer.byteLength(patternText, "utf8") > 2048) truncatedPayload = true;
       actionLines.push(`Patterns: ${truncateUtf8Bytes(patternText, 2048)}`);
     }
@@ -483,7 +872,7 @@ export function buildSystemOneStateWithMeta(action: GateAction): SystemOneStateR
     sections.push(`## De-obfuscated Payload\n${truncateUtf8Bytes(unpackedPayload, 2048)}`);
   }
 
-  const probed = probeTargetContext(actionName, actionArgs, workspaceRoot, action.environment);
+  const probed = probeTargetContext(actionName, actionArgs, workspaceRoot, effectiveEnv);
   if (probed) {
     if (
       Buffer.byteLength(probed, "utf8") > SYSTEM_ONE_PROBE_MAX_BYTES ||

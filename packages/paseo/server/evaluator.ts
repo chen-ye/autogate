@@ -5,6 +5,7 @@ import {
   buildClassifierSystemPrompt,
   buildClassifierUserPrompt,
   parseVerdict,
+  resolveClassifierActionArgs,
 } from "@autogate/core";
 import type { PaseoClient, PaseoAgentInstance } from "./types.js";
 
@@ -256,7 +257,7 @@ export class PaseoNativeEvaluator implements GateEvaluator {
         userPrompt: action.userPrompt,
         subagentPrompt: action.subagentPrompt,
         actionName: action.toolName,
-        actionArgs: action.rawArgs ?? action.metadata ?? action.commandString,
+        actionArgs: resolveClassifierActionArgs(action),
         workspaceRoot: action.workspaceRoot,
         environment: action.environment,
       });
