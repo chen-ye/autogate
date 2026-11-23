@@ -7,9 +7,18 @@ export interface MockOpenCodeOptions {
   };
 }
 
+export interface MockSessionUpdateArgs {
+  sessionID?: string;
+  path?: { id?: string; sessionID?: string };
+  title?: string;
+  archived?: boolean;
+  body?: { title?: string; archived?: boolean };
+}
+
 export function createMockOpenCodeClient(options?: MockOpenCodeOptions) {
   const replies: any[] = [];
   const createdSessions: any[] = [];
+  const updatedSessions: MockSessionUpdateArgs[] = [];
   const deletedSessions: any[] = [];
   const prompts: any[] = [];
 
@@ -21,6 +30,31 @@ export function createMockOpenCodeClient(options?: MockOpenCodeOptions) {
         const id = `session-${sessionIdCounter++}`;
         createdSessions.push(id);
         return { data: { id } };
+      },
+      get: async (args: { sessionID?: string; path?: { id?: string } }) => {
+        const targetID = args?.sessionID ?? args?.path?.id;
+        let title: string | undefined;
+        let archived: boolean | undefined;
+        for (const entry of updatedSessions) {
+          const entryID = entry.sessionID ?? entry.path?.sessionID ?? entry.path?.id;
+          if (targetID && entryID === targetID) {
+            const nextTitle = entry.title ?? entry.body?.title;
+            const nextArchived = entry.archived ?? entry.body?.archived;
+            if (nextTitle !== undefined) title = nextTitle;
+            if (nextArchived !== undefined) archived = nextArchived;
+          }
+        }
+        return {
+          data: {
+            id: targetID,
+            ...(title !== undefined ? { title } : {}),
+            ...(archived ? { time: { archived: Date.now() } } : {}),
+          },
+        };
+      },
+      update: async (args: MockSessionUpdateArgs) => {
+        updatedSessions.push(args);
+        return { data: { success: true } };
       },
       delete: async (args: any) => {
         deletedSessions.push(args);
@@ -42,9 +76,8 @@ export function createMockOpenCodeClient(options?: MockOpenCodeOptions) {
         const sessionID = args?.sessionID ?? args?.path?.id;
         if (sessionID) {
           try {
-            const { recordEvaluationVerdict } = await import(
-              "../../../packages/opencode/src/evaluator.js"
-            );
+            const { recordEvaluationVerdict } =
+              await import("../../../packages/opencode/src/evaluator.js");
             recordEvaluationVerdict(sessionID, {
               verdict,
               reason,
@@ -92,6 +125,7 @@ export function createMockOpenCodeClient(options?: MockOpenCodeOptions) {
     client,
     replies,
     createdSessions,
+    updatedSessions,
     deletedSessions,
     prompts,
   };

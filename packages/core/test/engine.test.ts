@@ -1091,4 +1091,128 @@ describe("AutoGateCoreEngine recordEscalationIntent", () => {
     expect(reviewDecision.verdict).toBe("UNSURE");
     expect(reviewDecision.reason).toBe("Explicit review");
   });
+
+  it("cleanupSession purges session caches, settles in-flight requestReview, and blocks stale evaluate side effects", async () => {
+    const adapter = new MockAdapter();
+    let stateChanges = 0;
+    const blockingEvaluator: GateEvaluator = {
+      name: "blocking-eval",
+      async evaluate() {
+        await new Promise((r) => setTimeout(r, 40));
+        return { verdict: "BLOCK", reason: "Late block" };
+      },
+    };
+
+    const eng = new AutoGateCoreEngine({
+      config: {
+        autoMode: true,
+        reviewFallbackMode: "ntfy",
+        notifyOnVerdict: false,
+        reviewTimeout: 5000,
+      },
+      evaluator: blockingEvaluator,
+      adapter,
+      remoteReviewEnabled: true,
+      onStateChange: () => {
+        stateChanges++;
+      },
+    });
+
+    const sid = "ses-clean-1";
+    const otherSid = "ses-clean-other";
+    eng.setUserPrompt(sid, "Session 1 prompt");
+    eng.setUserPrompt(otherSid, "Other session prompt");
+    eng.setSessionParent(sid, "ses-parent-1");
+    eng.recordEscalationIntent(sid, "rm -rf dist", "clean dist");
+    eng.recordEscalationIntent(otherSid, "rm -rf tmp", "keep other");
+    sharedRecentlyRejected.set(`${sid}:bash:rm`, { timestamp: Date.now(), reason: "stale" });
+    sharedRecentlyRejected.set(`${otherSid}:bash:rm`, { timestamp: Date.now(), reason: "keep" });
+
+    // 1. Mid-evaluation cleanup prevents BLOCK side effects (consecutiveBlocks, sharedRecentlyRejected)
+    const evalPromise = eng.evaluate({
+      id: "act-clean-eval",
+      harness: "opencode",
+      sessionID: sid,
+      toolName: "bash",
+      commandString: "ls",
+      workspaceRoot: "/workspace",
+      userPrompt: "list",
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    eng.cleanupSession(sid);
+
+    const evalDecision = await evalPromise;
+    expect(evalDecision.verdict).toBe("UNSURE");
+    expect(evalDecision.reason).toBe("Session archived or deleted");
+    expect(eng.getConsecutiveBlocks()).toBe(0);
+    expect(eng.getUserPrompt(sid)).toBe("");
+    expect(eng.getUserPrompt(otherSid)).toBe("Other session prompt");
+    expect(sharedExplicitEscalations.has(sid)).toBe(false);
+    expect(sharedExplicitEscalations.has(otherSid)).toBe(true);
+    expect(sharedRecentlyRejected.has(`${sid}:bash:rm`)).toBe(false);
+    expect(sharedRecentlyRejected.has(`${otherSid}:bash:rm`)).toBe(true);
+
+    // 2. Active requestReview settles cleanly without hanging when cleanupSession runs
+    const reviewPromise = eng.requestReview(
+      {
+        id: "act-clean-rev",
+        harness: "opencode",
+        sessionID: sid,
+        toolName: "bash",
+        commandString: "npm publish",
+        workspaceRoot: "/workspace",
+        userPrompt: "publish",
+      },
+      "Needs review",
+    );
+
+    await new Promise((r) => setTimeout(r, 15));
+    expect(eng.getInFlightRequests().length).toBe(1);
+    const prevStateChanges = stateChanges;
+    eng.cleanupSession(sid);
+
+    const reviewDecision = await reviewPromise;
+    expect(reviewDecision.verdict).toBe("UNSURE");
+    expect(reviewDecision.reason).toBe("Session archived or deleted");
+    expect(eng.getInFlightRequests()).toEqual([]);
+    expect(stateChanges).toBeGreaterThan(prevStateChanges);
+
+    // 3. handlePermissionReplied and stop() settle in-flight requestReview promises without hanging
+    const terminalReplyPromise = eng.requestReview(
+      {
+        id: "act-term-reply",
+        harness: "opencode",
+        sessionID: "ses-term-1",
+        toolName: "bash",
+        commandString: "npm publish",
+        workspaceRoot: "/workspace",
+        userPrompt: "publish",
+      },
+      "Needs review",
+    );
+    await new Promise((r) => setTimeout(r, 15));
+    eng.handlePermissionReplied({ requestID: "act-term-reply", reply: "once" });
+    const terminalReplyDecision = await terminalReplyPromise;
+    expect(terminalReplyDecision.verdict).toBe("UNSURE");
+    expect(terminalReplyDecision.reason).toBe("Answered locally in terminal");
+
+    const stopReviewPromise = eng.requestReview(
+      {
+        id: "act-stop-rev",
+        harness: "opencode",
+        sessionID: "ses-stop-1",
+        toolName: "bash",
+        commandString: "npm publish",
+        workspaceRoot: "/workspace",
+        userPrompt: "publish",
+      },
+      "Needs review",
+    );
+    await new Promise((r) => setTimeout(r, 15));
+    await eng.stop();
+    const stopDecision = await stopReviewPromise;
+    expect(stopDecision.verdict).toBe("UNSURE");
+    expect(stopDecision.reason).toBe("Engine stopped");
+  });
 });

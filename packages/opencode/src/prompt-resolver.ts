@@ -9,6 +9,56 @@ interface MessageEntry {
   content?: unknown;
 }
 
+function unwrapOpenCodePromptText(raw: string): string {
+  let text = raw;
+  const reqMatch = text.match(/<user-request>([\s\S]*?)<\/user-request>/i);
+  if (reqMatch && reqMatch[1]) {
+    text = reqMatch[1].trim();
+  } else {
+    const slashMatch = text.match(/<auto-slash-command[^>]*>([\s\S]*?)<\/auto-slash-command>/i);
+    if (slashMatch && slashMatch[1]) {
+      const innerReq = slashMatch[1].match(/<user-request>([\s\S]*?)<\/user-request>/i);
+      if (innerReq && innerReq[1]) {
+        text = innerReq[1].trim();
+      } else {
+        text = slashMatch[1].trim();
+      }
+    }
+  }
+  return text.trim();
+}
+
+export function formatOpenCodePromptHierarchy(input: {
+  userPrompt: string;
+  subagentPrompt?: string;
+  subagentTitle?: string;
+  unwrap?: boolean;
+}): { userPrompt: string; subagentPrompt?: string } {
+  const shouldUnwrap = input.unwrap !== false;
+  const userPrompt = shouldUnwrap
+    ? unwrapOpenCodePromptText(input.userPrompt)
+    : input.userPrompt.trim();
+  let subagentPrompt = input.subagentPrompt
+    ? shouldUnwrap
+      ? unwrapOpenCodePromptText(input.subagentPrompt)
+      : input.subagentPrompt.trim()
+    : "";
+  const cleanTitle = input.subagentTitle?.trim();
+  if (cleanTitle) {
+    if (subagentPrompt) {
+      if (!subagentPrompt.includes(cleanTitle)) {
+        subagentPrompt = `[Subagent: ${cleanTitle}]\n${subagentPrompt}`;
+      }
+    } else {
+      subagentPrompt = `[Subagent: ${cleanTitle}]`;
+    }
+  }
+  return {
+    userPrompt,
+    subagentPrompt: subagentPrompt || undefined,
+  };
+}
+
 export class OpenCodePromptResolver {
   private sessionParentCache = new Map<string, string>();
 
@@ -20,6 +70,16 @@ export class OpenCodePromptResolver {
 
   public getParentSessionID(sessionID: string): string | undefined {
     return this.sessionParentCache.get(sessionID);
+  }
+
+  public cleanupSession(sessionID: string): void {
+    if (!sessionID) return;
+    this.sessionParentCache.delete(sessionID);
+    for (const [childID, parentID] of this.sessionParentCache.entries()) {
+      if (parentID === sessionID) {
+        this.sessionParentCache.delete(childID);
+      }
+    }
   }
 
   public async fetchLatestUserMessage(sessionID: string): Promise<string> {
@@ -58,22 +118,7 @@ export class OpenCodePromptResolver {
                 .join("\n");
             }
             if (text) {
-              const reqMatch = text.match(/<user-request>([\s\S]*?)<\/user-request>/i);
-              if (reqMatch && reqMatch[1]) {
-                text = reqMatch[1].trim();
-              } else {
-                const slashMatch = text.match(
-                  /<auto-slash-command[^>]*>([\s\S]*?)<\/auto-slash-command>/i,
-                );
-                if (slashMatch && slashMatch[1]) {
-                  const innerReq = slashMatch[1].match(/<user-request>([\s\S]*?)<\/user-request>/i);
-                  if (innerReq && innerReq[1]) {
-                    text = innerReq[1].trim();
-                  } else {
-                    text = slashMatch[1].trim();
-                  }
-                }
-              }
+              text = unwrapOpenCodePromptText(text);
 
               const isSlashCmd = /<auto-slash-command[^>]*>/i.test(text);
               if (
@@ -88,7 +133,7 @@ export class OpenCodePromptResolver {
                 continue;
               }
 
-              return text.trim();
+              return text;
             }
           }
         }
@@ -101,8 +146,9 @@ export class OpenCodePromptResolver {
     sessionID?: string,
     userPrompts?: Map<string, string>,
     defaultPrompt: string = "",
+    signal?: AbortSignal,
   ): Promise<{ userPrompt: string; subagentPrompt?: string }> {
-    if (!sessionID) {
+    if (!sessionID || signal?.aborted) {
       return { userPrompt: defaultPrompt };
     }
 
@@ -115,47 +161,51 @@ export class OpenCodePromptResolver {
       }
       if (this.client?.session?.get) {
         const sessionRes = await this.client.session.get({ sessionID });
+        if (signal?.aborted) {
+          return { userPrompt: defaultPrompt };
+        }
         const data = sessionRes?.data ?? sessionRes;
         if (data?.parentID) {
           parentID = data.parentID;
           this.sessionParentCache.set(sessionID, data.parentID);
+        } else {
+          parentID = undefined;
+          this.sessionParentCache.delete(sessionID);
         }
         sessionTitle = data?.title;
       }
-    } catch {}
+    } catch {
+      // Fall back to cached parentID / user prompt when session.get fails
+    }
+
+    if (signal?.aborted) {
+      return { userPrompt: defaultPrompt };
+    }
 
     if (!parentID) {
       const userPrompt =
         userPrompts?.get(sessionID) ||
         (await this.fetchLatestUserMessage(sessionID)) ||
         defaultPrompt;
-      return { userPrompt };
+      return formatOpenCodePromptHierarchy({ userPrompt, unwrap: false });
     }
 
     const rawSubagentText =
       userPrompts?.get(sessionID) || (await this.fetchLatestUserMessage(sessionID)) || "";
-    let subagentPrompt = rawSubagentText;
-    const cleanTitle = sessionTitle?.trim();
-    if (cleanTitle) {
-      if (subagentPrompt) {
-        if (!subagentPrompt.includes(cleanTitle)) {
-          subagentPrompt = `[Subagent: ${cleanTitle}]\n${subagentPrompt}`;
-        }
-      } else {
-        subagentPrompt = `[Subagent: ${cleanTitle}]`;
-      }
-    }
 
     let rootSessionID = sessionID;
     const visited = new Set<string>([sessionID]);
     let iterID: string | undefined = parentID;
 
-    while (iterID && !visited.has(iterID)) {
+    while (iterID && !visited.has(iterID) && !signal?.aborted) {
       visited.add(iterID);
       try {
         let parentData: Record<string, unknown> | null = null;
         if (this.client?.session?.get) {
           const res = await this.client.session.get({ sessionID: iterID });
+          if (signal?.aborted) {
+            return { userPrompt: defaultPrompt };
+          }
           parentData = res?.data ?? res;
         }
         rootSessionID = iterID;
@@ -170,7 +220,9 @@ export class OpenCodePromptResolver {
           nextParentID = this.sessionParentCache.get(iterID);
         }
         if (nextParentID) {
-          this.sessionParentCache.set(iterID, nextParentID);
+          if (!signal?.aborted) {
+            this.sessionParentCache.set(iterID, nextParentID);
+          }
           iterID = nextParentID;
         } else {
           break;
@@ -180,14 +232,20 @@ export class OpenCodePromptResolver {
       }
     }
 
+    if (signal?.aborted) {
+      return { userPrompt: defaultPrompt };
+    }
+
     const rootUserPrompt =
       userPrompts?.get(rootSessionID) ||
       (await this.fetchLatestUserMessage(rootSessionID)) ||
       defaultPrompt;
 
-    return {
+    return formatOpenCodePromptHierarchy({
       userPrompt: rootUserPrompt,
-      subagentPrompt: subagentPrompt || undefined,
-    };
+      subagentPrompt: rawSubagentText,
+      subagentTitle: sessionTitle,
+      unwrap: false,
+    });
   }
 }

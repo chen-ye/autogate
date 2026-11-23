@@ -122,20 +122,99 @@ async function notifyOpenChamberArchive(sessionID: string): Promise<void> {
   } catch {}
 }
 
+export interface ArchiveEvaluationSessionOptions {
+  serverUrl?: string;
+  configDir?: string;
+}
+
+function resolveExplicitArchiveServerUrl(
+  client: OpenCodeSessionClient | undefined,
+  options?: ArchiveEvaluationSessionOptions,
+): string | undefined {
+  const raw = options?.serverUrl || client?.serverUrl || process.env.OPENCODE_SERVER_URL;
+  return typeof raw === "string" && raw.trim().length > 0
+    ? raw.trim().replace(/\/+$/, "")
+    : undefined;
+}
+
 export async function archiveEvaluationSession(
   client: OpenCodeSessionClient | undefined,
   sessionID: string,
   actionName: string,
   verdict: string,
+  options?: ArchiveEvaluationSessionOptions,
 ): Promise<void> {
   const title = `[auto-gate-eval] ${actionName} -> ${verdict}`;
+  let updateAttempted = false;
+  let updateSucceeded = false;
+
   if (client?.session && typeof client.session.update === "function") {
-    await client.session
-      .update({
+    updateAttempted = true;
+    try {
+      await client.session.update({
         sessionID,
         title,
-      })
-      .catch(() => {});
+        archived: true,
+      });
+      updateSucceeded = true;
+    } catch {
+      try {
+        await client.session.update({
+          sessionID,
+          title,
+        });
+        updateSucceeded = true;
+      } catch {
+        // Ignore session.update failure and allow HTTP PATCH fallback below
+      }
+    }
+  }
+
+  const serverUrl = resolveExplicitArchiveServerUrl(client, options);
+  if (serverUrl) {
+    let needsHttpPatch = true;
+    if (updateAttempted && updateSucceeded && typeof client?.session?.get === "function") {
+      try {
+        const info = await client.session.get({ sessionID });
+        const archivedAt = info?.data?.time?.archived ?? info?.time?.archived;
+        if (typeof archivedAt === "number") {
+          needsHttpPatch = false;
+        }
+      } catch {
+        // Proceed with HTTP PATCH fallback if session.get fails
+      }
+    }
+
+    if (needsHttpPatch) {
+      const password = resolveServerPassword(options?.configDir);
+      const authHeader = password
+        ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
+        : "";
+      const url = `${serverUrl}/api/session/${encodeURIComponent(sessionID)}`;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...(authHeader ? { Authorization: authHeader } : {}),
+      };
+      const patchBody = updateSucceeded ? { archived: true } : { title, archived: true };
+      try {
+        const res = await fetch(url, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify(patchBody),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.status === 400 && !updateSucceeded) {
+          await fetch(url, {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({ title }),
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => {});
+        }
+      } catch {
+        // Best-effort archive PATCH; swallow transient network errors
+      }
+    }
   }
 
   await notifyOpenChamberArchive(sessionID);
@@ -386,11 +465,13 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     }
     const cfg = input.config;
     const serverUrl =
+      input.serverUrl ||
+      cfg?.opencode?.serverUrl ||
       cfg?.serverUrl ||
       client.serverUrl ||
       process.env.OPENCODE_SERVER_URL ||
       "http://localhost:4096";
-    const password = resolveServerPassword();
+    const password = resolveServerPassword(input.configDir);
     const authHeader = password
       ? "Basic " + Buffer.from(`opencode:${password}`).toString("base64")
       : "";
@@ -421,6 +502,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
   if (!sessionID) {
     throw new Error("Failed to create ephemeral classifier session: missing session ID");
   }
+  evaluationSessions.add(sessionID);
 
   const userPromptText = buildClassifierUserPrompt({
     userPrompt,
@@ -445,17 +527,28 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     }
     try {
       client.session.interrupt?.({ sessionID, resume: false })?.catch(() => {});
-    } catch {}
+    } catch {
+      // Ignore interrupt transport failures during abort
+    }
     recordEvaluationVerdict(sessionID, {
       verdict: "UNSURE",
       reason: "Classifier evaluation aborted by signal",
     });
   };
 
+  const archiveOptions: ArchiveEvaluationSessionOptions = {
+    serverUrl: input.serverUrl || input.config?.opencode?.serverUrl || undefined,
+    configDir: input.configDir,
+  };
+
   if (aborted) {
     onAbort();
-    clearEvaluationSession(sessionID);
-    await archiveEvaluationSession(client, sessionID, actionName, "UNSURE");
+    evaluationResolvers.delete(sessionID);
+    try {
+      await archiveEvaluationSession(client, sessionID, actionName, "UNSURE", archiveOptions);
+    } finally {
+      clearEvaluationSession(sessionID);
+    }
     return {
       verdict: "UNSURE",
       reason: "Classifier evaluation aborted by signal",
@@ -568,18 +661,29 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     }
     if (timeoutId) clearTimeout(timeoutId);
     evaluationResolvers.delete(sessionID);
+    let archiveDone = false;
+    let loopDone = !promptLoopPromise;
+    const maybeClearEvalSession = () => {
+      if (archiveDone && loopDone) {
+        evaluationSessions.delete(sessionID);
+      }
+    };
     if (promptLoopPromise) {
       void promptLoopPromise.finally(() => {
-        evaluationSessions.delete(sessionID);
+        loopDone = true;
+        maybeClearEvalSession();
       });
-    } else {
-      clearEvaluationSession(sessionID);
     }
     const durationMs = Date.now() - startTime;
     const rawVerdict = verdictResult?.verdict;
     const finalVerdict: ClassifierVerdict =
       rawVerdict && isClassifierVerdict(rawVerdict) ? rawVerdict : "UNSURE";
-    await archiveEvaluationSession(client, sessionID, actionName, finalVerdict);
+    try {
+      await archiveEvaluationSession(client, sessionID, actionName, finalVerdict, archiveOptions);
+    } finally {
+      archiveDone = true;
+      maybeClearEvalSession();
+    }
     if (!aborted && !input.signal?.aborted && !input.config?.systemOne?.enabled) {
       logEvaluationDecision(
         {
@@ -605,6 +709,7 @@ export class OpenCodeSessionEvaluator implements GateEvaluator {
   constructor(
     private client: OpenCodeSessionClient,
     private config?: AutoGateConfig,
+    private archiveOptions?: ArchiveEvaluationSessionOptions,
   ) {}
   async evaluate(action: GateAction): Promise<ClassifierResult> {
     return classifyRequest({
@@ -618,6 +723,12 @@ export class OpenCodeSessionEvaluator implements GateEvaluator {
       model: this.config?.classifierModel,
       config: this.config,
       signal: action.signal,
+      ...(this.archiveOptions
+        ? {
+            serverUrl: this.archiveOptions.serverUrl,
+            configDir: this.archiveOptions.configDir,
+          }
+        : {}),
     });
   }
 }

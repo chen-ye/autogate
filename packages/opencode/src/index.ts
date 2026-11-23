@@ -17,6 +17,7 @@ import {
   type GateDecision,
   type GateEvaluator,
   type AutoGateConfig,
+  type EnvironmentConfig,
 } from "@autogate/core";
 import {
   OpenCodeSessionEvaluator,
@@ -132,6 +133,101 @@ export function resolveServerPassword(configDir?: string): string {
   return "";
 }
 
+export function resolveCurrentProcessServiceUrl(configDir?: string): string | undefined {
+  const candidateDirs: string[] = [];
+  const explicitDir = configDir || process.env.OPENCODE_CONFIG_DIR;
+  if (explicitDir && explicitDir.trim().length > 0) {
+    candidateDirs.push(explicitDir.trim());
+  } else {
+    if (process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_STATE_HOME.trim(), "opencode"));
+    }
+    if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0) {
+      candidateDirs.push(path.join(process.env.XDG_CONFIG_HOME.trim(), "opencode"));
+    }
+    candidateDirs.push(path.join(os.homedir(), ".local", "state", "opencode"));
+    candidateDirs.push(path.join(os.homedir(), ".config", "opencode"));
+  }
+
+  for (const dir of candidateDirs) {
+    try {
+      const serviceJsonPath = path.join(dir, "service.json");
+      if (!fs.existsSync(serviceJsonPath)) continue;
+      const raw = fs.readFileSync(serviceJsonPath, "utf8");
+      const parsed = JSON.parse(raw) as { pid?: unknown; url?: unknown };
+      if (
+        parsed?.pid === process.pid &&
+        typeof parsed.url === "string" &&
+        parsed.url.trim().length > 0
+      ) {
+        return parsed.url.trim().replace(/\/+$/, "");
+      }
+    } catch {
+      // Ignore unreadable or malformed service.json while scanning candidates
+    }
+  }
+
+  return undefined;
+}
+
+export function buildOpenCodeGateAction(
+  request: PermissionEventData,
+  context: {
+    workspaceRoot: string;
+    userPrompt: string;
+    subagentPrompt?: string;
+    environment?: EnvironmentConfig;
+    signal?: AbortSignal;
+  },
+): GateAction {
+  const nonEmptyStringList = (val: unknown): string[] | undefined => {
+    if (!Array.isArray(val)) return undefined;
+    const strings = val.filter(
+      (item): item is string => typeof item === "string" && item.trim().length > 0,
+    );
+    return strings.length > 0 ? strings : undefined;
+  };
+
+  const resources = nonEmptyStringList(request.resources);
+  const patterns = nonEmptyStringList(request.patterns);
+  const commandString =
+    typeof request.metadata?.command === "string" && request.metadata.command.trim().length > 0
+      ? request.metadata.command
+      : typeof request.metadata?.cmd === "string" && request.metadata.cmd.trim().length > 0
+        ? request.metadata.cmd
+        : (resources?.join(" ") ?? patterns?.join(" "));
+
+  const targetPath =
+    typeof request.metadata?.filepath === "string" && request.metadata.filepath.trim().length > 0
+      ? request.metadata.filepath
+      : typeof request.metadata?.path === "string" && request.metadata.path.trim().length > 0
+        ? request.metadata.path
+        : typeof request.metadata?.file === "string" && request.metadata.file.trim().length > 0
+          ? request.metadata.file
+          : undefined;
+
+  const toolName = request.action || request.permission || request.source?.type || "permission";
+
+  const sessionID = (request.sessionID as string) || "";
+  const signal = context.signal ?? (request as { signal?: AbortSignal }).signal;
+  return {
+    id: (request.id as string) || Math.random().toString(36).slice(2),
+    harness: (request.harness as string) || "opencode",
+    sessionID,
+    toolName,
+    commandString,
+    targetPath,
+    ...(patterns ? { patterns } : {}),
+    rawArgs: resources ?? patterns ?? request.metadata,
+    workspaceRoot: (request.metadata?.directory as string) || context.workspaceRoot,
+    userPrompt: context.userPrompt,
+    subagentPrompt: context.subagentPrompt,
+    environment: context.environment,
+    metadata: request.metadata,
+    ...(signal ? { signal } : {}),
+  };
+}
+
 export class OpenCodeHarnessAdapter implements HarnessAdapter {
   readonly name = "opencode-harness";
   private engine: AutoGateCoreEngine;
@@ -140,19 +236,36 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   private stopListener?: () => void;
   private ctx: OpenCodePluginInput;
   private config: AutoGateConfig;
+  private sessionControllers = new Map<string, Set<AbortController>>();
+  private requestControllers = new Map<string, AbortController>();
+  private allControllers = new Set<AbortController>();
+  private activeEvaluations = new Set<Promise<void>>();
+  private disposed = false;
   readonly serverUrl: string;
 
   constructor(ctx: OpenCodePluginInput, options?: Record<string, unknown>) {
     this.ctx = ctx;
     const config = loadConfig(options);
-    const serverUrl =
+    const configDir = typeof ctx.configDir === "string" ? ctx.configDir : undefined;
+    const customConfigServerUrl =
+      typeof config.serverUrl === "string" &&
+      config.serverUrl.trim().length > 0 &&
+      !/^https?:\/\/localhost:409[67]\/?$/i.test(config.serverUrl.trim())
+        ? config.serverUrl.trim()
+        : undefined;
+    const explicitServerUrl =
       config.opencode?.serverUrl ||
-      (options?.serverUrl as string | undefined) ||
+      (typeof options?.serverUrl === "string" && options.serverUrl.trim().length > 0
+        ? options.serverUrl.trim()
+        : undefined) ||
+      (typeof ctx.serverUrl === "string" && ctx.serverUrl.trim().length > 0
+        ? ctx.serverUrl.trim()
+        : undefined) ||
       process.env.OPENCODE_SERVER_URL ||
-      config.serverUrl ||
-      "http://localhost:4096";
+      customConfigServerUrl ||
+      resolveCurrentProcessServiceUrl(configDir);
+    const serverUrl = explicitServerUrl || config.serverUrl || "http://localhost:4096";
     this.serverUrl = serverUrl;
-    config.serverUrl = serverUrl;
     const adapter = config.ntfyTopic
       ? new NtfyAdapter({
           server: config.ntfyServer,
@@ -172,7 +285,10 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     this.config = config;
     const evaluator =
       (options?.evaluator as GateEvaluator | undefined) ??
-      new OpenCodeSessionEvaluator(client, config);
+      new OpenCodeSessionEvaluator(client, config, {
+        serverUrl: explicitServerUrl,
+        configDir,
+      });
     const remoteReviewEnabled = config.ntfyTopic
       ? typeof options?.remoteReviewEnabled === "boolean"
         ? options.remoteReviewEnabled
@@ -194,11 +310,22 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   }
 
   async start(): Promise<void> {
+    this.disposed = false;
     this.stopListener = await this.engine.start();
     this.runtimeSync.start();
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    for (const ctrl of this.allControllers) {
+      ctrl.abort("adapter-disposed");
+    }
+    this.allControllers.clear();
+    this.sessionControllers.clear();
+    this.requestControllers.clear();
+    if (this.activeEvaluations.size > 0) {
+      await Promise.allSettled(Array.from(this.activeEvaluations));
+    }
     this.runtimeSync.dispose();
     await this.engine.stop();
     if (this.stopListener) {
@@ -215,7 +342,32 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     return this.runtimeSync;
   }
 
+  cleanupSession(sessionID: string): void {
+    if (!sessionID) return;
+    this.engine.cleanupSession(sessionID);
+    this.promptResolver.cleanupSession(sessionID);
+    this.runtimeSync.cleanupSession(sessionID);
+    const controllers = this.sessionControllers.get(sessionID);
+    if (controllers) {
+      this.sessionControllers.delete(sessionID);
+      for (const ctrl of controllers) {
+        ctrl.abort("session-cleanup");
+      }
+    }
+  }
+
   async handlePermissionAsked(request: PermissionEventData): Promise<void> {
+    if (this.disposed) return;
+    const task = this.runPermissionAsked(request);
+    this.activeEvaluations.add(task);
+    try {
+      await task;
+    } finally {
+      this.activeEvaluations.delete(task);
+    }
+  }
+
+  private async runPermissionAsked(request: PermissionEventData): Promise<void> {
     const workspaceRoot =
       resolveWorkspaceDirectory(this.ctx.directory) ??
       resolveWorkspaceDirectory(this.ctx.worktree) ??
@@ -238,139 +390,153 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
 
     this.runtimeSync.syncControlAndConfig();
 
-    const nonEmptyStringList = (val: unknown): string[] | undefined => {
-      if (!Array.isArray(val)) return undefined;
-      const strings = val.filter(
-        (item): item is string => typeof item === "string" && item.trim().length > 0,
-      );
-      return strings.length > 0 ? strings : undefined;
-    };
-
-    const resources = nonEmptyStringList(request.resources);
-    const patterns = nonEmptyStringList(request.patterns);
-    const commandString =
-      typeof request.metadata?.command === "string" && request.metadata.command.trim().length > 0
-        ? request.metadata.command
-        : typeof request.metadata?.cmd === "string" && request.metadata.cmd.trim().length > 0
-          ? request.metadata.cmd
-          : (resources?.join(" ") ?? patterns?.join(" "));
-
-    const targetPath =
-      typeof request.metadata?.filepath === "string" && request.metadata.filepath.trim().length > 0
-        ? request.metadata.filepath
-        : typeof request.metadata?.path === "string" && request.metadata.path.trim().length > 0
-          ? request.metadata.path
-          : typeof request.metadata?.file === "string" && request.metadata.file.trim().length > 0
-            ? request.metadata.file
-            : undefined;
-
-    const toolName = request.action || request.permission || request.source?.type || "permission";
-
     const sessionID = (request.sessionID as string) || "";
-    const resolvedPrompts = await this.promptResolver.resolveSessionPrompts(
-      sessionID,
-      undefined,
-      this.engine.getUserPrompt(sessionID),
-    );
-
-    const parentID = this.promptResolver.getParentSessionID(sessionID);
-    if (parentID) {
-      this.engine.setSessionParent(sessionID, parentID);
+    const requestID = typeof request.id === "string" ? request.id : "";
+    const reqController = new AbortController();
+    const externalSignal = (request as { signal?: AbortSignal }).signal;
+    const onExternalAbort = () => reqController.abort(externalSignal?.reason);
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        reqController.abort(externalSignal.reason);
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
     }
-    if (resolvedPrompts.userPrompt) {
-      this.engine.setUserPrompt(sessionID, resolvedPrompts.userPrompt);
+    this.allControllers.add(reqController);
+    if (requestID) {
+      this.requestControllers.set(requestID, reqController);
+    }
+    if (sessionID) {
+      let set = this.sessionControllers.get(sessionID);
+      if (!set) {
+        set = new Set();
+        this.sessionControllers.set(sessionID, set);
+      }
+      set.add(reqController);
     }
 
-    const signal = (request as { signal?: AbortSignal }).signal;
-    const action: GateAction = {
-      id: (request.id as string) || Math.random().toString(36).slice(2),
-      harness: (request.harness as string) || "opencode",
-      sessionID,
-      toolName,
-      commandString,
-      targetPath,
-      ...(patterns ? { patterns } : {}),
-      rawArgs: resources ?? patterns ?? request.metadata,
-      workspaceRoot: (request.metadata?.directory as string) || workspaceRoot,
-      userPrompt: resolvedPrompts.userPrompt,
-      subagentPrompt: resolvedPrompts.subagentPrompt,
-      environment: this.config.environment,
-      metadata: request.metadata,
-      ...(signal ? { signal } : {}),
-    };
-
-    const evalStartTime = Date.now();
-    this.runtimeSync.beginEvaluation({
-      id: action.id,
-      sessionID,
-      toolName,
-      ...(commandString !== undefined ? { commandString } : {}),
-      startedAt: evalStartTime,
-    });
-
-    let decision: GateDecision;
     try {
-      decision = await this.engine.evaluate(action);
-    } catch (err) {
-      this.runtimeSync.completeEvaluation(action.id);
-      throw err;
-    }
-
-    const durationMs = Date.now() - evalStartTime;
-    const source = decision.cached
-      ? "cache"
-      : decision.reply || decision.reason.startsWith("Answered remotely")
-        ? "remote"
-        : decision.cascade?.winner
-          ? decision.cascade.winner
-          : decision.verdict === "UNSURE" && !decision.reply
-            ? "native-fallback"
-            : "evaluator";
-
-    this.runtimeSync.completeEvaluation(action.id, {
-      timestamp: Date.now(),
-      sessionID,
-      toolName,
-      ...(commandString !== undefined ? { commandString } : {}),
-      verdict: decision.verdict,
-      ...(decision.riskLevel !== undefined ? { riskLevel: decision.riskLevel } : {}),
-      durationMs,
-      reason: decision.reason,
-      ...(decision.cached !== undefined ? { cached: decision.cached } : {}),
-      source,
-    });
-
-    if (decision.cascade) {
-      logEvaluationDecision(
-        {
-          timestamp: Date.now(),
-          sessionID,
-          toolName,
-          commandString:
-            commandString ??
-            JSON.stringify(request.resources || request.patterns || request.metadata || {}),
-          userPrompt: action.userPrompt,
-          reasoning:
-            (typeof decision.metadata?.reasoning === "string"
-              ? decision.metadata.reasoning
-              : undefined) ?? decision.reason,
-          verdict: decision.verdict,
-          risk_level: decision.riskLevel,
-          user_authorization: decision.userAuthorization,
-          durationMs,
-          cascade: decision.cascade,
-        },
-        this.config.evalLogFile,
+      const resolvedPrompts = await this.promptResolver.resolveSessionPrompts(
+        sessionID,
+        undefined,
+        this.engine.getUserPrompt(sessionID),
+        reqController.signal,
       );
+      if (reqController.signal.aborted || this.disposed) {
+        return;
+      }
+
+      const parentID = this.promptResolver.getParentSessionID(sessionID);
+      if (parentID) {
+        this.engine.setSessionParent(sessionID, parentID);
+      }
+      if (resolvedPrompts.userPrompt) {
+        this.engine.setUserPrompt(sessionID, resolvedPrompts.userPrompt);
+      }
+
+      const action = buildOpenCodeGateAction(request, {
+        workspaceRoot,
+        userPrompt: resolvedPrompts.userPrompt,
+        subagentPrompt: resolvedPrompts.subagentPrompt,
+        environment: this.config.environment,
+        signal: reqController.signal,
+      });
+
+      const evalStartTime = Date.now();
+      this.runtimeSync.beginEvaluation({
+        id: action.id,
+        sessionID: action.sessionID,
+        toolName: action.toolName,
+        ...(action.commandString !== undefined ? { commandString: action.commandString } : {}),
+        startedAt: evalStartTime,
+      });
+
+      let decision: GateDecision;
+      try {
+        decision = await this.engine.evaluate(action);
+      } catch (err) {
+        this.runtimeSync.completeEvaluation(action.id);
+        throw err;
+      }
+
+      if (reqController.signal.aborted || this.disposed) {
+        this.runtimeSync.completeEvaluation(action.id);
+        return;
+      }
+
+      const durationMs = Date.now() - evalStartTime;
+      const source = decision.cached
+        ? "cache"
+        : decision.reply || decision.reason.startsWith("Answered remotely")
+          ? "remote"
+          : decision.cascade?.winner
+            ? decision.cascade.winner
+            : decision.verdict === "UNSURE" && !decision.reply
+              ? "native-fallback"
+              : "evaluator";
+
+      this.runtimeSync.completeEvaluation(action.id, {
+        timestamp: Date.now(),
+        sessionID: action.sessionID,
+        toolName: action.toolName,
+        ...(action.commandString !== undefined ? { commandString: action.commandString } : {}),
+        verdict: decision.verdict,
+        ...(decision.riskLevel !== undefined ? { riskLevel: decision.riskLevel } : {}),
+        durationMs,
+        reason: decision.reason,
+        ...(decision.cached !== undefined ? { cached: decision.cached } : {}),
+        source,
+      });
+
+      if (decision.cascade) {
+        logEvaluationDecision(
+          {
+            timestamp: Date.now(),
+            sessionID: action.sessionID,
+            toolName: action.toolName,
+            commandString:
+              action.commandString ??
+              JSON.stringify(request.resources || request.patterns || request.metadata || {}),
+            userPrompt: action.userPrompt,
+            reasoning:
+              (typeof decision.metadata?.reasoning === "string"
+                ? decision.metadata.reasoning
+                : undefined) ?? decision.reason,
+            verdict: decision.verdict,
+            risk_level: decision.riskLevel,
+            user_authorization: decision.userAuthorization,
+            durationMs,
+            cascade: decision.cascade,
+          },
+          this.config.evalLogFile,
+        );
+      }
+      console.log(
+        `[AutoGate] Evaluated decision for ${request.id}: verdict=${decision.verdict} reason=${decision.reason} userPrompt="${action.userPrompt}"`,
+      );
+      if (decision.verdict === "UNSURE" && !decision.reply) {
+        return;
+      }
+      const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
+      await this.replyPermission(request.id as string, replyVal, action.sessionID, decision.reason);
+    } finally {
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+      this.allControllers.delete(reqController);
+      if (requestID && this.requestControllers.get(requestID) === reqController) {
+        this.requestControllers.delete(requestID);
+      }
+      if (sessionID) {
+        const set = this.sessionControllers.get(sessionID);
+        if (set) {
+          set.delete(reqController);
+          if (set.size === 0) {
+            this.sessionControllers.delete(sessionID);
+          }
+        }
+      }
     }
-    console.log(
-      `[AutoGate] Evaluated decision for ${request.id}: verdict=${decision.verdict} reason=${decision.reason} userPrompt="${action.userPrompt}"`,
-    );
-    if (decision.verdict === "UNSURE" && !decision.reply) {
-      return;
-    }
-    const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
-    await this.replyPermission(request.id as string, replyVal, sessionID, decision.reason);
   }
 
   private async replyPermission(
@@ -445,8 +611,16 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     id?: string;
     reply?: string;
   }): Promise<void> {
+    const reqID = data.requestID ?? data.id;
     this.engine.handlePermissionReplied(data);
-    this.runtimeSync.markPermissionReplied(data.requestID ?? data.id);
+    this.runtimeSync.markPermissionReplied(reqID);
+    if (reqID) {
+      const ctrl = this.requestControllers.get(reqID);
+      if (ctrl) {
+        this.requestControllers.delete(reqID);
+        ctrl.abort("permission-replied");
+      }
+    }
   }
 
   clearTurnCache(sessionID: string): void {
@@ -504,8 +678,8 @@ export const plugin = definePlugin({
     const existing = activeSubscriptions.get(wsDir);
     if (existing) {
       existing.controller.abort();
-      void existing.adapter.dispose();
       activeSubscriptions.delete(wsDir);
+      await existing.adapter.dispose();
     }
 
     const controller = new AbortController();
@@ -693,7 +867,11 @@ export const plugin = definePlugin({
                 console.log(
                   `[AutoGate] Intercepted permission asked: ${eventData.id} for session ${eventData.sessionID}`,
                 );
-                await adapter.handlePermissionAsked(eventData);
+                void adapter.handlePermissionAsked(eventData).catch((err) => {
+                  if (!signal.aborted) {
+                    console.error("[AutoGate] Error handling permission.asked:", err);
+                  }
+                });
               }
             } else if (
               event.type === "permission.replied" ||
@@ -713,6 +891,15 @@ export const plugin = definePlugin({
               const sessionID = event.data?.sessionID || event.properties?.sessionID;
               if (typeof sessionID === "string" && sessionID.length > 0) {
                 adapter.clearTurnCache(sessionID);
+              }
+            } else if (event.type === "session.deleted" || event.type === "session.archived") {
+              const sessionID = event.data?.sessionID || event.properties?.sessionID;
+              if (
+                typeof sessionID === "string" &&
+                sessionID.length > 0 &&
+                !isEvaluationSession(sessionID)
+              ) {
+                adapter.cleanupSession(sessionID);
               }
             }
           }

@@ -198,11 +198,13 @@ export class OpenCodeRuntimeSync {
     if (this.disposed) {
       return;
     }
-    this.inFlight.delete(id);
+    const removed = this.inFlight.delete(id);
     if (summary) {
       this.lastVerdict = summary;
     }
-    this.flush();
+    if (removed || summary) {
+      this.flush();
+    }
   }
 
   public markPermissionReplied(requestID?: string): void {
@@ -210,6 +212,22 @@ export class OpenCodeRuntimeSync {
       return;
     }
     if (this.inFlight.delete(requestID)) {
+      this.flush();
+    }
+  }
+
+  public cleanupSession(sessionID: string): void {
+    if (this.disposed || !sessionID) {
+      return;
+    }
+    let changed = false;
+    for (const [id, entry] of this.inFlight.entries()) {
+      if (entry.sessionID === sessionID) {
+        this.inFlight.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) {
       this.flush();
     }
   }

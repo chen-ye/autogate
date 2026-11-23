@@ -14,13 +14,25 @@ export interface OpenCodeSessionClient {
       thinking?: string;
     }>;
     get(options: { sessionID: string }): Promise<{
-      data?: { id?: string; parentID?: string; title?: string };
+      data?: {
+        id?: string;
+        parentID?: string;
+        title?: string;
+        time?: { created?: number; updated?: number; archived?: number };
+      };
       id?: string;
       parentID?: string;
       title?: string;
+      time?: { created?: number; updated?: number; archived?: number };
     }>;
+    list?(options?: {
+      archived?: boolean;
+      directory?: string;
+      limit?: number;
+      [key: string]: unknown;
+    }): Promise<unknown>;
     context?(options: { sessionID: string }): Promise<{ data?: unknown[] } | unknown[]>;
-    update?(options: { sessionID: string; title?: string }): Promise<unknown>;
+    update?(options: { sessionID: string; title?: string; archived?: boolean }): Promise<unknown>;
     remove?(options: { sessionID: string }): Promise<unknown>;
     interrupt?(options: { sessionID: string; resume?: boolean }): Promise<unknown>;
     wait?(options: { sessionID: string }): Promise<unknown>;
@@ -51,6 +63,8 @@ export interface OpenCodeClassifyInput extends ClassifyInput {
   client?: OpenCodeSessionClient;
   config?: AutoGateConfig;
   signal?: AbortSignal;
+  serverUrl?: string;
+  configDir?: string;
 }
 
 export interface OpenCodeEvent {

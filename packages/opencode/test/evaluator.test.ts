@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import type { AutoGateConfig } from "@autogate/core";
+import { loadConfig, type AutoGateConfig } from "@autogate/core";
 import {
   classifyRequest,
   archiveEvaluationSession,
@@ -37,10 +37,10 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
       process.env.HOME = tempDir;
       const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
 
-      const updateCalls: Array<{ sessionID: string; title?: string }> = [];
+      const updateCalls: Array<{ sessionID: string; title?: string; archived?: boolean }> = [];
       const mockClient = {
         session: {
-          update: async (opts: { sessionID: string; title?: string }) => {
+          update: async (opts: { sessionID: string; title?: string; archived?: boolean }) => {
             updateCalls.push(opts);
             return { ok: true };
           },
@@ -54,6 +54,7 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
         expect(updateCalls[0]).toEqual({
           sessionID: "ses_test_123",
           title: "[auto-gate-eval] bash -> ALLOW",
+          archived: true,
         });
 
         const written = JSON.parse(fs.readFileSync(archiveFile, "utf8")) as Record<string, number>;
@@ -66,10 +67,10 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
 
     it("does not fail or write if openchamber archive does not exist", async () => {
       const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
-      const updateCalls: Array<{ sessionID: string; title?: string }> = [];
+      const updateCalls: Array<{ sessionID: string; title?: string; archived?: boolean }> = [];
       const mockClient = {
         session: {
-          update: async (opts: { sessionID: string; title?: string }) => {
+          update: async (opts: { sessionID: string; title?: string; archived?: boolean }) => {
             updateCalls.push(opts);
             return { ok: true };
           },
@@ -79,7 +80,142 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
       try {
         await archiveEvaluationSession(mockClient, "ses_test_456", "bash", "BLOCK");
         expect(updateCalls.length).toBe(1);
+        expect(updateCalls[0]).toEqual({
+          sessionID: "ses_test_456",
+          title: "[auto-gate-eval] bash -> BLOCK",
+          archived: true,
+        });
       } finally {
+        homedirSpy.mockRestore();
+      }
+    });
+
+    it("falls back to title-only update when client.session.update rejects archived", async () => {
+      const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
+      const updateCalls: Array<{ sessionID: string; title?: string; archived?: boolean }> = [];
+      const mockClient = {
+        session: {
+          update: async (opts: { sessionID: string; title?: string; archived?: boolean }) => {
+            updateCalls.push(opts);
+            if ("archived" in opts) {
+              throw new Error("Unknown field archived");
+            }
+            return { ok: true };
+          },
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      try {
+        await archiveEvaluationSession(mockClient, "ses_test_20x", "bash", "ALLOW");
+        expect(updateCalls).toEqual([
+          { sessionID: "ses_test_20x", title: "[auto-gate-eval] bash -> ALLOW", archived: true },
+          { sessionID: "ses_test_20x", title: "[auto-gate-eval] bash -> ALLOW" },
+        ]);
+      } finally {
+        homedirSpy.mockRestore();
+      }
+    });
+
+    it("uses explicit serverUrl PATCH fallback only when serverUrl is configured and time.archived is absent", async () => {
+      const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
+      const origFetch = globalThis.fetch;
+      const patchCalls: Array<{ url: string; method?: string; body?: string }> = [];
+
+      globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        patchCalls.push({
+          url: String(url),
+          method: init?.method,
+          body: typeof init?.body === "string" ? init.body : undefined,
+        });
+        return { ok: true, status: 204 } as Response;
+      }) as typeof fetch;
+
+      try {
+        const strippedClient = {
+          session: {
+            update: async () => undefined,
+            get: async () => ({ id: "ses_strip_1", title: "[auto-gate-eval] bash -> ALLOW" }),
+          },
+        } as unknown as OpenCodeSessionClient;
+
+        // Without explicit serverUrl, no HTTP call is made (hermetic unit tests)
+        await archiveEvaluationSession(strippedClient, "ses_strip_1", "bash", "ALLOW");
+        expect(patchCalls.length).toBe(0);
+
+        // With explicit serverUrl and missing time.archived, sends PATCH /api/session/:id
+        // omitting title because client.session.update already succeeded
+        await archiveEvaluationSession(strippedClient, "ses_strip_1", "bash", "ALLOW", {
+          serverUrl: "http://127.0.0.1:9998",
+        });
+        expect(patchCalls).toEqual([
+          {
+            url: "http://127.0.0.1:9998/api/session/ses_strip_1",
+            method: "PATCH",
+            body: JSON.stringify({
+              archived: true,
+            }),
+          },
+        ]);
+
+        // With explicit serverUrl and no session.get method, still sends PATCH fallback
+        const noGetClient = {
+          session: {
+            update: async () => undefined,
+          },
+        } as unknown as OpenCodeSessionClient;
+        await archiveEvaluationSession(noGetClient, "ses_noget_1", "bash", "ALLOW", {
+          serverUrl: "http://127.0.0.1:9998",
+        });
+        expect(patchCalls.length).toBe(2);
+        expect(patchCalls[1]).toEqual({
+          url: "http://127.0.0.1:9998/api/session/ses_noget_1",
+          method: "PATCH",
+          body: JSON.stringify({
+            archived: true,
+          }),
+        });
+
+        // When session.get already reports time.archived, skips redundant PATCH
+        const archivedClient = {
+          session: {
+            update: async () => undefined,
+            get: async () => ({
+              id: "ses_done_1",
+              time: { created: 100, updated: 200, archived: 300 },
+            }),
+          },
+        } as unknown as OpenCodeSessionClient;
+        await archiveEvaluationSession(archivedClient, "ses_done_1", "bash", "ALLOW", {
+          serverUrl: "http://127.0.0.1:9998",
+        });
+        expect(patchCalls.length).toBe(2);
+
+        // Two-arg OpenCodeSessionEvaluator(client, loadConfig()) must not leak PATCH to default :4096
+        const twoArgClient = {
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: "ses_two_arg_1" } }),
+            update: async () => undefined,
+            get: async () => ({ id: "ses_two_arg_1" }),
+            prompt: async (opts: { sessionID: string }) => {
+              recordEvaluationVerdict(opts.sessionID, { verdict: "ALLOW", reason: "OK" });
+              return { data: { parts: [] } };
+            },
+          },
+        } as unknown as OpenCodeSessionClient;
+        const twoArgEvaluator = new OpenCodeSessionEvaluator(twoArgClient, loadConfig({}));
+        await twoArgEvaluator.evaluate({
+          id: "act-two-arg",
+          harness: "opencode",
+          sessionID: "ses-parent",
+          toolName: "bash",
+          commandString: "ls",
+          workspaceRoot: tempDir,
+          userPrompt: "list files",
+        });
+        expect(patchCalls.length).toBe(2);
+      } finally {
+        globalThis.fetch = origFetch;
         homedirSpy.mockRestore();
       }
     });

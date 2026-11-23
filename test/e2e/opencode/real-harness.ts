@@ -239,8 +239,12 @@ export class RealOpenCodeHarness {
     }
 
     this.savedEnv = {
+      OPENCODE_PASSWORD: process.env.OPENCODE_PASSWORD,
       OPENCODE_SERVER_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD,
+      OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
       OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
+      OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
+      OPENCODE_DB: process.env.OPENCODE_DB,
       XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       XDG_DATA_HOME: process.env.XDG_DATA_HOME,
       XDG_STATE_HOME: process.env.XDG_STATE_HOME,
@@ -369,26 +373,32 @@ export class RealOpenCodeHarness {
     process.env.NODE_PATH = localNodeModules;
     process.env.OPENCODE_SERVER_PASSWORD = this.serverPassword;
     process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(opencodeConfig);
+    delete process.env.OPENCODE_PASSWORD;
+    delete process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OPENCODE_DB;
 
     const binary = path.resolve(process.cwd(), "node_modules/.bin/opencode");
     const serverTimeout = options?.timeout ?? 20000;
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      OPENCODE_PRINT_LOGS: "1",
+      OPENCODE_LOG_LEVEL: "DEBUG",
+      OPENCODE_CONFIG_DIR: testConfigDir,
+      OPENCODE_DB: path.join(this.workspaceDir, "test.db"),
+      OPENCODE_SERVER_PASSWORD: this.serverPassword,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeConfig),
+      XDG_CONFIG_HOME: path.join(this.workspaceDir, ".config"),
+      XDG_DATA_HOME: path.join(this.workspaceDir, ".local", "share"),
+      XDG_STATE_HOME: path.join(this.workspaceDir, ".local", "state"),
+      XDG_CACHE_HOME: path.join(this.workspaceDir, ".cache"),
+    };
+    delete childEnv.OPENCODE_PASSWORD;
+    delete childEnv.OPENCODE_CONFIG;
+
     const serverProc = spawn(binary, ["serve", "--hostname=127.0.0.1", `--port=${allocatedPort}`], {
       cwd: this.workspaceDir,
-      env: {
-        ...process.env,
-        OPENCODE_PRINT_LOGS: "1",
-        OPENCODE_LOG_LEVEL: "DEBUG",
-        OPENCODE_CONFIG_DIR: testConfigDir,
-        OPENCODE_DB: path.join(this.workspaceDir, "test.db"),
-        OPENCODE_SERVER_PASSWORD: this.serverPassword,
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(opencodeConfig),
-        XDG_CONFIG_HOME: path.join(this.workspaceDir, ".config"),
-        XDG_DATA_HOME: path.join(this.workspaceDir, ".local", "share"),
-        XDG_STATE_HOME: path.join(this.workspaceDir, ".local", "state"),
-        XDG_CACHE_HOME: path.join(this.workspaceDir, ".cache"),
-      },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

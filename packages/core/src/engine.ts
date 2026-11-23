@@ -485,6 +485,7 @@ export class AutoGateCoreEngine {
     }
   >();
   private turnDecisionCache = new Map<string, Set<string>>();
+  private activeEvaluationsBySession = new Map<string, Set<{ cancelled: boolean }>>();
   private workspaceRoot?: string;
   private stopRemoteListen?: () => void;
   private reviewFallbackMode: ReviewFallbackMode = "ntfy";
@@ -674,6 +675,87 @@ export class AutoGateCoreEngine {
     this.turnDecisionCache.delete(sessionID);
   }
 
+  private trackSessionToken(sessionID: string): {
+    token: { cancelled: boolean };
+    release: () => void;
+  } {
+    const token = { cancelled: false };
+    if (!sessionID) {
+      return { token, release: () => {} };
+    }
+    let set = this.activeEvaluationsBySession.get(sessionID);
+    if (!set) {
+      set = new Set();
+      this.activeEvaluationsBySession.set(sessionID, set);
+    }
+    set.add(token);
+    return {
+      token,
+      release: () => {
+        set.delete(token);
+        if (set.size === 0) {
+          this.activeEvaluationsBySession.delete(sessionID);
+        }
+      },
+    };
+  }
+
+  public cleanupSession(sessionID: string): void {
+    if (!sessionID) return;
+
+    const evalTokens = this.activeEvaluationsBySession.get(sessionID);
+    if (evalTokens) {
+      for (const token of evalTokens) {
+        token.cancelled = true;
+      }
+    }
+    this.turnDecisionCache.delete(sessionID);
+
+    const removedPrompt = this.userPrompts.get(sessionID);
+    this.userPrompts.delete(sessionID);
+    if (removedPrompt !== undefined) {
+      if (this.userPrompts.size === 0) {
+        this.userPrompt = "";
+      } else if (
+        this.userPrompt === removedPrompt ||
+        !Array.from(this.userPrompts.values()).includes(this.userPrompt)
+      ) {
+        this.userPrompt = Array.from(this.userPrompts.values())[0] ?? "";
+      }
+    }
+
+    this.sessionParentCache.delete(sessionID);
+    for (const [childID, parentID] of this.sessionParentCache.entries()) {
+      if (parentID === sessionID) {
+        this.sessionParentCache.delete(childID);
+      }
+    }
+    sharedExplicitEscalations.delete(sessionID);
+
+    const rejectedPrefix = `${sessionID}:`;
+    for (const key of sharedRecentlyRejected.keys()) {
+      if (key.startsWith(rejectedPrefix)) {
+        sharedRecentlyRejected.delete(key);
+      }
+    }
+
+    let removedInFlight = false;
+    for (const [id, entry] of this.inFlightRequests.entries()) {
+      if (entry.sessionID === sessionID) {
+        this.inFlightRequests.delete(id);
+        entry.abort.abort();
+        entry.resolve({
+          verdict: "UNSURE",
+          reason: "Session archived or deleted",
+        });
+        removedInFlight = true;
+      }
+    }
+    if (removedInFlight) {
+      this.onStateChange?.();
+    }
+  }
+
   public checkAndConsumeEscalation(request: PermissionEventData | GateAction): string | null {
     const parentSessionID = request.sessionID
       ? this.sessionParentCache.get(request.sessionID)
@@ -700,11 +782,21 @@ export class AutoGateCoreEngine {
       this.stopRemoteListen();
       this.stopRemoteListen = undefined;
     }
-    for (const entry of this.inFlightRequests.values()) {
-      entry.abort.abort();
-    }
+    const hadInFlight = this.inFlightRequests.size > 0;
+    const entries = Array.from(this.inFlightRequests.values());
     this.inFlightRequests.clear();
+    for (const entry of entries) {
+      entry.abort.abort();
+      entry.resolve({
+        verdict: "UNSURE",
+        reason: "Engine stopped",
+      });
+    }
+    if (hadInFlight) {
+      this.onStateChange?.();
+    }
     this.turnDecisionCache.clear();
+    this.activeEvaluationsBySession.clear();
     sharedRecentlyRejected.clear();
     sharedExplicitEscalations.clear();
   }
@@ -784,13 +876,23 @@ export class AutoGateCoreEngine {
     }
 
     // 5. Calls `this.evaluator.evaluate(action)`.
+    const { token: evalToken, release: releaseEvalToken } = this.trackSessionToken(sid);
+
     let verdictResult: ClassifierResult;
     try {
       verdictResult = await this.evaluator.evaluate(action);
     } catch (err) {
       verdictResult = { verdict: "UNSURE", reason: `Classifier error: ${err}` };
+    } finally {
+      releaseEvalToken();
     }
 
+    if (evalToken.cancelled) {
+      return {
+        verdict: "UNSURE",
+        reason: "Session archived or deleted",
+      };
+    }
     if (action.signal?.aborted) {
       return {
         verdict: "BLOCK",
@@ -964,6 +1066,8 @@ export class AutoGateCoreEngine {
 
     const abortController = new AbortController();
     let timeoutTimer: NodeJS.Timeout | undefined = undefined;
+    const sid = action.sessionID || "";
+    const { token: reviewToken, release: releaseReviewToken } = this.trackSessionToken(sid);
 
     let onAbort: (() => void) | undefined = undefined;
     const decisionPromise = new Promise<GateDecision>((resolve, reject) => {
@@ -984,11 +1088,13 @@ export class AutoGateCoreEngine {
           if (entry) {
             this.inFlightRequests.delete(action.id);
             entry.abort.abort();
+            this.onStateChange?.();
           }
-          resolve({
-            verdict: "BLOCK",
-            reason: "Review request aborted by signal",
-          });
+          resolve(
+            reviewToken.cancelled
+              ? { verdict: "UNSURE", reason: "Session archived or deleted" }
+              : { verdict: "BLOCK", reason: "Review request aborted by signal" },
+          );
         };
         if (action.signal.aborted) {
           onAbort();
@@ -1012,10 +1118,10 @@ export class AutoGateCoreEngine {
       if (abortController.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
         if (timeoutTimer) clearTimeout(timeoutTimer);
         this.inFlightRequests.delete(action.id);
-        return {
-          verdict: "BLOCK",
-          reason: "Review request aborted",
-        };
+        releaseReviewToken();
+        return reviewToken.cancelled
+          ? { verdict: "UNSURE", reason: "Session archived or deleted" }
+          : { verdict: "BLOCK", reason: "Review request aborted" };
       }
       console.error("Failed to publish notification to remote adapter:", err);
     }
@@ -1027,24 +1133,29 @@ export class AutoGateCoreEngine {
         if (entry) {
           this.inFlightRequests.delete(action.id);
           entry.abort.abort();
-          resolve({
-            verdict: "BLOCK",
-            reason: `Review request timed out after ${Math.round(timeoutMs / 1000)} seconds`,
-          });
+          this.onStateChange?.();
         }
+        resolve({
+          verdict: "BLOCK",
+          reason: `Review request timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+        });
       }, timeoutMs);
     });
 
-    const finalDecision = await Promise.race([decisionPromise, timeoutPromise]);
-    if (timeoutTimer) clearTimeout(timeoutTimer);
-    if (!cascade && !metadata) {
-      return finalDecision;
+    try {
+      const finalDecision = await Promise.race([decisionPromise, timeoutPromise]);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (!cascade && !metadata) {
+        return finalDecision;
+      }
+      return {
+        ...finalDecision,
+        ...(cascade ? { cascade } : {}),
+        ...(metadata ? { metadata } : {}),
+      };
+    } finally {
+      releaseReviewToken();
     }
-    return {
-      ...finalDecision,
-      ...(cascade ? { cascade } : {}),
-      ...(metadata ? { metadata } : {}),
-    };
   }
 
   public resolveReviewResponse(resp: ReviewResponse): void {
@@ -1104,6 +1215,11 @@ export class AutoGateCoreEngine {
           preserveBody,
         )
         .catch(() => {});
+      entry.resolve({
+        verdict: "UNSURE",
+        reason: "Answered locally in terminal",
+      });
+      this.onStateChange?.();
     }
   }
 
