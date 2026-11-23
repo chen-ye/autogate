@@ -87,6 +87,22 @@ function getRequestPermission(request: PermissionEventData | GateAction): string
   return "";
 }
 
+function isSoleWildcardPlaceholderList(
+  items: unknown,
+  request: PermissionEventData | GateAction,
+): boolean {
+  if (!Array.isArray(items) || items.length !== 1 || String(items[0]).trim() !== "*") {
+    return false;
+  }
+  const meta = request.metadata;
+  return Boolean(
+    meta &&
+    typeof meta === "object" &&
+    (("input" in meta && meta.input !== undefined) ||
+      (Array.isArray(meta.files) && meta.files.length > 0)),
+  );
+}
+
 function getRequestCommandString(
   request: PermissionEventData | GateAction,
   overrideCmd?: string,
@@ -109,10 +125,20 @@ function getRequestCommandString(
       return meta.patterns.filter((p): p is string => typeof p === "string").join(" ");
     }
   }
-  if ("resources" in request && Array.isArray(request.resources) && request.resources.length > 0) {
+  if (
+    "resources" in request &&
+    Array.isArray(request.resources) &&
+    request.resources.length > 0 &&
+    !isSoleWildcardPlaceholderList(request.resources, request)
+  ) {
     return request.resources.filter((r): r is string => typeof r === "string").join(" ");
   }
-  if ("patterns" in request && Array.isArray(request.patterns) && request.patterns.length > 0) {
+  if (
+    "patterns" in request &&
+    Array.isArray(request.patterns) &&
+    request.patterns.length > 0 &&
+    !isSoleWildcardPlaceholderList(request.patterns, request)
+  ) {
     return request.patterns.filter((p): p is string => typeof p === "string").join(" ");
   }
   if ("rawArgs" in request && Array.isArray(request.rawArgs) && request.rawArgs.length > 0) {
@@ -129,17 +155,118 @@ function getRequestSessionID(request: PermissionEventData | GateAction): string 
 }
 
 function getRequestPatterns(request: PermissionEventData | GateAction): string {
-  if ("patterns" in request && Array.isArray(request.patterns) && request.patterns.length > 0) {
+  if (
+    "patterns" in request &&
+    Array.isArray(request.patterns) &&
+    request.patterns.length > 0 &&
+    !isSoleWildcardPlaceholderList(request.patterns, request)
+  ) {
     return request.patterns.map(String).join(",");
   }
   return getRequestCommandString(request);
+}
+
+function stableSerialize(value: unknown, seen: WeakSet<object> = new WeakSet()): string {
+  if (value === null) {
+    return "null";
+  }
+  const t = typeof value;
+  if (t === "bigint") {
+    return JSON.stringify((value as bigint).toString());
+  }
+  if (t === "undefined" || t === "function" || t === "symbol") {
+    return "null";
+  }
+  if (t !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  const obj = value as object;
+  if (seen.has(obj)) {
+    return '"[Circular]"';
+  }
+  seen.add(obj);
+  try {
+    if (obj instanceof RegExp) {
+      return JSON.stringify(obj.toString());
+    }
+    if (obj instanceof Date) {
+      const iso = Number.isNaN(obj.getTime()) ? null : obj.toISOString();
+      return JSON.stringify(iso);
+    }
+    if (obj instanceof Map) {
+      return stableSerialize({ $map: Array.from(obj.entries()) }, seen);
+    }
+    if (obj instanceof Set) {
+      return stableSerialize({ $set: Array.from(obj.values()) }, seen);
+    }
+    if ("toJSON" in obj && typeof (obj as { toJSON?: unknown }).toJSON === "function") {
+      return stableSerialize((obj as { toJSON: () => unknown }).toJSON(), seen);
+    }
+    if (Array.isArray(obj)) {
+      return `[${obj.map((item) => stableSerialize(item, seen)).join(",")}]`;
+    }
+    const rec = obj as Record<string, unknown>;
+    const keys = Object.keys(rec)
+      .filter((k) => {
+        const vt = typeof rec[k];
+        return vt !== "undefined" && vt !== "function" && vt !== "symbol";
+      })
+      .sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableSerialize(rec[k], seen)}`).join(",")}}`;
+  } finally {
+    seen.delete(obj);
+  }
+}
+
+function getStructuredArgsKey(
+  request: PermissionEventData | GateAction,
+  commandString: string,
+): string {
+  if ("rawArgs" in request && request.rawArgs !== undefined) {
+    const rawArgs = request.rawArgs;
+    if (Array.isArray(rawArgs)) {
+      const hasNonString = rawArgs.some((item) => typeof item !== "string");
+      if (hasNonString) {
+        return stableSerialize(rawArgs);
+      }
+      const joined = rawArgs.join(" ").trim();
+      if (joined && joined !== commandString.trim()) {
+        return stableSerialize(rawArgs);
+      }
+    } else if (rawArgs === null || typeof rawArgs === "boolean" || typeof rawArgs === "number") {
+      return stableSerialize(rawArgs);
+    } else if (typeof rawArgs === "object") {
+      return stableSerialize(rawArgs);
+    } else if (
+      typeof rawArgs === "string" &&
+      rawArgs.trim() &&
+      rawArgs.trim() !== commandString.trim()
+    ) {
+      return rawArgs.trim();
+    }
+  }
+
+  const meta = request.metadata;
+  if (meta && typeof meta === "object") {
+    if ("input" in meta && meta.input !== undefined) {
+      return stableSerialize(meta.input);
+    }
+    if (Array.isArray(meta.files) && meta.files.length > 0) {
+      return stableSerialize(meta.files);
+    }
+  }
+
+  return "";
 }
 
 export function getActionKey(request: PermissionEventData | GateAction): string {
   const perm = getRequestPermission(request);
   const patterns = getRequestPatterns(request);
   const sessionID = getRequestSessionID(request);
-  return `${sessionID}:${perm}:${patterns}`;
+  const structuredKey = getStructuredArgsKey(request, getRequestCommandString(request));
+  return structuredKey
+    ? `${sessionID}:${perm}:${patterns}:${structuredKey}`
+    : `${sessionID}:${perm}:${patterns}`;
 }
 
 function hasShellCompoundOperators(value: string): boolean {
@@ -238,11 +365,17 @@ function matchesAction(
   }
 
   const patternsList =
-    "patterns" in request ? collectNonEmptyStringItems(request.patterns) : undefined;
+    "patterns" in request && !isSoleWildcardPlaceholderList(request.patterns, request)
+      ? collectNonEmptyStringItems(request.patterns)
+      : undefined;
   const resourcesList =
-    "resources" in request ? collectNonEmptyStringItems(request.resources) : undefined;
+    "resources" in request && !isSoleWildcardPlaceholderList(request.resources, request)
+      ? collectNonEmptyStringItems(request.resources)
+      : undefined;
   const rawArgsList =
-    "rawArgs" in request ? collectNonEmptyStringItems(request.rawArgs) : undefined;
+    "rawArgs" in request && !isSoleWildcardPlaceholderList(request.rawArgs, request)
+      ? collectNonEmptyStringItems(request.rawArgs)
+      : undefined;
 
   // Reject multi-resource requests unless every resource/pattern is covered by the escalation entry.
   for (const list of [patternsList, resourcesList, rawArgsList]) {
@@ -299,6 +432,42 @@ function matchesAction(
       for (const field of [rec.command, rec.cmd]) {
         if (matchesExactOrCommandPath(entryVariants, field, true)) {
           return true;
+        }
+      }
+    }
+  }
+
+  // Match structured MCP tool escalations (either exact canonical input JSON, or bare tool name when input is empty {})
+  const mcpInput =
+    meta && typeof meta === "object" && "input" in meta && meta.input !== undefined
+      ? meta.input
+      : "rawArgs" in request &&
+          request.rawArgs &&
+          !Array.isArray(request.rawArgs) &&
+          typeof request.rawArgs === "object" &&
+          !Array.isArray((request.rawArgs as Record<string, unknown>).files)
+        ? request.rawArgs
+        : undefined;
+  if (mcpInput !== undefined) {
+    const canonicalInput = stableSerialize(mcpInput);
+    const isEmptyInput = canonicalInput === "{}" || canonicalInput === "null";
+    if (
+      isEmptyInput &&
+      entryVariants.includes(getRequestPermission(request).trim().toLowerCase())
+    ) {
+      return true;
+    }
+    for (const variant of entryVariants) {
+      if (variant === canonicalInput.toLowerCase()) {
+        return true;
+      }
+      if (variant.startsWith("{") || variant.startsWith("[")) {
+        try {
+          if (stableSerialize(JSON.parse(variant)).toLowerCase() === canonicalInput.toLowerCase()) {
+            return true;
+          }
+        } catch {
+          // Non-JSON escalation text; fall through
         }
       }
     }
@@ -368,11 +537,7 @@ export function checkAndConsumeEscalation(
   }
 
   if (parentSessionID && parentSessionID !== sessionID) {
-    const parentPatterns =
-      "patterns" in request && Array.isArray(request.patterns)
-        ? request.patterns.map(String).join(",")
-        : commandString;
-    const parentActionKey = `${parentSessionID}:${perm}:${parentPatterns}`;
+    const parentActionKey = getActionKey({ ...request, sessionID: parentSessionID });
     const parentRejected = sharedRecentlyRejected.get(parentActionKey);
     if (parentRejected) {
       if (Date.now() - parentRejected.timestamp < 60000) {
@@ -405,6 +570,10 @@ function resolveNotificationTarget(action: GateAction): string | string[] {
         (v): v is string => typeof v === "string" && v.length > 0,
       );
       if (items.length > 0) return items;
+    }
+    if (typeof action.rawArgs === "object" && action.rawArgs !== null) {
+      const serialized = stableSerialize(action.rawArgs);
+      return [serialized.length > 512 ? `${serialized.slice(0, 509)}...` : serialized];
     }
     return [String(action.rawArgs)];
   }
@@ -853,7 +1022,11 @@ export class AutoGateCoreEngine {
       (Array.isArray(action.rawArgs)
         ? action.rawArgs.filter((a): a is string => typeof a === "string").join(" ")
         : "");
-    const actionKey = `${action.toolName}:${commandString || action.targetPath || JSON.stringify(action.rawArgs || "")}`;
+    const structuredKey = getStructuredArgsKey(action, commandString);
+    const baseTarget = commandString || action.targetPath || "";
+    const actionKey = structuredKey
+      ? `${action.toolName}:${baseTarget}:${structuredKey}`
+      : `${action.toolName}:${baseTarget || (action.rawArgs !== undefined ? stableSerialize(action.rawArgs) : "")}`;
 
     if (this.turnDecisionCache.get(sid)?.has(actionKey)) {
       return {

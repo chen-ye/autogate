@@ -446,9 +446,49 @@ export function formatActionDetails(actionName: string, actionArgs: unknown): st
       commandStr ||
       directory ||
       (typeof actionArgs === "object" ? JSON.stringify(actionArgs) : String(actionArgs));
-    let details = `- **Target Path / Patterns**: \`${target.trim()}\``;
+    const files =
+      typeof actionArgs === "object" &&
+      actionArgs !== null &&
+      Array.isArray((actionArgs as Record<string, unknown>).files)
+        ? ((actionArgs as Record<string, unknown>).files as Array<Record<string, unknown>>)
+        : undefined;
+    const allFilePaths = files
+      ? Array.from(
+          new Set(
+            files
+              .map((entry) => (typeof entry?.file === "string" ? entry.file.trim() : ""))
+              .filter((f) => f.length > 0),
+          ),
+        )
+      : [];
+    const targetDisplay = allFilePaths.length > 1 ? allFilePaths.join(", ") : target.trim();
+    let details = `- **Target Path / Patterns**: \`${targetDisplay}\``;
     if (directory && directory !== target.trim()) {
       details += `\n- **Target Directory**: \`${directory}\``;
+    }
+    if (files && files.length > 0) {
+      const MAX_BEFORE_BYTES = 2048;
+      const MAX_EDIT_DETAILS_BYTES = 20480;
+      const formattedFiles = files.map((entry) => {
+        if (!entry || typeof entry !== "object") return entry;
+        const { before, after, patch, ...rest } = entry;
+        const cappedBefore =
+          typeof before === "string" && Buffer.byteLength(before, "utf8") > MAX_BEFORE_BYTES
+            ? truncateUtf8Bytes(before, MAX_BEFORE_BYTES)
+            : before;
+        return {
+          ...rest,
+          ...(after !== undefined ? { after } : {}),
+          ...(patch !== undefined ? { patch } : {}),
+          ...(cappedBefore !== undefined ? { before: cappedBefore } : {}),
+        };
+      });
+      const serialized = JSON.stringify(formattedFiles, null, 2);
+      const isTruncated = Buffer.byteLength(serialized, "utf8") > MAX_EDIT_DETAILS_BYTES;
+      const editBody = isTruncated
+        ? truncateUtf8Bytes(serialized, MAX_EDIT_DETAILS_BYTES)
+        : serialized;
+      details += `\n- **Edit Details**${isTruncated ? " *(truncated; inspect carefully)*" : ""}:\n\`\`\`json\n${editBody}\n\`\`\``;
     }
     return details;
   }

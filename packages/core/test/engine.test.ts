@@ -1215,4 +1215,253 @@ describe("AutoGateCoreEngine recordEscalationIntent", () => {
     expect(stopDecision.verdict).toBe("UNSURE");
     expect(stopDecision.reason).toBe("Engine stopped");
   });
+
+  it("isolates turnDecisionCache and sharedRecentlyRejected across distinct MCP inputs and edit file diffs", async () => {
+    const adapter = new MockAdapter();
+    let evalCount = 0;
+    const diffEvaluator: GateEvaluator = {
+      name: "diff-eval",
+      async evaluate(action) {
+        evalCount++;
+        const raw = JSON.stringify(action.rawArgs ?? {});
+        if (raw.includes("evil")) {
+          return { verdict: "BLOCK", reason: "Malicious payload" };
+        }
+        return { verdict: "ALLOW", reason: "Safe payload" };
+      },
+    };
+
+    const eng = new AutoGateCoreEngine({
+      config: {
+        autoMode: true,
+        reviewFallbackMode: "native",
+        notifyOnVerdict: false,
+        consecutiveBlockThreshold: 5,
+      },
+      evaluator: diffEvaluator,
+      adapter,
+    });
+
+    // 1. Distinct MCP inputs do not collide in turnDecisionCache
+    const mcpSafe = await eng.evaluate({
+      id: "mcp-1",
+      harness: "opencode",
+      sessionID: "ses-mcp-cache",
+      toolName: "github_create_issue",
+      rawArgs: { repo: "owner/repo", title: "Benign bug" },
+      workspaceRoot: "/workspace",
+      userPrompt: "File bug",
+    });
+    expect(mcpSafe.verdict).toBe("ALLOW");
+    expect(mcpSafe.cached).toBe(false);
+
+    // Identical payload (even with reversed key order) hits turnDecisionCache
+    const mcpSafeRepeat = await eng.evaluate({
+      id: "mcp-2",
+      harness: "opencode",
+      sessionID: "ses-mcp-cache",
+      toolName: "github_create_issue",
+      rawArgs: { title: "Benign bug", repo: "owner/repo" },
+      workspaceRoot: "/workspace",
+      userPrompt: "File bug",
+    });
+    expect(mcpSafeRepeat.verdict).toBe("ALLOW");
+    expect(mcpSafeRepeat.cached).toBe(true);
+    expect(evalCount).toBe(1);
+
+    // Different MCP input on same tool must NOT hit turnDecisionCache
+    const mcpMalicious = await eng.evaluate({
+      id: "mcp-3",
+      harness: "opencode",
+      sessionID: "ses-mcp-cache",
+      toolName: "github_create_issue",
+      rawArgs: { repo: "owner/repo", title: "evil exfil" },
+      workspaceRoot: "/workspace",
+      userPrompt: "File bug",
+    });
+    expect(mcpMalicious.verdict).toBe("BLOCK");
+    expect(evalCount).toBe(2);
+
+    // 2. Different edit diffs on the same targetPath do not collide in turnDecisionCache or sharedRecentlyRejected
+    const editSafe = await eng.evaluate({
+      id: "edit-1",
+      harness: "opencode",
+      sessionID: "ses-edit-cache",
+      toolName: "edit",
+      commandString: "src/app.ts",
+      targetPath: "src/app.ts",
+      rawArgs: { path: "src/app.ts", files: [{ file: "src/app.ts", before: "a", after: "b" }] },
+      workspaceRoot: "/workspace",
+      userPrompt: "Refactor",
+    });
+    expect(editSafe.verdict).toBe("ALLOW");
+    expect(evalCount).toBe(3);
+
+    const editMalicious = await eng.evaluate({
+      id: "edit-2",
+      harness: "opencode",
+      sessionID: "ses-edit-cache",
+      toolName: "edit",
+      commandString: "src/app.ts",
+      targetPath: "src/app.ts",
+      rawArgs: { path: "src/app.ts", files: [{ file: "src/app.ts", before: "a", after: "evil" }] },
+      workspaceRoot: "/workspace",
+      userPrompt: "Refactor",
+    });
+    expect(editMalicious.verdict).toBe("BLOCK");
+    expect(evalCount).toBe(4);
+
+    // Different edit diff on same file does NOT trigger sharedRecentlyRejected escalation; identical retry DOES
+    const editOther = await eng.evaluate({
+      id: "edit-3",
+      harness: "opencode",
+      sessionID: "ses-edit-cache",
+      toolName: "edit",
+      commandString: "src/app.ts",
+      targetPath: "src/app.ts",
+      rawArgs: { path: "src/app.ts", files: [{ file: "src/app.ts", before: "a", after: "c" }] },
+      workspaceRoot: "/workspace",
+      userPrompt: "Refactor",
+    });
+    expect(editOther.verdict).toBe("ALLOW");
+    expect(evalCount).toBe(5);
+
+    const editRetryMalicious = await eng.evaluate({
+      id: "edit-4",
+      harness: "opencode",
+      sessionID: "ses-edit-cache",
+      toolName: "edit",
+      commandString: "src/app.ts",
+      targetPath: "src/app.ts",
+      rawArgs: { path: "src/app.ts", files: [{ file: "src/app.ts", before: "a", after: "evil" }] },
+      workspaceRoot: "/workspace",
+      userPrompt: "Refactor",
+    });
+    expect(editRetryMalicious.verdict).toBe("UNSURE");
+    expect(editRetryMalicious.reason).toContain("Re-attempted action within 60s");
+  });
+
+  it("handles circular/BigInt/Date/RegExp/undefined rawArgs safely, enforces multi-file edit & MCP escalation guards, and isolates subagent parent rejections", async () => {
+    const adapter = new MockAdapter();
+    const evaluator = new MockEvaluator();
+    evaluator.nextResult = { verdict: "BLOCK", reason: "Blocked" };
+    const eng = new AutoGateCoreEngine({
+      config: {
+        autoMode: true,
+        reviewFallbackMode: "native",
+        notifyOnVerdict: false,
+        consecutiveBlockThreshold: 10,
+      },
+      evaluator,
+      adapter,
+    });
+
+    // 1. Circular / BigInt / Date / RegExp / undefined / falsy primitives do not throw or collide
+    const circular: Record<string, unknown> = { a: 1 };
+    circular.self = circular;
+    const circDecision = await eng.evaluate({
+      id: "circ-1",
+      harness: "opencode",
+      sessionID: "ses-edge-ser",
+      toolName: "custom_mcp",
+      rawArgs: {
+        circular,
+        big: 9007199254740993n,
+        dt: new Date("2026-01-01T00:00:00Z"),
+        re: /rm -rf/i,
+        undef: undefined,
+      },
+      workspaceRoot: "/workspace",
+      userPrompt: "test",
+    });
+    expect(circDecision.verdict).toBe("BLOCK");
+
+    evaluator.nextResult = { verdict: "ALLOW", reason: "Allowed" };
+    const falseDecision = await eng.evaluate({
+      id: "prim-false",
+      harness: "opencode",
+      sessionID: "ses-prim",
+      toolName: "toggle",
+      rawArgs: false,
+      workspaceRoot: "/workspace",
+      userPrompt: "toggle off",
+    });
+    expect(falseDecision.cached).toBe(false);
+    const zeroDecision = await eng.evaluate({
+      id: "prim-zero",
+      harness: "opencode",
+      sessionID: "ses-prim",
+      toolName: "toggle",
+      rawArgs: 0,
+      workspaceRoot: "/workspace",
+      userPrompt: "toggle zero",
+    });
+    expect(zeroDecision.cached).toBe(false);
+
+    // 2. Subagent inherits parent's structured sharedRecentlyRejected key
+    evaluator.nextResult = { verdict: "BLOCK", reason: "Denied by policy" };
+    await eng.evaluate({
+      id: "parent-mcp-block",
+      harness: "opencode",
+      sessionID: "ses-parent-rej",
+      toolName: "github_create_issue",
+      rawArgs: { repo: "a/b", title: "secret" },
+      workspaceRoot: "/workspace",
+      userPrompt: "test",
+    });
+    eng.setSessionParent("ses-child-rej", "ses-parent-rej");
+    const childRetry = await eng.evaluate({
+      id: "child-mcp-retry",
+      harness: "opencode",
+      sessionID: "ses-child-rej",
+      toolName: "github_create_issue",
+      rawArgs: { title: "secret", repo: "a/b" },
+      workspaceRoot: "/workspace",
+      userPrompt: "test",
+    });
+    expect(childRetry.verdict).toBe("UNSURE");
+    expect(childRetry.reason).toContain("Re-attempted action within 60s");
+
+    // 3. Multi-file edit patterns[] blocks single-file escalation piggybacking
+    eng.recordEscalationIntent("ses-multi-edit", "src/safe.ts", "only safe.ts");
+    const multiEditDecision = await eng.evaluate({
+      id: "multi-edit-1",
+      harness: "opencode",
+      sessionID: "ses-multi-edit",
+      toolName: "edit",
+      targetPath: "src/safe.ts",
+      patterns: ["src/safe.ts", ".env"],
+      rawArgs: { path: "src/safe.ts", files: [{ file: "src/safe.ts" }, { file: ".env" }] },
+      workspaceRoot: "/workspace",
+      userPrompt: "edit safe",
+    });
+    expect(multiEditDecision.verdict).toBe("BLOCK");
+    expect(sharedExplicitEscalations.has("ses-multi-edit")).toBe(true);
+
+    // 4. Sole "*" placeholder in MCP permission event does not match action: "*", while canonical MCP escalation matches
+    eng.recordEscalationIntent("ses-mcp-esc", "*", "wildcard abuse");
+    expect(
+      eng.checkAndConsumeEscalation({
+        id: "mcp-raw-1",
+        sessionID: "ses-mcp-esc",
+        action: "github_create_issue",
+        resources: ["*"],
+        metadata: { input: { repo: "a/b", title: "issue" } },
+      }),
+    ).toBeNull();
+    eng.recordEscalationIntent(
+      "ses-mcp-esc",
+      'github_create_issue {"title":"issue","repo":"a/b"}',
+      "explicit mcp approval",
+    );
+    expect(
+      eng.checkAndConsumeEscalation({
+        id: "mcp-raw-2",
+        sessionID: "ses-mcp-esc",
+        action: "github_create_issue",
+        resources: ["*"],
+        metadata: { input: { repo: "a/b", title: "issue" } },
+      }),
+    ).toBe("explicit mcp approval");
+  });
 });

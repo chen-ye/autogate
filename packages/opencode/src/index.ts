@@ -187,15 +187,40 @@ export function buildOpenCodeGateAction(
     );
     return strings.length > 0 ? strings : undefined;
   };
+  const isSoleWildcardPlaceholder = (list: string[] | undefined): boolean =>
+    Boolean(list && list.length === 1 && list[0].trim() === "*");
 
-  const resources = nonEmptyStringList(request.resources);
-  const patterns = nonEmptyStringList(request.patterns);
+  const rawResources = nonEmptyStringList(request.resources);
+  const rawPatterns = nonEmptyStringList(request.patterns);
+  const metaFiles = Array.isArray(request.metadata?.files)
+    ? (request.metadata.files as Array<Record<string, unknown>>)
+    : undefined;
+  const hasMcpInput =
+    Boolean(request.metadata) &&
+    typeof request.metadata === "object" &&
+    "input" in request.metadata! &&
+    request.metadata!.input !== undefined;
+  const hasStructuredMeta = hasMcpInput || Boolean(metaFiles && metaFiles.length > 0);
+
+  const resources =
+    hasStructuredMeta && isSoleWildcardPlaceholder(rawResources) ? undefined : rawResources;
+  const patterns =
+    hasStructuredMeta && isSoleWildcardPlaceholder(rawPatterns) ? undefined : rawPatterns;
+
+  const toolName = request.action || request.permission || request.source?.type || "permission";
+
   const commandString =
     typeof request.metadata?.command === "string" && request.metadata.command.trim().length > 0
       ? request.metadata.command
       : typeof request.metadata?.cmd === "string" && request.metadata.cmd.trim().length > 0
         ? request.metadata.cmd
         : (resources?.join(" ") ?? patterns?.join(" "));
+
+  const metaFilePaths = (metaFiles ?? [])
+    .map((entry) => (typeof entry?.file === "string" ? entry.file.trim() : ""))
+    .filter((f) => f.length > 0);
+  const firstMetaFile = metaFilePaths[0];
+  const isFileTool = toolName === "read" || toolName === "edit" || toolName === "write";
 
   const targetPath =
     typeof request.metadata?.filepath === "string" && request.metadata.filepath.trim().length > 0
@@ -204,9 +229,22 @@ export function buildOpenCodeGateAction(
         ? request.metadata.path
         : typeof request.metadata?.file === "string" && request.metadata.file.trim().length > 0
           ? request.metadata.file
-          : undefined;
+          : (firstMetaFile ?? (isFileTool ? (resources?.[0] ?? patterns?.[0]) : undefined));
 
-  const toolName = request.action || request.permission || request.source?.type || "permission";
+  const allEditPaths =
+    metaFiles && metaFiles.length > 0
+      ? Array.from(new Set([...(resources ?? []), ...(patterns ?? []), ...metaFilePaths]))
+      : [];
+  const effectivePatterns = patterns ?? (allEditPaths.length > 1 ? allEditPaths : undefined);
+
+  const rawArgs =
+    metaFiles && metaFiles.length > 0
+      ? { ...(targetPath ? { path: targetPath } : {}), files: metaFiles }
+      : hasMcpInput
+        ? resources || patterns
+          ? { resources: resources ?? patterns, input: request.metadata!.input }
+          : request.metadata!.input
+        : (resources ?? patterns ?? request.metadata);
 
   const sessionID = (request.sessionID as string) || "";
   const signal = context.signal ?? (request as { signal?: AbortSignal }).signal;
@@ -217,8 +255,8 @@ export function buildOpenCodeGateAction(
     toolName,
     commandString,
     targetPath,
-    ...(patterns ? { patterns } : {}),
-    rawArgs: resources ?? patterns ?? request.metadata,
+    ...(effectivePatterns ? { patterns: effectivePatterns } : {}),
+    rawArgs,
     workspaceRoot: (request.metadata?.directory as string) || context.workspaceRoot,
     userPrompt: context.userPrompt,
     subagentPrompt: context.subagentPrompt,
@@ -495,8 +533,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
             sessionID: action.sessionID,
             toolName: action.toolName,
             commandString:
-              action.commandString ??
-              JSON.stringify(request.resources || request.patterns || request.metadata || {}),
+              action.commandString ?? JSON.stringify(action.rawArgs ?? request.metadata ?? {}),
             userPrompt: action.userPrompt,
             reasoning:
               (typeof decision.metadata?.reasoning === "string"
