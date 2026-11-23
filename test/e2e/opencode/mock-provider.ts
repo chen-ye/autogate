@@ -1,5 +1,3 @@
-import { Server } from "bun";
-
 export interface MockResponse {
   text?: string;
   content?: Array<Record<string, unknown>>;
@@ -37,7 +35,7 @@ export class MockInferenceProvider {
   }
 
   get port(): number {
-    return this.server.port;
+    return this.server.port ?? 0;
   }
 
   get url(): string {

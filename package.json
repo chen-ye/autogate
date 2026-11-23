@@ -7,11 +7,14 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit && bunx tsc -p test/bench/tsconfig.json --noEmit",
     "lint": "bunx oxlint packages scripts test",
     "format": "bunx oxfmt --write packages scripts test",
     "format:check": "bunx oxfmt --check packages scripts test",
-    "eval:cascade": "bun run scripts/eval-cascade.ts"
+    "eval:cascade": "bun run scripts/eval-cascade.ts",
+    "bench:fetch": "bun run scripts/eval-cascade.ts --fetch-only --datasets shellrisk,nl2sh-redcode,authgate,tsbench,steerbench",
+    "bench:smoke": "bun run scripts/eval-cascade.ts --datasets synthetic,shellrisk,nl2sh-redcode,authgate,tsbench --limit 30 --seed 13 --check",
+    "bench:offline": "bun run scripts/eval-cascade.ts --datasets synthetic,shellrisk,nl2sh-redcode,authgate,tsbench,steerbench --seed 13"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.8.0",
@@ -22,6 +25,7 @@
     "@opencode/cli-linux-x64": "2.0.21",
     "@types/bun": "^1.4.2",
     "@types/node": "^22.20.2",
+    "hyparquet": "^1.33.1",
     "oxfmt": "^0.71.0",
     "oxlint": "^1.86.0",
     "typescript": "^7.0.2"
