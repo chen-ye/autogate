@@ -245,6 +245,8 @@ export class RealOpenCodeHarness {
       OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
       OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
       OPENCODE_DB: process.env.OPENCODE_DB,
+      AUTOGATE_EVAL_DB: process.env.AUTOGATE_EVAL_DB,
+      AUTOGATE_CONFIG: process.env.AUTOGATE_CONFIG,
       XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       XDG_DATA_HOME: process.env.XDG_DATA_HOME,
       XDG_STATE_HOME: process.env.XDG_STATE_HOME,
@@ -377,6 +379,8 @@ export class RealOpenCodeHarness {
     delete process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OPENCODE_DB;
+    delete process.env.AUTOGATE_EVAL_DB;
+    delete process.env.AUTOGATE_CONFIG;
 
     const binary = path.resolve(process.cwd(), "node_modules/.bin/opencode");
     const serverTimeout = options?.timeout ?? 20000;
@@ -395,6 +399,8 @@ export class RealOpenCodeHarness {
     };
     delete childEnv.OPENCODE_PASSWORD;
     delete childEnv.OPENCODE_CONFIG;
+    delete childEnv.AUTOGATE_EVAL_DB;
+    delete childEnv.AUTOGATE_CONFIG;
 
     const serverProc = spawn(binary, ["serve", "--hostname=127.0.0.1", `--port=${allocatedPort}`], {
       cwd: this.workspaceDir,

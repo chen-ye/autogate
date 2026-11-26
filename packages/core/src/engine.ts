@@ -622,6 +622,13 @@ function createDummyAdapter(): NotifierAdapter {
   };
 }
 
+export interface ClassifierEvaluationEvent {
+  action: GateAction;
+  result: ClassifierResult;
+  durationMs: number;
+  startTime: number;
+}
+
 export interface AutoGateEngineOptions {
   config: AutoGateConfig;
   adapter?: NotifierAdapter;
@@ -629,6 +636,7 @@ export interface AutoGateEngineOptions {
   workspaceRoot?: string;
   remoteReviewEnabled?: boolean;
   onStateChange?: () => void;
+  onClassifierResult?: (event: ClassifierEvaluationEvent) => void;
 }
 
 export class AutoGateCoreEngine {
@@ -660,6 +668,7 @@ export class AutoGateCoreEngine {
   private reviewFallbackMode: ReviewFallbackMode = "ntfy";
   private remoteReviewEnabled: boolean = true;
   private onStateChange?: () => void;
+  private onClassifierResult?: (event: ClassifierEvaluationEvent) => void;
 
   constructor(
     optionsOrConfig?: AutoGateEngineOptions | AutoGateConfig,
@@ -676,7 +685,8 @@ export class AutoGateCoreEngine {
         "evaluator" in optionsOrConfig ||
         "adapter" in optionsOrConfig ||
         "remoteReviewEnabled" in optionsOrConfig ||
-        "onStateChange" in optionsOrConfig)
+        "onStateChange" in optionsOrConfig ||
+        "onClassifierResult" in optionsOrConfig)
     ) {
       const opts = optionsOrConfig as AutoGateEngineOptions;
       this.config = opts.config;
@@ -686,6 +696,7 @@ export class AutoGateCoreEngine {
       this.workspaceRoot = opts.workspaceRoot ?? this.config.environment?.trustedPaths?.[0];
       remoteReviewOption = opts.remoteReviewEnabled;
       this.onStateChange = opts.onStateChange;
+      this.onClassifierResult = opts.onClassifierResult;
     } else {
       this.config = (optionsOrConfig as AutoGateConfig) || { autoMode: false };
       this.hasRemoteAdapter = Boolean(remoteAdapter);
@@ -1050,6 +1061,7 @@ export class AutoGateCoreEngine {
 
     // 5. Calls `this.evaluator.evaluate(action)`.
     const { token: evalToken, release: releaseEvalToken } = this.trackSessionToken(sid);
+    const evalStartTime = Date.now();
 
     let verdictResult: ClassifierResult;
     try {
@@ -1059,6 +1071,7 @@ export class AutoGateCoreEngine {
     } finally {
       releaseEvalToken();
     }
+    const evalDurationMs = Math.max(0, Date.now() - evalStartTime);
 
     if (evalToken.cancelled) {
       return {
@@ -1071,6 +1084,17 @@ export class AutoGateCoreEngine {
         verdict: "BLOCK",
         reason: "Action evaluation aborted by signal",
       };
+    }
+
+    try {
+      this.onClassifierResult?.({
+        action,
+        result: verdictResult,
+        durationMs: evalDurationMs,
+        startTime: evalStartTime,
+      });
+    } catch {
+      // Never allow evaluation persistence callbacks to disrupt gate evaluation
     }
 
     // 6. Handle verdict with compile-time exhaustiveness checking.

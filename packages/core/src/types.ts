@@ -1,5 +1,6 @@
 export type ClassifierVerdict = "ALLOW" | "BLOCK" | "UNSURE";
 export type ReviewFallbackMode = "native" | "ntfy";
+export type EvalSessionCleanupMode = "export-and-delete" | "archive";
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type UserAuthorization = "NONE" | "LOW" | "MEDIUM" | "HIGH";
@@ -139,11 +140,13 @@ export interface EnvironmentConfig {
 }
 export interface OmpHarnessConfig {
   reviewFallbackMode?: "native" | "ntfy";
-  evalLogFile?: string;
+  evalDbFile?: string;
 }
 
 export interface OpenCodeHarnessConfig {
   serverUrl?: string;
+  evalDbFile?: string;
+  evalSessionCleanup?: EvalSessionCleanupMode;
 }
 
 export interface PaseoHarnessConfig {
@@ -178,11 +181,17 @@ export interface AutoGateConfig {
    * @deprecated Kept for backward compatibility. Use config.omp?.reviewFallbackMode or harness-level settings instead.
    */
   reviewFallbackMode?: ReviewFallbackMode;
-  evalLogFile?: string;
+  evalDbFile?: string;
+  evalSessionCleanup?: EvalSessionCleanupMode;
   systemOne?: SystemOneConfig;
   omp?: OmpHarnessConfig;
   opencode?: OpenCodeHarnessConfig;
   paseo?: PaseoHarnessConfig;
+}
+
+export interface ResolvedAutoGateConfig extends AutoGateConfig {
+  evalDbFile: string;
+  evalSessionCleanup: EvalSessionCleanupMode;
 }
 
 export interface BaseAdapter {

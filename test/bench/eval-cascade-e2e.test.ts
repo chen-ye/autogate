@@ -378,6 +378,7 @@ describe("eval-cascade CLI & end-to-end OpenCode v2 runner", () => {
     try {
       expect(fs.statSync(rootDir).mode & 0o777).toBe(0o700);
       expect(fs.statSync(isolatedHome).mode & 0o777).toBe(0o700);
+      expect(runner.getEvalDbFile()).toBe(path.join(isolatedHome, "evals.db"));
       expect(fs.statSync(opencodeJsonPath).mode & 0o777).toBe(0o600);
       expect(fs.statSync(authJsonPath).mode & 0o777).toBe(0o600);
       expect(fs.existsSync(isolatedDbPath)).toBe(true);

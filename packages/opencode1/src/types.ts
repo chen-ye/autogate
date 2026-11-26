@@ -78,6 +78,7 @@ export interface OpenCodeV1ClassifyInput extends ClassifyInput {
   client?: OpenCodeV1SessionClient;
   config?: AutoGateConfig;
   signal?: AbortSignal;
+  getEvalStore?: () => import("@autogate/core").AutoGateEvalStore | undefined;
 }
 
 export interface OpenCodeV1Event {

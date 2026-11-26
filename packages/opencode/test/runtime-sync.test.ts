@@ -32,7 +32,7 @@ describe("@autogate/opencode runtime sync", () => {
   let configFilePath: string;
   let controlFilePath: string;
   let runtimeDir: string;
-  let evalLogFile: string;
+  let evalDbFile: string;
   let workspaceDir: string;
 
   beforeEach(() => {
@@ -42,7 +42,7 @@ describe("@autogate/opencode runtime sync", () => {
     configFilePath = path.join(autogateDir, "config.json");
     controlFilePath = path.join(autogateDir, "control.json");
     runtimeDir = path.join(autogateDir, "runtime");
-    evalLogFile = path.join(tempDir, "evals.jsonl");
+    evalDbFile = path.join(tempDir, "evals.db");
     workspaceDir = path.join(tempDir, "workspace");
 
     fs.mkdirSync(autogateDir, { recursive: true });
@@ -55,6 +55,8 @@ describe("@autogate/opencode runtime sync", () => {
     delete process.env.NTFY_TOPIC;
     delete process.env.AUTOGATE_NTFY_TOPIC;
     delete process.env.OPENCODE_NTFY_TOPIC;
+    delete process.env.AUTOGATE_EVAL_DB;
+    delete process.env.AUTOGATE_EVAL_SESSION_CLEANUP;
     process.env.XDG_CONFIG_HOME = xdgConfigHome;
   });
 
@@ -76,7 +78,7 @@ describe("@autogate/opencode runtime sync", () => {
         ntfyServer: "http://127.0.0.1:59999",
         ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
       },
     );
 
@@ -102,7 +104,9 @@ describe("@autogate/opencode runtime sync", () => {
     expect(state.remoteReviewEnabled).toBe(true);
     expect(state.consecutiveBlocks).toBe(0);
     expect(state.consecutiveBlockThreshold).toBe(3);
-    expect(state.evalLogFile).toBe(evalLogFile);
+    expect(state.evalDbFile).toBe(evalDbFile);
+    expect(state.evalSessionCleanup).toBe("export-and-delete");
+    expect("evalLogFile" in state).toBe(false);
     expect(state.inFlight).toEqual([]);
     expect(typeof state.startedAt).toBe("number");
     expect(typeof state.updatedAt).toBe("number");
@@ -134,7 +138,7 @@ describe("@autogate/opencode runtime sync", () => {
         ntfyServer: "http://127.0.0.1:59999",
         ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
       },
     );
 
@@ -226,7 +230,7 @@ describe("@autogate/opencode runtime sync", () => {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
         consecutiveBlockThreshold: 2,
       },
     );
@@ -299,7 +303,7 @@ describe("@autogate/opencode runtime sync", () => {
         ntfyServer: "http://127.0.0.1:59999",
         ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
       },
     );
 
@@ -350,7 +354,7 @@ describe("@autogate/opencode runtime sync", () => {
         ntfyServer: "http://127.0.0.1:59999",
         ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
         reviewFallbackMode: "ntfy",
       },
     );
@@ -421,7 +425,7 @@ describe("@autogate/opencode runtime sync", () => {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
         consecutiveBlockThreshold: 1,
       },
     );
@@ -470,7 +474,7 @@ describe("@autogate/opencode runtime sync", () => {
         ntfyServer: "http://127.0.0.1:59999",
         ntfyTopic: "test-runtime-sync-topic",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
       },
     );
     await adapter2.start();
@@ -498,7 +502,7 @@ describe("@autogate/opencode runtime sync", () => {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
         notifyOnVerdict: false,
-        evalLogFile,
+        evalDbFile,
       },
     );
 
@@ -514,6 +518,63 @@ describe("@autogate/opencode runtime sync", () => {
       const state = readRuntimeState(adapter.getRuntimeSync().getStateFilePath());
       expect(state.remoteReviewEnabled).toBe(false);
       expect(state.reviewFallbackMode).toBe("native");
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it("8. hot-reloads evalSessionCleanup from config.json and respects AUTOGATE_EVAL_SESSION_CLEANUP env override", async () => {
+    fs.writeFileSync(
+      configFilePath,
+      JSON.stringify({
+        autoMode: true,
+        reviewFallbackMode: "native",
+        evalSessionCleanup: "export-and-delete",
+      }),
+      "utf8",
+    );
+
+    const mockEvaluator = new MockEvaluator();
+    const adapter = new OpenCodeHarnessAdapter(
+      { directory: workspaceDir },
+      {
+        evaluator: mockEvaluator,
+        ntfyServer: "http://127.0.0.1:59999",
+        notifyOnVerdict: false,
+        evalDbFile,
+      },
+    );
+
+    await adapter.start();
+    try {
+      const statePath = adapter.getRuntimeSync().getStateFilePath();
+      expect(readRuntimeState(statePath).evalSessionCleanup).toBe("export-and-delete");
+
+      fs.writeFileSync(
+        configFilePath,
+        JSON.stringify({
+          autoMode: true,
+          reviewFallbackMode: "native",
+          evalSessionCleanup: "archive",
+        }),
+        "utf8",
+      );
+      adapter.getRuntimeSync().syncControlAndConfig();
+      expect(readRuntimeState(statePath).evalSessionCleanup).toBe("archive");
+
+      process.env.AUTOGATE_EVAL_SESSION_CLEANUP = "export-and-delete";
+      fs.writeFileSync(
+        configFilePath,
+        JSON.stringify({
+          autoMode: true,
+          reviewFallbackMode: "native",
+          evalSessionCleanup: "archive",
+          consecutiveBlockThreshold: 4,
+        }),
+        "utf8",
+      );
+      adapter.getRuntimeSync().syncControlAndConfig();
+      expect(readRuntimeState(statePath).evalSessionCleanup).toBe("export-and-delete");
     } finally {
       await adapter.dispose();
     }

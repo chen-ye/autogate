@@ -1,12 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
+  AutoGateEvalStore,
   isRecord,
   loadConfig,
   type ClassifierResult,
   type GateAction,
+  type ResolvedAutoGateConfig,
 } from "../../../packages/core/src/index.js";
 import {
   definePlugin,
@@ -24,7 +25,9 @@ interface BenchEvalServerState {
   benchRoot?: string;
   readyFile?: string;
   token: string;
-  evalLogFile?: string;
+  evalDbFile?: string;
+  evalStore?: AutoGateEvalStore;
+  baseConfig?: ResolvedAutoGateConfig;
   classifierModel?: string;
   classifierTimeout?: number;
   serverUrl?: string;
@@ -98,9 +101,10 @@ export default definePlugin({
       readNonEmptyString(process.env.AUTOGATE_BENCH_READY_FILE);
     const token =
       readNonEmptyString(opts?.token) ?? readNonEmptyString(process.env.AUTOGATE_BENCH_TOKEN) ?? "";
-    const evalLogFile =
-      readNonEmptyString(opts?.evalLogFile) ??
-      readNonEmptyString(process.env.AUTOGATE_BENCH_EVAL_LOG);
+    const evalDbFile =
+      readNonEmptyString(opts?.evalDbFile) ??
+      readNonEmptyString(process.env.AUTOGATE_BENCH_EVAL_DB) ??
+      readNonEmptyString(process.env.AUTOGATE_EVAL_DB);
     const classifierModel = readNonEmptyString(opts?.classifierModel);
     const classifierTimeout = readPositiveNumber(opts?.classifierTimeout);
     const serverUrl =
@@ -126,8 +130,8 @@ export default definePlugin({
       if (!existing.token && token) {
         existing.token = token;
       }
-      if (!existing.evalLogFile && evalLogFile) {
-        existing.evalLogFile = evalLogFile;
+      if (!existing.evalDbFile && evalDbFile) {
+        existing.evalDbFile = evalDbFile;
       }
       if (!existing.classifierModel && classifierModel) {
         existing.classifierModel = classifierModel;
@@ -146,14 +150,32 @@ export default definePlugin({
         existing.refcount = Math.max(0, existing.refcount - 1);
         if (existing.refcount === 0) {
           try {
+            existing.evalStore?.close();
+          } catch {
+            // Ignore cleanup errors on close
+          }
+          existing.evalStore = undefined;
+          try {
             existing.server.stop(true);
-          } catch {}
+          } catch {
+            // Ignore stop errors
+          }
           if (g.__autogate_bench_eval_server__ === existing) {
             delete g.__autogate_bench_eval_server__;
           }
         }
       };
     }
+
+    const baseConfig = loadConfig(
+      {
+        evalDbFile: evalDbFile ?? ":memory:",
+        ...(serverUrl ? { serverUrl } : {}),
+        systemOne: { enabled: false },
+      },
+      "opencode",
+    );
+    const evalStore = new AutoGateEvalStore(evalDbFile ?? ":memory:");
 
     const state: BenchEvalServerState = {
       server: null as unknown as ReturnType<typeof Bun.serve>,
@@ -163,7 +185,9 @@ export default definePlugin({
       benchRoot: normalizedBenchRoot ?? normalizedLocation,
       readyFile,
       token,
-      evalLogFile,
+      evalDbFile,
+      evalStore,
+      baseConfig,
       classifierModel,
       classifierTimeout,
       serverUrl,
@@ -222,20 +246,30 @@ export default definePlugin({
         const modelOverride = readNonEmptyString(body.classifierModel) ?? state.classifierModel;
         const timeoutOverride =
           readPositiveNumber(body.classifierTimeout) ?? state.classifierTimeout;
-        const fallbackEvalLog = path.join(os.tmpdir(), "autogate-bench-eval-plugin", "evals.jsonl");
-
-        const evalConfig = loadConfig({
-          evalLogFile: state.evalLogFile ?? fallbackEvalLog,
+        const baseCfg =
+          state.baseConfig ??
+          (state.baseConfig = loadConfig(
+            {
+              evalDbFile: state.evalDbFile ?? ":memory:",
+              ...(state.serverUrl ? { serverUrl: state.serverUrl } : {}),
+              systemOne: { enabled: false },
+            },
+            "opencode",
+          ));
+        const evalConfig: ResolvedAutoGateConfig = {
+          ...baseCfg,
           ...(modelOverride ? { classifierModel: modelOverride } : {}),
           ...(timeoutOverride !== undefined ? { classifierTimeout: timeoutOverride } : {}),
           ...(state.serverUrl ? { serverUrl: state.serverUrl } : {}),
-          systemOne: {
-            enabled: false,
-          },
-        });
+        };
+        if (!state.evalStore || !state.evalStore.isOpen()) {
+          state.evalStore = new AutoGateEvalStore(state.evalDbFile ?? ":memory:");
+        }
 
         const activeClient = state.client;
         const createdSessionIds = new Set<string>();
+        const removedSessionIds = new Set<string>();
+        const origRemove = activeClient.session?.remove;
         const trackedClient: OpenCodeSessionClient = {
           ...activeClient,
           session: {
@@ -248,10 +282,25 @@ export default definePlugin({
               }
               return created;
             },
+            ...(typeof origRemove === "function"
+              ? {
+                  remove: async (removeOpts) => {
+                    if (removeOpts?.sessionID) {
+                      removedSessionIds.add(removeOpts.sessionID);
+                    }
+                    return await origRemove(removeOpts);
+                  },
+                }
+              : {}),
           },
         };
 
-        const evaluator = new OpenCodeSessionEvaluator(trackedClient, evalConfig);
+        const evaluator = new OpenCodeSessionEvaluator(trackedClient, evalConfig, {
+          serverUrl: state.serverUrl,
+          evalDbFile: evalConfig.evalDbFile,
+          evalStore: state.evalStore,
+          skipEvaluationRecord: true,
+        });
         const t0 = performance.now();
         let result: ClassifierResult;
         try {
@@ -261,11 +310,11 @@ export default definePlugin({
           return Response.json({ error: message }, { status: 500 });
         } finally {
           req.signal.removeEventListener("abort", onReqAbort);
-          const removeFn = activeClient.session?.remove;
-          if (typeof removeFn === "function" && createdSessionIds.size > 0) {
+          if (typeof origRemove === "function" && createdSessionIds.size > 0) {
             for (const sessionID of createdSessionIds) {
+              if (removedSessionIds.has(sessionID)) continue;
               try {
-                await removeFn({ sessionID });
+                await origRemove({ sessionID });
               } catch {
                 // Best-effort cleanup; ignore if session was already removed or still busy
               }
@@ -311,8 +360,16 @@ export default definePlugin({
       state.refcount = Math.max(0, state.refcount - 1);
       if (state.refcount === 0) {
         try {
+          state.evalStore?.close();
+        } catch {
+          // Ignore cleanup errors on close
+        }
+        state.evalStore = undefined;
+        try {
           state.server.stop(true);
-        } catch {}
+        } catch {
+          // Ignore stop errors
+        }
         if (g.__autogate_bench_eval_server__ === state) {
           delete g.__autogate_bench_eval_server__;
         }

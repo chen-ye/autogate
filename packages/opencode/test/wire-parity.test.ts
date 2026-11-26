@@ -527,7 +527,7 @@ describe("@autogate/opencode wire parity with OpenCode 2.0.21", () => {
       evaluator: mockEvaluator,
       ntfyServer: "http://127.0.0.1:59999",
       notifyOnVerdict: false,
-      evalLogFile: path.join(tempDir, "evals.jsonl"),
+      evalDbFile: path.join(tempDir, "evals.db"),
     };
     const expectedEnv = loadConfig(adapterOpts).environment;
 

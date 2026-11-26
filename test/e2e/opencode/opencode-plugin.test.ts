@@ -10,7 +10,11 @@ import {
   isEventForWorkspace,
 } from "@autogate/opencode";
 import { AutoGatePlugin } from "@autogate/opencode1";
-import { sharedRecentlyRejected, sharedExplicitEscalations } from "@autogate/core";
+import {
+  AutoGateEvalStore,
+  sharedRecentlyRejected,
+  sharedExplicitEscalations,
+} from "@autogate/core";
 
 describe("AutoGate OpenCode Plugin Integration", () => {
   afterEach(() => {
@@ -192,9 +196,11 @@ describe("AutoGate OpenCode Plugin Integration", () => {
       await hooks.dispose();
     }
   });
-  it("JSONL audit logging and schema-enforced evaluation in classifier", async () => {
-    const tmpLogFile = path.join(os.tmpdir(), `autogate-evals-${Date.now()}.jsonl`);
+  it("SQLite evals.db audit logging and schema-enforced evaluation in classifier", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-evals-e2e-"));
+    const tmpDbFile = path.join(tmpDir, "evals.db");
     let promptCalled = false;
+    const replies: Array<{ requestID: string; decision: string }> = [];
     const { client } = createMockOpenCodeClient({
       classifierVerdict: "ALLOW",
       classifierReason: "Checked patterns, confirmed safe read",
@@ -204,44 +210,82 @@ describe("AutoGate OpenCode Plugin Integration", () => {
       promptCalled = true;
       return origPrompt(args);
     };
+    const origGet = client.session.get;
+    (client.session as any).context = async () => [{ type: "user", text: "Read package.json" }];
+    client.session.get = async (args: any) => origGet(args);
 
-    const pluginContext = createMockPluginContext(client, "/workspace");
-    const hooks = await AutoGatePlugin(pluginContext, {
-      ntfyServer: "https://ntfy.sh",
-      ntfyTopic: "test-topic",
-      evalLogFile: tmpLogFile,
+    let done!: () => void;
+    const repliedPromise = new Promise<void>((resolve) => {
+      done = resolve;
     });
 
-    // Trigger tool check via hooks.tool or direct classifyRequest test
-    const { classifyRequest } = await import("@autogate/opencode/evaluator");
-    const result = await classifyRequest({
-      client,
-      userPrompt: "Read package.json",
-      actionName: "read",
-      actionArgs: { file: "package.json" },
-      workspaceRoot: "/workspace",
-      config: { evalLogFile: tmpLogFile } as any,
+    const dispose = await OpenCodePluginExport.setup({
+      directory: "/workspace",
+      client: client as any,
+      permission: {
+        reply: async (args: any) => {
+          replies.push({ requestID: args.requestID, decision: args.decision });
+          done();
+        },
+      },
+      tool: { transform: () => {} },
+      event: {
+        subscribe: () =>
+          (async function* () {
+            yield {
+              type: "permission.asked",
+              location: { directory: "/workspace" },
+              properties: {
+                id: "perm-v2-evals-db",
+                sessionID: "ses-v2-coding",
+                permission: "read",
+                patterns: ["package.json"],
+                metadata: { filepath: "package.json", directory: "/workspace" },
+              },
+            };
+          })(),
+      },
+      options: {
+        autoMode: true,
+        reviewFallbackMode: "native",
+        ntfyServer: "https://ntfy.sh",
+        ntfyTopic: "test-topic",
+        evalDbFile: tmpDbFile,
+      },
     });
-
-    expect(promptCalled).toBe(true);
-    expect(result.verdict).toBe("ALLOW");
-
-    // Verify JSONL log file written
-    expect(fs.existsSync(tmpLogFile)).toBe(true);
-    const logLines = fs.readFileSync(tmpLogFile, "utf8").trim().split("\n").filter(Boolean);
-    expect(logLines.length).toBeGreaterThan(0);
-    const lastEntry = JSON.parse(logLines[logLines.length - 1]);
-    expect(lastEntry.verdict).toBe("ALLOW");
-    expect(lastEntry.toolName).toBe("read");
-    expect(lastEntry.reasoning).toContain("Checked patterns");
-    expect(typeof lastEntry.durationMs).toBe("number");
 
     try {
-      fs.unlinkSync(tmpLogFile);
-    } catch {}
+      await repliedPromise;
+      expect(promptCalled).toBe(true);
+      expect(replies).toEqual([{ requestID: "perm-v2-evals-db", decision: "once" }]);
 
-    if (hooks.dispose) {
-      await hooks.dispose();
+      if (typeof dispose === "function") {
+        await dispose();
+      }
+
+      // Verify SQLite evals.db written with evaluation and S2 session trace
+      expect(fs.existsSync(tmpDbFile)).toBe(true);
+      const evalStore = new AutoGateEvalStore(tmpDbFile, { readonly: true });
+      try {
+        const records = evalStore.queryEvaluations();
+        expect(records.length).toBeGreaterThan(0);
+        const lastEntry = records[0]!;
+        expect(lastEntry.verdict).toBe("ALLOW");
+        expect(lastEntry.toolName).toBe("read");
+        expect(lastEntry.reasoning).toContain("Checked patterns");
+        expect(typeof lastEntry.durationMs).toBe("number");
+        expect(lastEntry.hasS2Session).toBe(true);
+        expect(lastEntry.s2SessionId).toBeTruthy();
+
+        const s2Session = evalStore.getS2Session(lastEntry.s2SessionId!);
+        expect(s2Session).not.toBeNull();
+      } finally {
+        evalStore.close();
+      }
+    } finally {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {}
     }
   });
 
@@ -345,7 +389,9 @@ describe("AutoGate OpenCode Plugin Integration", () => {
           })();
         },
       },
-      options: {},
+      options: {
+        evalDbFile: ":memory:",
+      },
     };
 
     const dispose = await OpenCodePluginExport.setup(mockCtx);

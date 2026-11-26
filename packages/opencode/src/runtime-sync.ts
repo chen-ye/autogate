@@ -7,8 +7,10 @@ import {
   loadConfig,
   resolveConfigFilePath,
   resolveControlFilePath,
+  resolveEvalDbFile,
   resolveRuntimeDir,
   type AutoGateConfig,
+  type EvalSessionCleanupMode,
 } from "@autogate/core";
 
 export interface InFlightEvaluation {
@@ -47,7 +49,8 @@ export interface OpenCodeRuntimeState {
   classifierModel: string;
   systemOneEnabled: boolean;
   systemOneMode?: string;
-  evalLogFile: string;
+  evalDbFile: string;
+  evalSessionCleanup: EvalSessionCleanupMode;
   inFlight: InFlightEvaluation[];
   lastVerdict?: RuntimeVerdictSummary;
 }
@@ -255,7 +258,8 @@ export class OpenCodeRuntimeSync {
       ...(this.config.systemOne?.executionMode
         ? { systemOneMode: this.config.systemOne.executionMode }
         : {}),
-      evalLogFile: this.config.evalLogFile ?? "",
+      evalDbFile: this.config.evalDbFile ?? resolveEvalDbFile(this.options, "opencode"),
+      evalSessionCleanup: this.config.evalSessionCleanup ?? "export-and-delete",
       inFlight: Array.from(this.inFlight.values(), (item) => ({ ...item })),
       ...(this.lastVerdict ? { lastVerdict: { ...this.lastVerdict } } : {}),
     };
@@ -356,7 +360,7 @@ export class OpenCodeRuntimeSync {
   }
 
   private applyConfigFileChanges(): boolean {
-    const reloaded = loadConfig(this.options);
+    const reloaded = loadConfig(this.options, "opencode");
     let updated = false;
 
     if (
@@ -377,6 +381,16 @@ export class OpenCodeRuntimeSync {
     ) {
       this.engine.setFallbackMode(nextFallback);
       this.config.reviewFallbackMode = nextFallback;
+      updated = true;
+    }
+
+    if (this.config.evalDbFile !== reloaded.evalDbFile) {
+      this.config.evalDbFile = reloaded.evalDbFile;
+      updated = true;
+    }
+
+    if (this.config.evalSessionCleanup !== reloaded.evalSessionCleanup) {
+      this.config.evalSessionCleanup = reloaded.evalSessionCleanup;
       updated = true;
     }
 

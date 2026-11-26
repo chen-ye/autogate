@@ -38,6 +38,8 @@ const INHERITED_ENV_STRIP_KEYS = [
   "NTFY_TOKEN",
   "AUTOGATE_NTFY_TOKEN",
   "AUTOGATE_EVAL_LOG",
+  "AUTOGATE_EVAL_DB",
+  "AUTOGATE_EVAL_SESSION_CLEANUP",
   "CLASSIFIER_MODEL",
   "CLASSIFIER_TIMEOUT",
   "AUTOGATE_SYSTEM_ONE_ENABLED",
@@ -50,6 +52,7 @@ const INHERITED_ENV_STRIP_KEYS = [
   "AUTOGATE_BENCH_READY_FILE",
   "AUTOGATE_BENCH_TOKEN",
   "AUTOGATE_BENCH_EVAL_LOG",
+  "AUTOGATE_BENCH_EVAL_DB",
 ] as const;
 
 export interface OpenCodeS2RunnerOptions {
@@ -383,7 +386,7 @@ export class OpenCodeS2Runner implements GateEvaluator {
   private readonly isolatedState: string;
   private readonly isolatedCache: string;
   private readonly isolatedDb: string;
-  private readonly isolatedEvalLog: string;
+  private readonly isolatedEvalDb: string;
   private readonly isolatedWorkspace: string;
   private readonly readyFile: string;
   private readonly sandboxDir: string;
@@ -412,7 +415,7 @@ export class OpenCodeS2Runner implements GateEvaluator {
     this.isolatedState = path.join(this.isolatedHome, ".local", "state", "opencode");
     this.isolatedCache = path.join(this.isolatedHome, ".cache");
     this.isolatedDb = path.join(this.isolatedData, "opencode.db");
-    this.isolatedEvalLog = path.join(this.isolatedHome, "evals.jsonl");
+    this.isolatedEvalDb = path.join(this.isolatedHome, "evals.db");
     this.isolatedWorkspace = path.join(this.rootDir, "workspace");
     this.readyFile = path.join(this.rootDir, "plugin-ready.json");
     this.sandboxDir = DEDICATED_AUTO_GATE_DIR;
@@ -448,8 +451,8 @@ export class OpenCodeS2Runner implements GateEvaluator {
     return this.isolatedHome;
   }
 
-  public getEvalLogFile(): string {
-    return this.isolatedEvalLog;
+  public getEvalDbFile(): string {
+    return this.isolatedEvalDb;
   }
 
   public getPluginBaseUrl(): string {
@@ -721,7 +724,7 @@ export class OpenCodeS2Runner implements GateEvaluator {
       ...(this.options.classifierTimeoutMs !== undefined
         ? { classifierTimeout: this.options.classifierTimeoutMs }
         : {}),
-      evalLogFile: this.isolatedEvalLog,
+      evalDbFile: this.isolatedEvalDb,
       autoMode: true,
       notifyOnVerdict: false,
       reviewFallbackMode: "native",
@@ -732,7 +735,7 @@ export class OpenCodeS2Runner implements GateEvaluator {
       benchRoot: this.isolatedWorkspace,
       readyFile: this.readyFile,
       token: this.benchToken,
-      evalLogFile: this.isolatedEvalLog,
+      evalDbFile: this.isolatedEvalDb,
       serverUrl,
       ...(this.effectiveClassifierModel ? { classifierModel: this.effectiveClassifierModel } : {}),
       ...(this.options.classifierTimeoutMs !== undefined
@@ -820,7 +823,8 @@ export class OpenCodeS2Runner implements GateEvaluator {
     childEnv.AUTOGATE_BENCH_ROOT = this.isolatedWorkspace;
     childEnv.AUTOGATE_BENCH_READY_FILE = this.readyFile;
     childEnv.AUTOGATE_BENCH_TOKEN = this.benchToken;
-    childEnv.AUTOGATE_BENCH_EVAL_LOG = this.isolatedEvalLog;
+    childEnv.AUTOGATE_BENCH_EVAL_DB = this.isolatedEvalDb;
+    childEnv.AUTOGATE_EVAL_DB = this.isolatedEvalDb;
 
     return childEnv;
   }

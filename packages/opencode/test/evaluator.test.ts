@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { loadConfig, type AutoGateConfig } from "@autogate/core";
+import {
+  AutoGateEvalStore,
+  PASSIVE_EVALUATOR_DIRECTIVE,
+  loadConfig,
+  type AutoGateConfig,
+} from "@autogate/core";
 import {
   classifyRequest,
   archiveEvaluationSession,
@@ -18,6 +23,11 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-eval-test-"));
+    process.env.XDG_CONFIG_HOME = path.join(tempDir, "xdg");
+    fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, "autogate"), { recursive: true });
+    delete process.env.AUTOGATE_CONFIG;
+    delete process.env.AUTOGATE_EVAL_DB;
+    delete process.env.AUTOGATE_EVAL_SESSION_CLEANUP;
   });
 
   afterEach(() => {
@@ -431,6 +441,389 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
       expect(res.verdict).toBe("ALLOW");
       expect(capturedPrompts[0]).toContain("Target Script Inspected");
       expect(capturedPrompts[0]).toContain("print('v2_deploy_ok')");
+    });
+  });
+
+  describe("S2 archiving, evals.db persistence, and cleanup modes", () => {
+    it("exports S2 session with zstd compression, prompt_templates dedup, metrics metadata, and deletes via session.remove", async () => {
+      const evalDbFile = path.join(tempDir, "evals.db");
+      const removedSessions: string[] = [];
+      const updatedSessions: Array<{ sessionID: string; title?: string; archived?: boolean }> = [];
+      let seq = 0;
+
+      const mockClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => {
+            seq++;
+            return { data: { id: `ses_s2_full_${seq}` } };
+          },
+          get: async ({ sessionID }: { sessionID: string }) => ({
+            data: {
+              id: sessionID,
+              agent: "auto-gate-eval",
+              model: { providerID: "google", id: "gemini-3.5-flash-lite" },
+              tokens: {
+                input: 420,
+                output: 55,
+                reasoning: 25,
+                cache: { read: 110, write: 12 },
+              },
+              cost: 0.00041,
+              outcome: "succeeded",
+              location: { directory: "/tmp/opencode-auto-gate/sandbox" },
+              time: { created: 1700000000100, updated: 1700000000600 },
+            },
+          }),
+          context: async ({ sessionID }: { sessionID: string }) => [
+            {
+              type: "user",
+              text: `Evaluate command for ${sessionID}`,
+            },
+            {
+              type: "assistant",
+              agent: "auto-gate-eval",
+              model: { providerID: "google", id: "gemini-3.5-flash-lite" },
+              content: [
+                { type: "reasoning", text: "Command lists local files safely." },
+                {
+                  type: "tool",
+                  id: "tc_1",
+                  name: "classify_result",
+                  state: {
+                    status: "completed",
+                    input: {
+                      verdict: "ALLOW",
+                      risk_level: "LOW",
+                      user_authorization: "HIGH",
+                      reason: "Safe read-only workspace check",
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+          prompt: async (opts: { sessionID: string; text: string }) => {
+            recordEvaluationVerdict(opts.sessionID, {
+              verdict: "ALLOW",
+              risk_level: "LOW",
+              user_authorization: "HIGH",
+              reason: "Safe read-only workspace check",
+            });
+            return { data: { parts: [] } };
+          },
+          remove: async ({ sessionID }: { sessionID: string }) => {
+            removedSessions.push(sessionID);
+          },
+          update: async (opts: { sessionID: string; title?: string; archived?: boolean }) => {
+            updatedSessions.push(opts);
+          },
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      const config = loadConfig({
+        evalDbFile,
+        evalSessionCleanup: "export-and-delete",
+        classifierModel: "google/gemini-3.5-flash-lite",
+      });
+
+      const res1 = await classifyRequest({
+        client: mockClient,
+        config,
+        evalDbFile,
+        targetSessionId: "ses_coding_1",
+        actionId: "act_1",
+        toolName: "bash",
+        commandString: "git status",
+        workspaceRoot: tempDir,
+        userPrompt: "Check git status",
+      });
+
+      const res2 = await classifyRequest({
+        client: mockClient,
+        config,
+        evalDbFile,
+        targetSessionId: "ses_coding_1",
+        actionId: "act_2",
+        toolName: "bash",
+        commandString: "git diff",
+        workspaceRoot: tempDir,
+        userPrompt: "Check git diff",
+      });
+
+      expect(res1.verdict).toBe("ALLOW");
+      expect(res1.metadata?.s2SessionId).toBe("ses_s2_full_1");
+      expect(res1.metadata?.modelId).toBe("gemini-3.5-flash-lite");
+      expect(res1.metadata?.modelProvider).toBe("google");
+      expect(res1.metadata?.promptTokens).toBe(420);
+      expect(res1.metadata?.outputTokens).toBe(55);
+      expect(res1.metadata?.reasoningTokens).toBe(25);
+      expect(res1.metadata?.cost).toBeCloseTo(0.00041, 8);
+      expect(res1.metadata?.thinking).toBe("Command lists local files safely.");
+
+      expect(removedSessions).toEqual(["ses_s2_full_1", "ses_s2_full_2"]);
+      expect(updatedSessions).toEqual([]);
+      expect(fs.existsSync(path.join(tempDir, "evals.jsonl"))).toBe(false);
+
+      const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+      try {
+        const stats = store.getStats();
+        expect(stats.total).toBe(2);
+        expect(stats.s2SessionCount).toBe(2);
+        expect(stats.promptTemplateCount).toBe(1);
+
+        const detail = store.getEvaluationDetail("ses_s2_full_1");
+        expect(detail).not.toBeNull();
+        expect(detail?.evaluation.sessionId).toBe("ses_coding_1");
+        expect(detail?.evaluation.actionId).toBe("act_1");
+        expect(detail?.evaluation.s2SessionId).toBe("ses_s2_full_1");
+        expect(detail?.evaluation.modelId).toBe("gemini-3.5-flash-lite");
+        expect(detail?.evaluation.modelProvider).toBe("google");
+        expect(detail?.evaluation.promptTokens).toBe(420);
+        expect(detail?.evaluation.outputTokens).toBe(55);
+        expect(detail?.evaluation.reasoningTokens).toBe(25);
+        expect(detail?.evaluation.thinking).toBe("Command lists local files safely.");
+        expect(detail?.s2Session?.status).toBe("completed");
+        expect(detail?.s2Session?.cacheReadTokens).toBe(110);
+        expect(detail?.s2Session?.cacheWriteTokens).toBe(12);
+        expect(detail?.s2Session?.messageCount).toBe(2);
+        expect(detail?.promptTemplate?.systemPrompt).toContain(PASSIVE_EVALUATOR_DIRECTIVE);
+
+        const payload = detail?.s2Session?.payload as Record<string, unknown>;
+        expect(typeof payload.capturedUserPrompt).toBe("string");
+        expect(payload.capturedUserPrompt).toContain("git status");
+        expect(Array.isArray(payload.messages)).toBe(true);
+      } finally {
+        store.close();
+      }
+    });
+
+    it("archives partial, aborted, timeout, and error S2 sessions and bounds hung session.get/context fetches", async () => {
+      const evalDbFile = path.join(tempDir, "partial-evals.db");
+
+      // 1. Aborted mid-flight with hung session.get / session.context (tests bounded 1500ms capture)
+      const abortController = new AbortController();
+      const abortClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_s2_hung_abort" } }),
+          get: () => new Promise(() => {}),
+          context: () => new Promise(() => {}),
+          interrupt: async () => ({}),
+          prompt: async () => {
+            await new Promise((r) => setTimeout(r, 80));
+            return { data: { reasoning: "Partial in-memory thought", parts: [] } };
+          },
+          remove: async () => {},
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      setTimeout(() => abortController.abort("system1-won-race"), 10);
+      const t0 = Date.now();
+      const abortRes = await classifyRequest({
+        client: abortClient,
+        evalDbFile,
+        targetSessionId: "ses_target_abort",
+        actionId: "act_abort",
+        toolName: "bash",
+        commandString: "ls -la",
+        userPrompt: "List workspace",
+        workspaceRoot: tempDir,
+        signal: abortController.signal,
+      });
+      const abortElapsed = Date.now() - t0;
+      expect(abortRes.verdict).toBe("UNSURE");
+      expect(abortRes.metadata?.s2SessionId).toBe("ses_s2_hung_abort");
+      expect(abortElapsed).toBeLessThan(3000);
+
+      // 2. Timeout
+      const timeoutClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_s2_timeout" } }),
+          interrupt: async () => ({}),
+          prompt: async () => {
+            await new Promise((r) => setTimeout(r, 200));
+            return { data: { parts: [] } };
+          },
+          remove: async () => {},
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      const timeoutRes = await classifyRequest({
+        client: timeoutClient,
+        evalDbFile,
+        targetSessionId: "ses_target_timeout",
+        actionId: "act_timeout",
+        toolName: "bash",
+        commandString: "sleep 10",
+        workspaceRoot: tempDir,
+        config: loadConfig({ evalDbFile, classifierTimeout: 30 }),
+      });
+      expect(timeoutRes.verdict).toBe("UNSURE");
+      expect(timeoutRes.reason).toContain("timed out");
+      expect(timeoutRes.metadata?.s2SessionId).toBe("ses_s2_timeout");
+
+      // 3. Retries exhausted -> partial
+      const partialClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_s2_partial" } }),
+          prompt: async () => ({
+            data: {
+              reasoning: "Did not call tool",
+              parts: [{ type: "text", text: "I am unsure what to do." }],
+            },
+          }),
+          remove: async () => {},
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      const partialRes = await classifyRequest({
+        client: partialClient,
+        evalDbFile,
+        targetSessionId: "ses_target_partial",
+        actionId: "act_partial",
+        toolName: "bash",
+        commandString: "echo hi",
+        workspaceRoot: tempDir,
+      });
+      expect(partialRes.verdict).toBe("UNSURE");
+      expect(partialRes.metadata?.thinking).toBe("Did not call tool");
+
+      // 4. Prompt throws error -> error
+      const errorClient = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_s2_error" } }),
+          prompt: async () => {
+            throw new Error("Upstream provider 503");
+          },
+          remove: async () => {},
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      const errorRes = await classifyRequest({
+        client: errorClient,
+        evalDbFile,
+        targetSessionId: "ses_target_error",
+        actionId: "act_error",
+        toolName: "bash",
+        commandString: "echo err",
+        workspaceRoot: tempDir,
+      });
+      expect(errorRes.verdict).toBe("UNSURE");
+      expect(errorRes.reason).toContain("Upstream provider 503");
+
+      const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+      try {
+        expect(store.getS2Session("ses_s2_hung_abort")?.status).toBe("aborted");
+        expect(store.getS2Session("ses_s2_timeout")?.status).toBe("timeout");
+        expect(store.getS2Session("ses_s2_partial")?.status).toBe("partial");
+        expect(store.getS2Session("ses_s2_error")?.status).toBe("error");
+
+        const abortedDetail = store.getS2Session("ses_s2_hung_abort");
+        const abortedPayload = abortedDetail?.payload as Record<string, unknown>;
+        expect(abortedPayload.capturedUserPrompt).toContain("ls -la");
+        expect(abortedPayload.status).toBe("aborted");
+      } finally {
+        store.close();
+      }
+    });
+
+    it("respects evalSessionCleanup === 'archive', live getter, and falls back to archive when DB export or session.remove fails", async () => {
+      const evalDbFile = path.join(tempDir, "cleanup-evals.db");
+      const removedSessions: string[] = [];
+      const archivedSessions: string[] = [];
+      let seq = 0;
+
+      const makeClient = (options?: { failRemove?: boolean }) =>
+        ({
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: `ses_clean_${++seq}` } }),
+            prompt: async (opts: { sessionID: string }) => {
+              recordEvaluationVerdict(opts.sessionID, {
+                verdict: "ALLOW",
+                risk_level: "LOW",
+                user_authorization: "HIGH",
+                reason: "OK",
+              });
+              return { data: { parts: [] } };
+            },
+            remove: async ({ sessionID }: { sessionID: string }) => {
+              if (options?.failRemove) {
+                throw new Error("remove failed");
+              }
+              removedSessions.push(sessionID);
+            },
+            update: async ({ sessionID }: { sessionID: string }) => {
+              archivedSessions.push(sessionID);
+            },
+          },
+        }) as unknown as OpenCodeSessionClient;
+
+      // 1. Live getter switches from export-and-delete -> archive
+      let currentMode: "export-and-delete" | "archive" = "export-and-delete";
+      const evaluator = new OpenCodeSessionEvaluator(makeClient(), loadConfig({ evalDbFile }), {
+        evalDbFile,
+        getEvalSessionCleanup: () => currentMode,
+      });
+
+      await evaluator.evaluate({
+        id: "act_c1",
+        harness: "opencode",
+        sessionID: "ses_parent",
+        toolName: "bash",
+        commandString: "pwd",
+        workspaceRoot: tempDir,
+        userPrompt: "pwd",
+      });
+      expect(removedSessions).toEqual(["ses_clean_1"]);
+      expect(archivedSessions).toEqual([]);
+
+      currentMode = "archive";
+      await evaluator.evaluate({
+        id: "act_c2",
+        harness: "opencode",
+        sessionID: "ses_parent",
+        toolName: "bash",
+        commandString: "ls",
+        workspaceRoot: tempDir,
+        userPrompt: "ls",
+      });
+      expect(removedSessions).toEqual(["ses_clean_1"]);
+      expect(archivedSessions).toEqual(["ses_clean_2"]);
+
+      // 2. Fallback to archive when DB export fails (unwritable path = existing directory)
+      const originalWarn = console.warn;
+      console.warn = () => {};
+      try {
+        await classifyRequest({
+          client: makeClient(),
+          evalDbFile: tempDir,
+          evalSessionCleanup: "export-and-delete",
+          actionName: "bash",
+          actionArgs: { command: "ls" },
+          workspaceRoot: tempDir,
+        });
+      } finally {
+        console.warn = originalWarn;
+      }
+      expect(removedSessions).toEqual(["ses_clean_1"]);
+      expect(archivedSessions).toEqual(["ses_clean_2", "ses_clean_3"]);
+
+      // 3. Fallback to archive when session.remove rejects
+      await classifyRequest({
+        client: makeClient({ failRemove: true }),
+        evalDbFile,
+        evalSessionCleanup: "export-and-delete",
+        actionName: "bash",
+        actionArgs: { command: "ls" },
+        workspaceRoot: tempDir,
+      });
+      expect(removedSessions).toEqual(["ses_clean_1"]);
+      expect(archivedSessions).toEqual(["ses_clean_2", "ses_clean_3", "ses_clean_4"]);
     });
   });
 });

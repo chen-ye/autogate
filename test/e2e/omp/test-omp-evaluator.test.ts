@@ -58,7 +58,9 @@ describe("OmpNativeEvaluator and completeSimple Test Suite", () => {
       maxTokens: 8192,
     });
 
-    const evaluator = new OmpNativeEvaluator(model, "test-key", "ses-eval-1");
+    const evaluator = new OmpNativeEvaluator(model, "test-key", "ses-eval-1", {
+      evalDbFile: ":memory:",
+    });
 
     const sampleAction: GateAction = {
       id: "act-1",

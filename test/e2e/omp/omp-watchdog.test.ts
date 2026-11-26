@@ -37,6 +37,7 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
       NTFY_TOPIC: process.env.NTFY_TOPIC,
       NTFY_TOKEN: process.env.NTFY_TOKEN,
       OPENCODE_AUTO_MODE: process.env.OPENCODE_AUTO_MODE,
+      AUTOGATE_EVAL_DB: process.env.AUTOGATE_EVAL_DB,
     };
     mockProvider = new MockInferenceProvider(0);
     activeSessions = [];
@@ -67,6 +68,7 @@ describe("OMP Watchdog and Timeout E2E Test Suite", () => {
     process.env.NTFY_TOPIC = process.env.NTFY_TOPIC || "autogate-test-omp";
     process.env.NTFY_TOKEN = process.env.NTFY_TOKEN || "test-token";
     process.env.OPENCODE_AUTO_MODE = "true";
+    process.env.AUTOGATE_EVAL_DB = ":memory:";
   });
 
   afterEach(async () => {

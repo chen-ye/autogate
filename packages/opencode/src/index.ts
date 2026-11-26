@@ -5,6 +5,8 @@ import {
   loadConfig,
   NtfyAdapter,
   AutoGateCoreEngine,
+  AutoGateEvalStore,
+  resolveEvalDbFile,
   recordEscalationIntent,
   isClassifierVerdict,
   isRiskLevel,
@@ -16,7 +18,7 @@ import {
   type GateAction,
   type GateDecision,
   type GateEvaluator,
-  type AutoGateConfig,
+  type ResolvedAutoGateConfig,
   type EnvironmentConfig,
 } from "@autogate/core";
 import {
@@ -24,7 +26,7 @@ import {
   isEvaluationSession,
   recordEvaluationVerdict,
   evaluationSessions,
-  logEvaluationDecision,
+  type S2SessionCapturedEvent,
 } from "./evaluator.js";
 import { OpenCodePromptResolver } from "./prompt-resolver.js";
 import { OpenCodeRuntimeSync } from "./runtime-sync.js";
@@ -273,17 +275,24 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   private runtimeSync: OpenCodeRuntimeSync;
   private stopListener?: () => void;
   private ctx: OpenCodePluginInput;
-  private config: AutoGateConfig;
+  private config: ResolvedAutoGateConfig;
+  private runtimeOptions?: Record<string, unknown>;
+  private sessionEvaluator?: OpenCodeSessionEvaluator;
+  private evalStore?: AutoGateEvalStore;
+  private evalStorePath?: string;
+  private storeClosed = false;
   private sessionControllers = new Map<string, Set<AbortController>>();
   private requestControllers = new Map<string, AbortController>();
   private allControllers = new Set<AbortController>();
   private activeEvaluations = new Set<Promise<void>>();
+  private pendingS2ByActionId = new Map<string, S2SessionCapturedEvent>();
   private disposed = false;
   readonly serverUrl: string;
 
   constructor(ctx: OpenCodePluginInput, options?: Record<string, unknown>) {
     this.ctx = ctx;
-    const config = loadConfig(options);
+    this.runtimeOptions = options;
+    const config = loadConfig(options, "opencode");
     const configDir = typeof ctx.configDir === "string" ? ctx.configDir : undefined;
     const customConfigServerUrl =
       typeof config.serverUrl === "string" &&
@@ -321,12 +330,19 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     const client = (ctx.client ?? ctx) as unknown as OpenCodeSessionClient;
     this.promptResolver = new OpenCodePromptResolver(client);
     this.config = config;
-    const evaluator =
-      (options?.evaluator as GateEvaluator | undefined) ??
-      new OpenCodeSessionEvaluator(client, config, {
-        serverUrl: explicitServerUrl,
-        configDir,
-      });
+    const defaultEvaluator = new OpenCodeSessionEvaluator(client, config, {
+      serverUrl: explicitServerUrl,
+      configDir,
+      getEvalDbFile: () => this.config.evalDbFile,
+      getEvalSessionCleanup: () => this.config.evalSessionCleanup,
+      getEvalStore: () => (this.storeClosed ? undefined : this.getEvalStore()),
+      skipEvaluationRecord: true,
+      onS2SessionRecorded: (ev) => this.handleS2SessionRecorded(ev),
+    });
+    const evaluator = (options?.evaluator as GateEvaluator | undefined) ?? defaultEvaluator;
+    if (!options?.evaluator) {
+      this.sessionEvaluator = defaultEvaluator;
+    }
     const remoteReviewEnabled = config.ntfyTopic
       ? typeof options?.remoteReviewEnabled === "boolean"
         ? options.remoteReviewEnabled
@@ -338,6 +354,63 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       evaluator,
       workspaceRoot,
       remoteReviewEnabled,
+      onClassifierResult: ({ action, result, durationMs, startTime }) => {
+        const pendingS2 = this.pendingS2ByActionId.get(action.id);
+        this.pendingS2ByActionId.delete(action.id);
+        if (this.storeClosed) return;
+        const meta = result.metadata;
+        const s2SessionId =
+          (typeof meta?.s2SessionId === "string" && meta.s2SessionId.trim().length > 0
+            ? meta.s2SessionId.trim()
+            : null) ??
+          pendingS2?.s2SessionId ??
+          null;
+        const s2Aborted =
+          result.cascade?.s2Aborted ?? (pendingS2 ? pendingS2.status === "aborted" : false);
+        try {
+          this.getEvalStore().recordEvaluation({
+            id: action.id,
+            sourceFormat: "opencode",
+            timestamp: startTime,
+            sessionId: action.sessionID,
+            s2SessionId,
+            actionId: action.id,
+            toolName: action.toolName,
+            commandString:
+              action.commandString ??
+              (action.rawArgs !== undefined
+                ? JSON.stringify(action.rawArgs)
+                : action.metadata
+                  ? JSON.stringify(action.metadata)
+                  : ""),
+            targetPath: action.targetPath ?? null,
+            workspaceRoot: action.workspaceRoot ?? null,
+            userPrompt: action.userPrompt,
+            reasoning:
+              result.reason || (typeof meta?.reasoning === "string" ? meta.reasoning : null),
+            thinking: typeof meta?.thinking === "string" ? meta.thinking : null,
+            verdict: result.verdict,
+            riskLevel: result.risk_level ?? null,
+            userAuthorization: result.user_authorization ?? null,
+            durationMs,
+            modelId: typeof meta?.modelId === "string" ? meta.modelId : null,
+            modelProvider: typeof meta?.modelProvider === "string" ? meta.modelProvider : null,
+            promptTokens: typeof meta?.promptTokens === "number" ? meta.promptTokens : null,
+            outputTokens: typeof meta?.outputTokens === "number" ? meta.outputTokens : null,
+            reasoningTokens:
+              typeof meta?.reasoningTokens === "number" ? meta.reasoningTokens : null,
+            cost: typeof meta?.cost === "number" ? meta.cost : null,
+            attempts: typeof meta?.attempts === "number" ? meta.attempts : null,
+            error: typeof meta?.error === "string" ? meta.error : null,
+            cascade: result.cascade ?? null,
+            cascadeWinner: result.cascade?.winner ?? null,
+            s2Aborted,
+            sourceOrigin: "live",
+          });
+        } catch (err) {
+          console.warn("[AutoGate] Failed to persist evaluation to evals.db:", err);
+        }
+      },
     });
     this.runtimeSync = new OpenCodeRuntimeSync({
       engine: this.engine,
@@ -347,8 +420,62 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     });
   }
 
+  private getEvalStore(): AutoGateEvalStore {
+    const dbPath = this.config.evalDbFile || resolveEvalDbFile(this.runtimeOptions, "opencode");
+    if (this.evalStore && this.evalStore.isOpen() && this.evalStorePath === dbPath) {
+      return this.evalStore;
+    }
+    if (this.evalStore && this.evalStore.isOpen()) {
+      this.evalStore.close();
+    }
+    this.evalStorePath = dbPath;
+    this.evalStore = new AutoGateEvalStore(dbPath);
+    return this.evalStore;
+  }
+
+  private handleS2SessionRecorded(event: S2SessionCapturedEvent): void {
+    const actionId = event.actionId;
+    if (!actionId || this.storeClosed) return;
+
+    try {
+      const linked = this.getEvalStore().linkS2SessionToEvaluation({
+        actionId,
+        s2SessionId: event.s2SessionId,
+        targetSessionId: event.targetSessionId ?? null,
+        status: event.status,
+        timestamp: event.timestamp,
+        toolName: event.toolName,
+        commandString: event.commandString,
+        targetPath: event.targetPath ?? null,
+        workspaceRoot: event.workspaceRoot,
+        userPrompt: event.userPrompt,
+        verdict: event.verdict,
+        riskLevel: event.riskLevel ?? null,
+        userAuthorization: event.userAuthorization ?? null,
+        reasoning: event.reasoning ?? null,
+        thinking: event.thinking ?? null,
+        durationMs: event.durationMs,
+        modelId: event.modelId ?? null,
+        modelProvider: event.modelProvider ?? null,
+        promptTokens: event.promptTokens ?? null,
+        outputTokens: event.outputTokens ?? null,
+        reasoningTokens: event.reasoningTokens ?? null,
+        cost: event.cost ?? null,
+        attempts: event.attempts ?? null,
+        error: event.error ?? null,
+        s2Aborted: event.status === "aborted",
+      });
+      if (!linked && !this.disposed) {
+        this.pendingS2ByActionId.set(actionId, event);
+      }
+    } catch (err) {
+      console.warn("[AutoGate] Failed to link S2 session to evaluation in evals.db:", err);
+    }
+  }
+
   async start(): Promise<void> {
     this.disposed = false;
+    this.storeClosed = false;
     this.stopListener = await this.engine.start();
     this.runtimeSync.start();
   }
@@ -364,11 +491,23 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     if (this.activeEvaluations.size > 0) {
       await Promise.allSettled(Array.from(this.activeEvaluations));
     }
+    if (this.sessionEvaluator) {
+      await this.sessionEvaluator.waitForPending();
+    }
+    this.pendingS2ByActionId.clear();
     this.runtimeSync.dispose();
     await this.engine.stop();
     if (this.stopListener) {
       this.stopListener();
       this.stopListener = undefined;
+    }
+    this.storeClosed = true;
+    if (this.evalStore) {
+      try {
+        this.evalStore.close();
+      } catch {}
+      this.evalStore = undefined;
+      this.evalStorePath = undefined;
     }
   }
 
@@ -453,6 +592,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       set.add(reqController);
     }
 
+    let actionIdForCleanup: string | undefined;
     try {
       const resolvedPrompts = await this.promptResolver.resolveSessionPrompts(
         sessionID,
@@ -479,6 +619,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
         environment: this.config.environment,
         signal: reqController.signal,
       });
+      actionIdForCleanup = action.id;
 
       const evalStartTime = Date.now();
       this.runtimeSync.beginEvaluation({
@@ -526,28 +667,6 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
         source,
       });
 
-      if (decision.cascade) {
-        logEvaluationDecision(
-          {
-            timestamp: Date.now(),
-            sessionID: action.sessionID,
-            toolName: action.toolName,
-            commandString:
-              action.commandString ?? JSON.stringify(action.rawArgs ?? request.metadata ?? {}),
-            userPrompt: action.userPrompt,
-            reasoning:
-              (typeof decision.metadata?.reasoning === "string"
-                ? decision.metadata.reasoning
-                : undefined) ?? decision.reason,
-            verdict: decision.verdict,
-            risk_level: decision.riskLevel,
-            user_authorization: decision.userAuthorization,
-            durationMs,
-            cascade: decision.cascade,
-          },
-          this.config.evalLogFile,
-        );
-      }
       console.log(
         `[AutoGate] Evaluated decision for ${request.id}: verdict=${decision.verdict} reason=${decision.reason} userPrompt="${action.userPrompt}"`,
       );
@@ -557,6 +676,9 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       const replyVal = decision.reply || (decision.verdict === "ALLOW" ? "once" : "reject");
       await this.replyPermission(request.id as string, replyVal, action.sessionID, decision.reason);
     } finally {
+      if (actionIdForCleanup) {
+        this.pendingS2ByActionId.delete(actionIdForCleanup);
+      }
       if (externalSignal) {
         externalSignal.removeEventListener("abort", onExternalAbort);
       }

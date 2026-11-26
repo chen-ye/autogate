@@ -10,51 +10,36 @@ import type {
   GateEvaluator,
   GateAction,
   AutoGateConfig,
-  CascadeTrace,
+  EvalSessionCleanupMode,
+  S2SessionStatus,
 } from "@autogate/core";
 import {
+  AutoGateEvalStore,
   EVAL_AGENT_ID,
+  PASSIVE_EVALUATOR_DIRECTIVE,
   buildClassifierUserPrompt,
-  parseVerdict,
-  parseModelRef,
+  isClassifierVerdict,
+  isRecord,
   isRiskLevel,
   isUserAuthorization,
-  isClassifierVerdict,
+  loadEvalAgentDefinition,
+  parseModelRef,
+  parseVerdict,
   resolveClassifierActionArgs,
+  resolveEvalDbFile,
   resolveRequestActionArgs,
 } from "@autogate/core";
 export { parseModelRef };
 import { resolveServerPassword } from "./index.js";
-import type { OpenCodeClassifyInput, OpenCodeSessionClient } from "./types.js";
-export type { OpenCodeClassifyInput, OpenCodeSessionClient };
+import type {
+  OpenCodeClassifyInput,
+  OpenCodeSessionClient,
+  S2SessionCapturedEvent,
+} from "./types.js";
+export type { OpenCodeClassifyInput, OpenCodeSessionClient, S2SessionCapturedEvent };
 
-export interface EvaluationAuditEntry {
-  timestamp: number;
-  sessionID: string;
-  toolName: string;
-  commandString: string;
-  userPrompt: string;
-  reasoning?: string;
-  verdict: ClassifierVerdict;
-  risk_level?: RiskLevel;
-  user_authorization?: UserAuthorization;
-  durationMs: number;
-  cascade?: CascadeTrace;
-}
-
-export function logEvaluationDecision(entry: EvaluationAuditEntry, logFilePath?: string): void {
-  try {
-    const filePath =
-      logFilePath ?? path.join(os.homedir(), ".config", "autogate", "logs", "evals.jsonl");
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.appendFileSync(filePath, JSON.stringify(entry) + "\n", "utf8");
-  } catch (err) {
-    console.warn("[AutoGate] Failed to write evaluation audit log:", err);
-  }
-}
+const S2_CAPTURE_TIMEOUT_MS = 1500;
+const S2_CLEANUP_TIMEOUT_MS = 1500;
 
 const g = globalThis as unknown as {
   __autogate_evaluation_sessions__?: Set<string>;
@@ -125,6 +110,17 @@ async function notifyOpenChamberArchive(sessionID: string): Promise<void> {
 export interface ArchiveEvaluationSessionOptions {
   serverUrl?: string;
   configDir?: string;
+}
+
+export interface OpenCodeSessionEvaluatorOptions extends ArchiveEvaluationSessionOptions {
+  evalDbFile?: string;
+  getEvalDbFile?: () => string | undefined;
+  evalSessionCleanup?: EvalSessionCleanupMode;
+  getEvalSessionCleanup?: () => EvalSessionCleanupMode;
+  evalStore?: AutoGateEvalStore;
+  getEvalStore?: () => AutoGateEvalStore | undefined;
+  skipEvaluationRecord?: boolean;
+  onS2SessionRecorded?: (event: S2SessionCapturedEvent) => void;
 }
 
 function resolveExplicitArchiveServerUrl(
@@ -414,6 +410,508 @@ export function resetCachedEvaluationAgent(): void {
   cachedEvalAgent = undefined;
 }
 
+function nonEmptyString(val: unknown): string | undefined {
+  if (typeof val !== "string") return undefined;
+  const trimmed = val.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function finiteNumber(val: unknown): number | undefined {
+  return typeof val === "number" && Number.isFinite(val) ? val : undefined;
+}
+
+function finiteInt(val: unknown): number | undefined {
+  const n = finiteNumber(val);
+  return n !== undefined ? Math.trunc(n) : undefined;
+}
+
+function parseTimestampMs(val: unknown): number | undefined {
+  if (typeof val === "number" && Number.isFinite(val)) {
+    return Math.trunc(val);
+  }
+  if (typeof val === "string" && val.trim().length > 0) {
+    const parsed = Date.parse(val);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+  return undefined;
+}
+
+async function settleWithTimeout<T>(
+  invoke: () => Promise<T>,
+  timeoutMs: number,
+): Promise<{ ok: true; value: T } | { ok: false; reason: "timeout" | "error"; error?: unknown }> {
+  let promise: Promise<T>;
+  try {
+    promise = Promise.resolve(invoke());
+  } catch (error) {
+    return { ok: false, reason: "error", error };
+  }
+
+  const guarded = promise.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, reason: "error" as const, error }),
+  );
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      guarded,
+      new Promise<{ ok: false; reason: "timeout" }>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, reason: "timeout" }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+interface ExtractedTokenTotals {
+  promptTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+function readTokenTotals(raw: unknown): ExtractedTokenTotals | undefined {
+  if (!isRecord(raw)) return undefined;
+  const cacheObj = isRecord(raw.cache) ? raw.cache : undefined;
+  const completionDetails = isRecord(raw.completionTokensDetails)
+    ? raw.completionTokensDetails
+    : undefined;
+
+  const promptTokens =
+    finiteInt(raw.input) ??
+    finiteInt(raw.promptTokens) ??
+    finiteInt(raw.input_tokens) ??
+    finiteInt(raw.prompt_tokens);
+  const outputTokens =
+    finiteInt(raw.output) ??
+    finiteInt(raw.outputTokens) ??
+    finiteInt(raw.completion_tokens) ??
+    finiteInt(raw.output_tokens);
+  const reasoningTokens =
+    finiteInt(raw.reasoning) ??
+    finiteInt(raw.reasoningTokens) ??
+    finiteInt(raw.reasoning_tokens) ??
+    finiteInt(completionDetails?.reasoningTokens);
+  const cacheReadTokens =
+    finiteInt(cacheObj?.read) ?? finiteInt(raw.cacheReadTokens) ?? finiteInt(raw.cache_read_tokens);
+  const cacheWriteTokens =
+    finiteInt(cacheObj?.write) ??
+    finiteInt(raw.cacheWriteTokens) ??
+    finiteInt(raw.cache_write_tokens);
+
+  if (
+    promptTokens === undefined &&
+    outputTokens === undefined &&
+    reasoningTokens === undefined &&
+    cacheReadTokens === undefined &&
+    cacheWriteTokens === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(promptTokens !== undefined ? { promptTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+  };
+}
+
+function hasPositiveTokenCount(tokens: ExtractedTokenTotals | undefined): boolean {
+  if (!tokens) return false;
+  return (
+    (tokens.promptTokens ?? 0) > 0 ||
+    (tokens.outputTokens ?? 0) > 0 ||
+    (tokens.reasoningTokens ?? 0) > 0 ||
+    (tokens.cacheReadTokens ?? 0) > 0 ||
+    (tokens.cacheWriteTokens ?? 0) > 0
+  );
+}
+
+function extractThinkingSegments(parts: readonly unknown[]): string[] {
+  const segments: string[] = [];
+  for (const item of parts) {
+    if (!isRecord(item)) continue;
+    const partType = typeof item.type === "string" ? item.type : "";
+    if (partType === "reasoning" || partType === "thinking" || partType === "reasoning_text") {
+      const text =
+        nonEmptyString(item.text) ??
+        nonEmptyString(item.thinking) ??
+        nonEmptyString(item.reasoning) ??
+        nonEmptyString(item.reasoning_content);
+      if (text) {
+        segments.push(text);
+      }
+    }
+  }
+  return segments;
+}
+
+function readModelFromRecord(
+  raw: unknown,
+): { modelId?: string; modelProvider?: string } | undefined {
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    const parsed = parseModelRef(raw.trim());
+    return { modelId: parsed.modelID, modelProvider: parsed.providerID };
+  }
+  if (!isRecord(raw)) return undefined;
+  const modelObj = isRecord(raw.model) ? raw.model : undefined;
+  const infoObj = isRecord(raw.info) ? raw.info : undefined;
+
+  if (typeof raw.model === "string" && raw.model.trim().length > 0) {
+    const parsed = parseModelRef(raw.model.trim());
+    return { modelId: parsed.modelID, modelProvider: parsed.providerID };
+  }
+
+  const modelId =
+    nonEmptyString(modelObj?.id) ??
+    nonEmptyString(modelObj?.modelID) ??
+    nonEmptyString(raw.modelID) ??
+    nonEmptyString(raw.modelId) ??
+    nonEmptyString(infoObj?.modelID) ??
+    nonEmptyString(infoObj?.modelId);
+  const modelProvider =
+    nonEmptyString(modelObj?.providerID) ??
+    nonEmptyString(modelObj?.providerId) ??
+    nonEmptyString(modelObj?.provider) ??
+    nonEmptyString(raw.providerID) ??
+    nonEmptyString(raw.providerId) ??
+    nonEmptyString(infoObj?.providerID) ??
+    nonEmptyString(infoObj?.providerId);
+
+  if (modelId || modelProvider) {
+    return {
+      ...(modelId ? { modelId } : {}),
+      ...(modelProvider ? { modelProvider } : {}),
+    };
+  }
+  if (infoObj) {
+    return readModelFromRecord(infoObj);
+  }
+  return undefined;
+}
+
+function isAssistantMessage(msg: Record<string, unknown>): boolean {
+  const info = isRecord(msg.info) ? msg.info : undefined;
+  const role = msg.type ?? msg.role ?? info?.role ?? info?.type;
+  return role === "assistant";
+}
+
+interface ExtractedSessionDetails {
+  modelId?: string;
+  modelProvider?: string;
+  promptTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  cost?: number;
+  thinking?: string;
+  messageCount: number;
+  title?: string;
+  agent?: string;
+  directory?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  archivedAt?: number;
+  outcome?: string;
+  assistantError?: string;
+}
+
+function extractSessionDetails(params: {
+  sessionInfo?: Record<string, unknown>;
+  messages?: unknown[];
+  capturedParts: readonly unknown[];
+  capturedReasoning?: string;
+  configuredModel?: string;
+}): ExtractedSessionDetails {
+  const { sessionInfo, messages, capturedParts, capturedReasoning, configuredModel } = params;
+
+  const infoModel = sessionInfo ? readModelFromRecord(sessionInfo) : undefined;
+  let modelId = infoModel?.modelId;
+  let modelProvider = infoModel?.modelProvider;
+
+  const infoTokens = sessionInfo ? readTokenTotals(sessionInfo.tokens) : undefined;
+  const infoCost = sessionInfo ? finiteNumber(sessionInfo.cost) : undefined;
+
+  let msgHasTokens = false;
+  let msgPrompt = 0;
+  let msgOutput = 0;
+  let msgReasoning = 0;
+  let msgCacheRead = 0;
+  let msgCacheWrite = 0;
+  let hasPromptSum = false;
+  let hasOutputSum = false;
+  let hasReasoningSum = false;
+  let hasCacheReadSum = false;
+  let hasCacheWriteSum = false;
+
+  let msgHasCost = false;
+  let msgCost = 0;
+
+  const thinkingSegments: string[] = [];
+  let assistantError: string | undefined;
+
+  if (Array.isArray(messages)) {
+    for (const rawMsg of messages) {
+      if (!isRecord(rawMsg) || !isAssistantMessage(rawMsg)) continue;
+      const info = isRecord(rawMsg.info) ? rawMsg.info : undefined;
+
+      const msgModel = readModelFromRecord(rawMsg);
+      if (msgModel) {
+        modelId = msgModel.modelId ?? modelId;
+        modelProvider = msgModel.modelProvider ?? modelProvider;
+      }
+
+      const tokens =
+        readTokenTotals(rawMsg.tokens) ??
+        readTokenTotals(info?.tokens) ??
+        readTokenTotals(rawMsg.usage) ??
+        readTokenTotals(info?.usage);
+      if (tokens) {
+        msgHasTokens = true;
+        if (tokens.promptTokens !== undefined) {
+          msgPrompt += tokens.promptTokens;
+          hasPromptSum = true;
+        }
+        if (tokens.outputTokens !== undefined) {
+          msgOutput += tokens.outputTokens;
+          hasOutputSum = true;
+        }
+        if (tokens.reasoningTokens !== undefined) {
+          msgReasoning += tokens.reasoningTokens;
+          hasReasoningSum = true;
+        }
+        if (tokens.cacheReadTokens !== undefined) {
+          msgCacheRead += tokens.cacheReadTokens;
+          hasCacheReadSum = true;
+        }
+        if (tokens.cacheWriteTokens !== undefined) {
+          msgCacheWrite += tokens.cacheWriteTokens;
+          hasCacheWriteSum = true;
+        }
+      }
+
+      const mCost = finiteNumber(rawMsg.cost) ?? finiteNumber(info?.cost);
+      if (mCost !== undefined) {
+        msgHasCost = true;
+        msgCost += mCost;
+      }
+
+      const contentList = Array.isArray(rawMsg.content)
+        ? rawMsg.content
+        : Array.isArray(rawMsg.parts)
+          ? rawMsg.parts
+          : [];
+      thinkingSegments.push(...extractThinkingSegments(contentList));
+
+      const directReasoning =
+        nonEmptyString(rawMsg.reasoning) ??
+        nonEmptyString(rawMsg.thinking) ??
+        nonEmptyString(rawMsg.reasoning_content) ??
+        nonEmptyString(info?.reasoning) ??
+        nonEmptyString(info?.thinking);
+      if (directReasoning && !thinkingSegments.includes(directReasoning)) {
+        thinkingSegments.push(directReasoning);
+      }
+
+      const errObj = isRecord(rawMsg.error)
+        ? rawMsg.error
+        : isRecord(info?.error)
+          ? info.error
+          : undefined;
+      if (errObj) {
+        assistantError =
+          nonEmptyString(errObj.message) ?? nonEmptyString(errObj.type) ?? assistantError;
+      } else if (typeof rawMsg.error === "string") {
+        assistantError = nonEmptyString(rawMsg.error) ?? assistantError;
+      }
+    }
+  }
+
+  if ((!modelId || !modelProvider) && configuredModel && configuredModel.trim().length > 0) {
+    const parsed = parseModelRef(configuredModel.trim());
+    modelId = modelId ?? parsed.modelID;
+    modelProvider = modelProvider ?? parsed.providerID;
+  }
+
+  const useInfoTokens =
+    infoTokens !== undefined && (hasPositiveTokenCount(infoTokens) || !msgHasTokens);
+  const promptTokens = useInfoTokens
+    ? infoTokens.promptTokens
+    : hasPromptSum
+      ? msgPrompt
+      : undefined;
+  const outputTokens = useInfoTokens
+    ? infoTokens.outputTokens
+    : hasOutputSum
+      ? msgOutput
+      : undefined;
+  const reasoningTokens = useInfoTokens
+    ? infoTokens.reasoningTokens
+    : hasReasoningSum
+      ? msgReasoning
+      : undefined;
+  const cacheReadTokens = useInfoTokens
+    ? infoTokens.cacheReadTokens
+    : hasCacheReadSum
+      ? msgCacheRead
+      : undefined;
+  const cacheWriteTokens = useInfoTokens
+    ? infoTokens.cacheWriteTokens
+    : hasCacheWriteSum
+      ? msgCacheWrite
+      : undefined;
+
+  const cost =
+    infoCost !== undefined && (infoCost > 0 || !msgHasCost)
+      ? infoCost
+      : msgHasCost
+        ? msgCost
+        : undefined;
+
+  if (thinkingSegments.length === 0) {
+    thinkingSegments.push(...extractThinkingSegments(capturedParts));
+  }
+  const thinking =
+    thinkingSegments.length > 0 ? thinkingSegments.join("\n") : nonEmptyString(capturedReasoning);
+
+  const timeObj = sessionInfo && isRecord(sessionInfo.time) ? sessionInfo.time : undefined;
+  const locationObj =
+    sessionInfo && isRecord(sessionInfo.location) ? sessionInfo.location : undefined;
+
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(modelProvider ? { modelProvider } : {}),
+    ...(promptTokens !== undefined ? { promptTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    ...(cost !== undefined ? { cost } : {}),
+    ...(thinking ? { thinking } : {}),
+    messageCount: Array.isArray(messages) ? messages.length : 0,
+    ...(nonEmptyString(sessionInfo?.title) ? { title: nonEmptyString(sessionInfo?.title) } : {}),
+    ...(nonEmptyString(sessionInfo?.agent) ? { agent: nonEmptyString(sessionInfo?.agent) } : {}),
+    ...(nonEmptyString(locationObj?.directory) || nonEmptyString(sessionInfo?.directory)
+      ? {
+          directory:
+            nonEmptyString(locationObj?.directory) ?? nonEmptyString(sessionInfo?.directory),
+        }
+      : {}),
+    ...(parseTimestampMs(timeObj?.created) !== undefined
+      ? { createdAt: parseTimestampMs(timeObj?.created) }
+      : {}),
+    ...(parseTimestampMs(timeObj?.updated) !== undefined
+      ? { updatedAt: parseTimestampMs(timeObj?.updated) }
+      : {}),
+    ...(parseTimestampMs(timeObj?.archived) !== undefined
+      ? { archivedAt: parseTimestampMs(timeObj?.archived) }
+      : {}),
+    ...(nonEmptyString(sessionInfo?.outcome)
+      ? { outcome: nonEmptyString(sessionInfo?.outcome) }
+      : {}),
+    ...(assistantError ? { assistantError } : {}),
+  };
+}
+
+function buildEvalPromptTemplate(
+  evalAgent: string,
+  configuredModel?: string,
+): { systemPrompt: string; agentConfig: Record<string, unknown> } {
+  try {
+    const def = loadEvalAgentDefinition();
+    const systemPrompt = def.system.includes(PASSIVE_EVALUATOR_DIRECTIVE)
+      ? def.system
+      : def.system
+        ? `${def.system}\n\n${PASSIVE_EVALUATOR_DIRECTIVE}`
+        : PASSIVE_EVALUATOR_DIRECTIVE;
+    const effectiveModel = nonEmptyString(configuredModel) ?? def.model;
+    return {
+      systemPrompt,
+      agentConfig: {
+        agent: evalAgent,
+        ...(effectiveModel ? { model: effectiveModel } : {}),
+        ...(def.steps !== undefined ? { steps: def.steps } : {}),
+        ...(def.request ? { request: def.request } : {}),
+        ...(def.permissions ? { permissions: def.permissions } : {}),
+      },
+    };
+  } catch {
+    return {
+      systemPrompt: PASSIVE_EVALUATOR_DIRECTIVE,
+      agentConfig: {
+        agent: evalAgent,
+        ...(nonEmptyString(configuredModel) ? { model: nonEmptyString(configuredModel) } : {}),
+      },
+    };
+  }
+}
+
+function resolveInputCommandString(input: OpenCodeClassifyInput, actionArgs: unknown): string {
+  if (typeof input.commandString === "string") {
+    return input.commandString;
+  }
+  const req = input.request;
+  if (req && typeof req.commandString === "string" && req.commandString.trim().length > 0) {
+    return req.commandString;
+  }
+  if (
+    req?.metadata &&
+    typeof req.metadata.command === "string" &&
+    req.metadata.command.trim().length > 0
+  ) {
+    return req.metadata.command;
+  }
+  if (req?.metadata && typeof req.metadata.cmd === "string" && req.metadata.cmd.trim().length > 0) {
+    return req.metadata.cmd;
+  }
+  if (typeof actionArgs === "string") {
+    return actionArgs;
+  }
+  if (isRecord(actionArgs)) {
+    if (typeof actionArgs.command === "string") return actionArgs.command;
+    if (typeof actionArgs.cmd === "string") return actionArgs.cmd;
+  }
+  if (actionArgs !== undefined) {
+    return JSON.stringify(actionArgs);
+  }
+  return "";
+}
+
+function resolveInputTargetPath(
+  input: OpenCodeClassifyInput,
+  actionArgs: unknown,
+): string | undefined {
+  if (typeof input.targetPath === "string" && input.targetPath.trim().length > 0) {
+    return input.targetPath.trim();
+  }
+  const req = input.request;
+  const reqTarget =
+    nonEmptyString(req?.targetPath) ??
+    nonEmptyString(req?.metadata?.filepath) ??
+    nonEmptyString(req?.metadata?.path) ??
+    nonEmptyString(req?.metadata?.file);
+  if (reqTarget) return reqTarget;
+  if (isRecord(actionArgs)) {
+    return (
+      nonEmptyString(actionArgs.path) ??
+      nonEmptyString(actionArgs.filePath) ??
+      nonEmptyString(actionArgs.filepath) ??
+      nonEmptyString(actionArgs.file)
+    );
+  }
+  return undefined;
+}
+
 export async function classifyRequest(input: OpenCodeClassifyInput): Promise<ClassifierResult> {
   if (!input.client) {
     return {
@@ -433,9 +931,42 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
   const userPrompt = input.userPrompt ?? "";
   const subagentPrompt = input.subagentPrompt;
   const actionName =
-    input.actionName ?? input.request?.action ?? input.request?.permission ?? "permission";
-  const actionArgs = resolveRequestActionArgs(input.request, input.actionArgs);
-  const workspaceRoot = input.workspaceRoot ?? input.directory ?? process.cwd();
+    input.toolName ??
+    input.actionName ??
+    input.request?.action ??
+    input.request?.permission ??
+    input.request?.toolName ??
+    "permission";
+  const syntheticRequest =
+    !input.request &&
+    input.actionArgs === undefined &&
+    (input.commandString !== undefined || input.targetPath !== undefined)
+      ? {
+          toolName: actionName,
+          ...(input.commandString !== undefined ? { commandString: input.commandString } : {}),
+          ...(input.targetPath !== undefined ? { targetPath: input.targetPath } : {}),
+        }
+      : input.request;
+  const actionArgs = resolveRequestActionArgs(syntheticRequest, input.actionArgs);
+  const workspaceRoot =
+    input.workspaceRoot ??
+    input.directory ??
+    input.request?.directory ??
+    input.request?.metadata?.directory ??
+    process.cwd();
+  const targetSessionId =
+    nonEmptyString(input.targetSessionId) ?? nonEmptyString(input.request?.sessionID);
+  const actionId = nonEmptyString(input.actionId) ?? nonEmptyString(input.request?.id);
+  const resolvedCommandString = resolveInputCommandString(input, actionArgs);
+  const resolvedTargetPath = resolveInputTargetPath(input, actionArgs);
+  const configuredModel =
+    nonEmptyString(input.model) ?? nonEmptyString(input.config?.classifierModel);
+  const resolvedEvalDbFile =
+    nonEmptyString(input.getEvalDbFile?.()) ??
+    nonEmptyString(input.evalDbFile) ??
+    nonEmptyString(input.config?.evalDbFile) ??
+    nonEmptyString(input.config?.opencode?.evalDbFile) ??
+    resolveEvalDbFile(undefined, "opencode");
 
   const evalAgent = await resolveEvaluationAgent(client);
   if (input.signal?.aborted) {
@@ -515,9 +1046,32 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
 
   const startTime = Date.now();
   let capturedReasoning: string | undefined;
+  const capturedParts: unknown[] = [];
   let verdictResult: ClassifierResult | undefined;
+  let finalResult: ClassifierResult | undefined;
   let aborted = Boolean(input.signal?.aborted);
+  let timedOut = false;
+  let settledBy:
+    | "tool-or-extract"
+    | "abort"
+    | "timeout"
+    | "retries-exhausted"
+    | "error"
+    | undefined;
+  let promptError: string | undefined;
+  let evalErrorMessage: string | undefined;
+  let attempts = 0;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const settleInternal = (
+    source: "tool-or-extract" | "abort" | "timeout" | "retries-exhausted" | "error",
+    result: ClassifierResult,
+  ): boolean => {
+    if (!settledBy) {
+      settledBy = source;
+    }
+    return recordEvaluationVerdict(sessionID, result);
+  };
 
   const onAbort = () => {
     aborted = true;
@@ -530,7 +1084,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     } catch {
       // Ignore interrupt transport failures during abort
     }
-    recordEvaluationVerdict(sessionID, {
+    settleInternal("abort", {
       verdict: "UNSURE",
       reason: "Classifier evaluation aborted by signal",
     });
@@ -541,126 +1095,158 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     configDir: input.configDir,
   };
 
-  if (aborted) {
-    onAbort();
-    evaluationResolvers.delete(sessionID);
-    try {
-      await archiveEvaluationSession(client, sessionID, actionName, "UNSURE", archiveOptions);
-    } finally {
-      clearEvaluationSession(sessionID);
-    }
-    return {
-      verdict: "UNSURE",
-      reason: "Classifier evaluation aborted by signal",
-    };
-  }
-
-  if (input.signal) {
+  if (!aborted && input.signal) {
     input.signal.addEventListener("abort", onAbort, { once: true });
   }
 
   let promptLoopPromise: Promise<void> | undefined;
 
   try {
-    const timeoutMs = input.config?.classifierTimeout ?? 45000;
-    const verdictPromise = new Promise<ClassifierResult>((resolve) => {
-      registerEvaluationSession(sessionID, resolve);
-    });
-
-    const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
-      timeoutId = setTimeout(() => {
-        try {
-          client.session.interrupt?.({ sessionID, resume: false })?.catch(() => {});
-        } catch {}
-        resolve({
-          verdict: "UNSURE",
-          reason: `Classifier evaluation timed out after ${Math.round(timeoutMs / 1000)} seconds`,
-        });
-      }, timeoutMs);
-    });
-
-    const maxRetries = 2;
-    const repromptText =
-      "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
-
-    promptLoopPromise = (async () => {
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        if (aborted || input.signal?.aborted) return;
-        const promptText = attempt === 0 ? userPromptText : repromptText;
-        const promptRes = await client.session
-          .prompt({
-            sessionID,
-            text: promptText,
-          })
-          .then(async (res) => {
-            if (aborted || input.signal?.aborted) return res;
-            if (typeof client.session.wait === "function") {
-              await client.session.wait({ sessionID }).catch(() => {});
-            }
-            return res;
-          })
-          .catch(() => null);
-
-        if (!promptRes || aborted || input.signal?.aborted) {
-          if (attempt === 0 && !promptRes) return;
-          continue;
-        }
-
-        const resObj = promptRes as Record<string, unknown>;
-        const resData = (
-          resObj.data && typeof resObj.data === "object" ? resObj.data : {}
-        ) as Record<string, unknown>;
-        const reasoning =
-          typeof resData.reasoning === "string"
-            ? resData.reasoning
-            : typeof resObj.reasoning === "string"
-              ? resObj.reasoning
-              : typeof resData.thinking === "string"
-                ? resData.thinking
-                : typeof resObj.thinking === "string"
-                  ? resObj.thinking
-                  : undefined;
-        if (reasoning) {
-          capturedReasoning = reasoning;
-        }
-        const parts = Array.isArray(resData.parts)
-          ? resData.parts
-          : Array.isArray(resObj.parts)
-            ? resObj.parts
-            : [];
-        const verdict = await extractVerdictFromSession(client, sessionID, parts);
-        if (aborted || input.signal?.aborted) return;
-        if (verdict) {
-          recordEvaluationVerdict(
-            sessionID,
-            capturedReasoning && input.config?.systemOne?.enabled
-              ? { ...verdict, metadata: { reasoning: capturedReasoning } }
-              : verdict,
-          );
-          return;
-        }
-      }
-
-      if (aborted || input.signal?.aborted) return;
-      recordEvaluationVerdict(sessionID, {
+    if (aborted) {
+      onAbort();
+      verdictResult = {
         verdict: "UNSURE",
-        reason: "Classifier failed to call classify_result tool after retries",
-        ...(capturedReasoning && input.config?.systemOne?.enabled
-          ? { metadata: { reasoning: capturedReasoning } }
-          : {}),
+        reason: "Classifier evaluation aborted by signal",
+      };
+    } else {
+      const timeoutMs = input.config?.classifierTimeout ?? 45000;
+      const verdictPromise = new Promise<ClassifierResult>((resolve) => {
+        registerEvaluationSession(sessionID, (res) => {
+          if (!settledBy) {
+            settledBy = "tool-or-extract";
+          }
+          resolve(res);
+        });
       });
-    })().catch(() => {});
 
-    verdictResult = await Promise.race([verdictPromise, timeoutPromise]);
-    if (timeoutId) clearTimeout(timeoutId);
+      const timeoutPromise = new Promise<ClassifierResult>((resolve) => {
+        timeoutId = setTimeout(() => {
+          if (!settledBy) {
+            settledBy = "timeout";
+            timedOut = true;
+          }
+          try {
+            client.session.interrupt?.({ sessionID, resume: false })?.catch(() => {});
+          } catch {}
+          resolve({
+            verdict: "UNSURE",
+            reason: `Classifier evaluation timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+          });
+        }, timeoutMs);
+      });
 
-    return verdictResult;
+      const maxRetries = 2;
+      const repromptText =
+        "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
+
+      promptLoopPromise = (async () => {
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          if (aborted || input.signal?.aborted) return;
+          attempts = attempt + 1;
+          const promptText = attempt === 0 ? userPromptText : repromptText;
+          const promptRes = await client.session
+            .prompt({
+              sessionID,
+              text: promptText,
+            })
+            .then(async (res) => {
+              if (aborted || input.signal?.aborted) return res;
+              if (typeof client.session.wait === "function") {
+                await client.session.wait({ sessionID }).catch(() => {});
+              }
+              return res;
+            })
+            .catch((err: unknown) => {
+              promptError = err instanceof Error ? err.message : String(err);
+              return null;
+            });
+
+          if (aborted || input.signal?.aborted) {
+            return;
+          }
+
+          if (!promptRes) {
+            if (attempt === 0) {
+              settleInternal(promptError ? "error" : "retries-exhausted", {
+                verdict: "UNSURE",
+                reason: promptError
+                  ? `Classifier prompt failed: ${promptError}`
+                  : "Classifier prompt returned empty response",
+              });
+              return;
+            }
+            continue;
+          }
+
+          const resObj = promptRes as Record<string, unknown>;
+          const resData = (
+            resObj.data && typeof resObj.data === "object" ? resObj.data : {}
+          ) as Record<string, unknown>;
+          const reasoning =
+            typeof resData.reasoning === "string"
+              ? resData.reasoning
+              : typeof resObj.reasoning === "string"
+                ? resObj.reasoning
+                : typeof resData.thinking === "string"
+                  ? resData.thinking
+                  : typeof resObj.thinking === "string"
+                    ? resObj.thinking
+                    : undefined;
+          if (reasoning) {
+            capturedReasoning = reasoning;
+          }
+          const parts = Array.isArray(resData.parts)
+            ? resData.parts
+            : Array.isArray(resObj.parts)
+              ? resObj.parts
+              : [];
+          if (parts.length > 0) {
+            capturedParts.push(...parts);
+          }
+          const verdict = await extractVerdictFromSession(client, sessionID, parts);
+          if (aborted || input.signal?.aborted) return;
+          if (verdict) {
+            settleInternal(
+              "tool-or-extract",
+              capturedReasoning && input.config?.systemOne?.enabled
+                ? { ...verdict, metadata: { reasoning: capturedReasoning } }
+                : verdict,
+            );
+            return;
+          }
+        }
+
+        if (aborted || input.signal?.aborted) return;
+        settleInternal("retries-exhausted", {
+          verdict: "UNSURE",
+          reason: "Classifier failed to call classify_result tool after retries",
+          ...(capturedReasoning && input.config?.systemOne?.enabled
+            ? { metadata: { reasoning: capturedReasoning } }
+            : {}),
+        });
+      })().catch((err: unknown) => {
+        promptError = err instanceof Error ? err.message : String(err);
+      });
+
+      verdictResult = await Promise.race([verdictPromise, timeoutPromise]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    }
+  } catch (err: unknown) {
+    evalErrorMessage = err instanceof Error ? err.message : String(err);
+    throw err;
   } finally {
     if (input.signal) {
       input.signal.removeEventListener("abort", onAbort);
     }
-    if (timeoutId) clearTimeout(timeoutId);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = undefined;
+    }
     evaluationResolvers.delete(sessionID);
+
     let archiveDone = false;
     let loopDone = !promptLoopPromise;
     const maybeClearEvalSession = () => {
@@ -674,49 +1260,302 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         maybeClearEvalSession();
       });
     }
+
     const durationMs = Date.now() - startTime;
     const rawVerdict = verdictResult?.verdict;
     const finalVerdict: ClassifierVerdict =
       rawVerdict && isClassifierVerdict(rawVerdict) ? rawVerdict : "UNSURE";
+
+    let sessionInfo: Record<string, unknown> | undefined;
+    let contextMessages: unknown[] | undefined;
+
     try {
-      await archiveEvaluationSession(client, sessionID, actionName, finalVerdict, archiveOptions);
+      const getFn =
+        typeof client.session.get === "function"
+          ? client.session.get.bind(client.session)
+          : undefined;
+      const contextFn =
+        typeof client.session.context === "function"
+          ? client.session.context.bind(client.session)
+          : undefined;
+      const [getOutcome, contextOutcome] = await Promise.all([
+        getFn
+          ? settleWithTimeout(() => getFn({ sessionID }), S2_CAPTURE_TIMEOUT_MS)
+          : Promise.resolve({ ok: false as const, reason: "error" as const }),
+        contextFn
+          ? settleWithTimeout(() => contextFn({ sessionID }), S2_CAPTURE_TIMEOUT_MS)
+          : Promise.resolve({ ok: false as const, reason: "error" as const }),
+      ]);
+
+      if (getOutcome.ok && isRecord(getOutcome.value)) {
+        sessionInfo = isRecord(getOutcome.value.data) ? getOutcome.value.data : getOutcome.value;
+      }
+      if (contextOutcome.ok) {
+        const rawCtx = contextOutcome.value;
+        if (Array.isArray(rawCtx)) {
+          contextMessages = rawCtx;
+        } else if (isRecord(rawCtx) && Array.isArray(rawCtx.data)) {
+          contextMessages = rawCtx.data;
+        }
+      }
+    } catch {
+      // Best-effort capture; fall back to in-memory state
+    }
+
+    const details = extractSessionDetails({
+      sessionInfo,
+      messages: contextMessages,
+      capturedParts,
+      capturedReasoning,
+      configuredModel,
+    });
+
+    const rawCombinedError = evalErrorMessage ?? promptError ?? details.assistantError;
+    const s2Status: S2SessionStatus =
+      settledBy === "tool-or-extract"
+        ? "completed"
+        : aborted || Boolean(input.signal?.aborted)
+          ? "aborted"
+          : timedOut
+            ? "timeout"
+            : rawCombinedError || details.outcome === "failed"
+              ? "error"
+              : "partial";
+    const isPostVerdictInterrupt =
+      s2Status === "completed" &&
+      typeof rawCombinedError === "string" &&
+      /^(?:step\s+interrupted|aborted(?:\s+by\s+signal)?)$/i.test(rawCombinedError.trim());
+    const combinedError = isPostVerdictInterrupt ? undefined : rawCombinedError;
+
+    const s2Title =
+      details.title && details.title !== evalTitle
+        ? details.title
+        : `[auto-gate-eval] ${actionName} -> ${finalVerdict}`;
+    const s2Agent = details.agent ?? evalAgent;
+    const s2Directory = details.directory ?? sandboxDir;
+    const nowTs = Date.now();
+    const { systemPrompt, agentConfig } = buildEvalPromptTemplate(evalAgent, configuredModel);
+
+    const payload = {
+      info: sessionInfo ?? {
+        id: sessionID,
+        title: s2Title,
+        agent: s2Agent,
+        directory: s2Directory,
+      },
+      messages: contextMessages ?? [],
+      capturedUserPrompt: userPromptText,
+      ...(userPrompt ? { codingUserPrompt: userPrompt } : {}),
+      ...(subagentPrompt ? { subagentPrompt } : {}),
+      ...(capturedParts.length > 0 ? { capturedParts } : {}),
+      ...(details.thinking ? { thinking: details.thinking } : {}),
+      ...(verdictResult ? { verdict: verdictResult } : {}),
+      durationMs,
+      status: s2Status,
+      ...(combinedError ? { error: combinedError } : {}),
+    };
+
+    let s2ExportSucceeded = false;
+    let ownedStore: AutoGateEvalStore | undefined;
+    try {
+      const providedStore = input.evalStore ?? input.getEvalStore?.();
+      const store =
+        providedStore && providedStore.isOpen()
+          ? providedStore
+          : (ownedStore = new AutoGateEvalStore(resolvedEvalDbFile));
+
+      store.recordS2Session({
+        s2SessionId: sessionID,
+        targetSessionId: targetSessionId ?? null,
+        title: s2Title,
+        agent: s2Agent,
+        directory: s2Directory,
+        status: s2Status,
+        systemPrompt,
+        agentConfig,
+        modelId: details.modelId ?? null,
+        modelProvider: details.modelProvider ?? null,
+        promptTokens: details.promptTokens ?? null,
+        outputTokens: details.outputTokens ?? null,
+        reasoningTokens: details.reasoningTokens ?? null,
+        cacheReadTokens: details.cacheReadTokens ?? null,
+        cacheWriteTokens: details.cacheWriteTokens ?? null,
+        cost: details.cost ?? null,
+        messageCount: details.messageCount,
+        createdAt: details.createdAt ?? startTime,
+        updatedAt: details.updatedAt ?? nowTs,
+        archivedAt: details.archivedAt ?? nowTs,
+        payload,
+      });
+      s2ExportSucceeded = true;
+
+      if (!input.skipEvaluationRecord) {
+        store.recordEvaluation({
+          ...(actionId ? { id: actionId } : {}),
+          sourceFormat: "opencode",
+          timestamp: startTime,
+          sessionId: targetSessionId ?? "",
+          s2SessionId: sessionID,
+          actionId: actionId ?? null,
+          toolName: actionName,
+          commandString: resolvedCommandString,
+          targetPath: resolvedTargetPath ?? null,
+          workspaceRoot,
+          userPrompt,
+          reasoning: verdictResult?.reason ?? combinedError ?? null,
+          thinking: details.thinking ?? null,
+          verdict: finalVerdict,
+          riskLevel: verdictResult?.risk_level ?? null,
+          userAuthorization: verdictResult?.user_authorization ?? null,
+          durationMs,
+          modelId: details.modelId ?? null,
+          modelProvider: details.modelProvider ?? null,
+          promptTokens: details.promptTokens ?? null,
+          outputTokens: details.outputTokens ?? null,
+          reasoningTokens: details.reasoningTokens ?? null,
+          cost: details.cost ?? null,
+          attempts: attempts > 0 ? attempts : null,
+          error: combinedError ?? null,
+          sourceOrigin: "live",
+        });
+      }
+    } catch (err) {
+      console.warn("[AutoGate] Failed to persist S2 evaluation to evals.db:", err);
+    } finally {
+      if (ownedStore) {
+        try {
+          ownedStore.close();
+        } catch {}
+      }
+    }
+
+    if (input.skipEvaluationRecord && input.onS2SessionRecorded) {
+      try {
+        input.onS2SessionRecorded({
+          ...(actionId ? { actionId } : {}),
+          ...(targetSessionId ? { targetSessionId } : {}),
+          s2SessionId: sessionID,
+          status: s2Status,
+          timestamp: startTime,
+          toolName: actionName,
+          commandString: resolvedCommandString,
+          ...(resolvedTargetPath ? { targetPath: resolvedTargetPath } : {}),
+          workspaceRoot,
+          userPrompt,
+          verdict: finalVerdict,
+          ...(verdictResult?.risk_level ? { riskLevel: verdictResult.risk_level } : {}),
+          ...(verdictResult?.user_authorization
+            ? { userAuthorization: verdictResult.user_authorization }
+            : {}),
+          ...(verdictResult?.reason || combinedError
+            ? { reasoning: verdictResult?.reason ?? combinedError }
+            : {}),
+          ...(details.thinking ? { thinking: details.thinking } : {}),
+          durationMs,
+          ...(details.modelId ? { modelId: details.modelId } : {}),
+          ...(details.modelProvider ? { modelProvider: details.modelProvider } : {}),
+          ...(details.promptTokens !== undefined ? { promptTokens: details.promptTokens } : {}),
+          ...(details.outputTokens !== undefined ? { outputTokens: details.outputTokens } : {}),
+          ...(details.reasoningTokens !== undefined
+            ? { reasoningTokens: details.reasoningTokens }
+            : {}),
+          ...(details.cost !== undefined ? { cost: details.cost } : {}),
+          ...(attempts > 0 ? { attempts } : {}),
+          ...(combinedError ? { error: combinedError } : {}),
+        });
+      } catch (err) {
+        console.warn("[AutoGate] onS2SessionRecorded hook failed:", err);
+      }
+    }
+
+    const cleanupMode: EvalSessionCleanupMode =
+      input.getEvalSessionCleanup?.() ??
+      input.evalSessionCleanup ??
+      input.config?.evalSessionCleanup ??
+      input.config?.opencode?.evalSessionCleanup ??
+      "export-and-delete";
+
+    try {
+      let removedSession = false;
+      const removeFn =
+        typeof client.session.remove === "function"
+          ? client.session.remove.bind(client.session)
+          : undefined;
+      if (cleanupMode === "export-and-delete" && s2ExportSucceeded && removeFn) {
+        const removeOutcome = await settleWithTimeout(
+          () => removeFn({ sessionID }),
+          S2_CLEANUP_TIMEOUT_MS,
+        );
+        removedSession = removeOutcome.ok;
+      }
+
+      if (!removedSession) {
+        await archiveEvaluationSession(client, sessionID, actionName, finalVerdict, archiveOptions);
+      }
     } finally {
       archiveDone = true;
       maybeClearEvalSession();
     }
-    if (!aborted && !input.signal?.aborted && !input.config?.systemOne?.enabled) {
-      logEvaluationDecision(
-        {
-          timestamp: Date.now(),
-          sessionID,
-          toolName: actionName,
-          commandString: typeof actionArgs === "string" ? actionArgs : JSON.stringify(actionArgs),
-          userPrompt,
-          reasoning: capturedReasoning ?? verdictResult?.reason,
-          verdict: finalVerdict,
-          risk_level: verdictResult?.risk_level,
-          user_authorization: verdictResult?.user_authorization,
-          durationMs,
-        },
-        input.config?.evalLogFile,
-      );
-    }
+
+    const baseResult: ClassifierResult = verdictResult ?? {
+      verdict: finalVerdict,
+      reason: combinedError
+        ? `Classifier evaluation error: ${combinedError}`
+        : "Classifier evaluation did not produce a verdict",
+    };
+
+    const enrichedMetadata: Record<string, unknown> = {
+      ...(baseResult.metadata ?? {}),
+      s2SessionId: sessionID,
+      ...(details.modelId !== undefined ? { modelId: details.modelId } : {}),
+      ...(details.modelProvider !== undefined ? { modelProvider: details.modelProvider } : {}),
+      ...(details.promptTokens !== undefined ? { promptTokens: details.promptTokens } : {}),
+      ...(details.outputTokens !== undefined ? { outputTokens: details.outputTokens } : {}),
+      ...(details.reasoningTokens !== undefined
+        ? { reasoningTokens: details.reasoningTokens }
+        : {}),
+      ...(details.cost !== undefined ? { cost: details.cost } : {}),
+      ...(details.thinking !== undefined ? { thinking: details.thinking } : {}),
+      ...(attempts > 0 ? { attempts } : {}),
+      ...(combinedError !== undefined ? { error: combinedError } : {}),
+    };
+
+    finalResult = {
+      ...baseResult,
+      metadata: enrichedMetadata,
+    };
   }
+
+  return finalResult!;
 }
 
 export class OpenCodeSessionEvaluator implements GateEvaluator {
   readonly name = "opencode-session-evaluator";
+  private readonly pendingEvaluations = new Set<Promise<ClassifierResult>>();
+
   constructor(
     private client: OpenCodeSessionClient,
     private config?: AutoGateConfig,
-    private archiveOptions?: ArchiveEvaluationSessionOptions,
+    private archiveOptions?: OpenCodeSessionEvaluatorOptions,
   ) {}
+
+  public async waitForPending(): Promise<void> {
+    while (this.pendingEvaluations.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingEvaluations));
+    }
+  }
+
   async evaluate(action: GateAction): Promise<ClassifierResult> {
-    return classifyRequest({
+    const task = classifyRequest({
       client: this.client,
       userPrompt: action.userPrompt,
       subagentPrompt: action.subagentPrompt,
       actionName: action.toolName,
+      toolName: action.toolName,
+      commandString: action.commandString,
+      targetPath: action.targetPath,
+      targetSessionId: action.sessionID || undefined,
+      actionId: action.id || undefined,
       actionArgs: resolveClassifierActionArgs(action),
       workspaceRoot: action.workspaceRoot,
       environment: action.environment,
@@ -727,8 +1566,23 @@ export class OpenCodeSessionEvaluator implements GateEvaluator {
         ? {
             serverUrl: this.archiveOptions.serverUrl,
             configDir: this.archiveOptions.configDir,
+            evalDbFile: this.archiveOptions.evalDbFile,
+            getEvalDbFile: this.archiveOptions.getEvalDbFile,
+            evalSessionCleanup: this.archiveOptions.evalSessionCleanup,
+            getEvalSessionCleanup: this.archiveOptions.getEvalSessionCleanup,
+            evalStore: this.archiveOptions.evalStore,
+            getEvalStore: this.archiveOptions.getEvalStore,
+            skipEvaluationRecord: this.archiveOptions.skipEvaluationRecord,
+            onS2SessionRecorded: this.archiveOptions.onS2SessionRecorded,
           }
         : {}),
     });
+
+    this.pendingEvaluations.add(task);
+    try {
+      return await task;
+    } finally {
+      this.pendingEvaluations.delete(task);
+    }
   }
 }

@@ -10,6 +10,7 @@ export {
   parseModelRef,
 } from "./agent.js";
 export * from "./types.js";
+export type { EvalSessionCleanupMode, ResolvedAutoGateConfig } from "./types.js";
 export {
   parseSessionId,
   parseRequestId,
@@ -26,6 +27,8 @@ export {
   resolveConfigDir,
   resolveRuntimeDir,
   resolveControlFilePath,
+  resolveEvalDbFile,
+  parseEvalSessionCleanupMode,
   parseEnvironmentConfig,
   parseSystemOneConfig,
   DEFAULT_SYSTEM_ONE_ENDPOINT,
@@ -98,6 +101,30 @@ export {
 } from "./engine.js";
 export * from "./evaluator.js";
 export { DirectApiEvaluator } from "./evaluator.js";
+export * from "./eval-store.js";
+export {
+  AutoGateEvalStore,
+  DEFAULT_EVAL_STORE_BUSY_TIMEOUT_MS,
+  DEFAULT_EVAL_QUERY_LIMIT,
+  computePromptTemplateHash,
+} from "./eval-store.js";
+export * from "./eval-importer.js";
+export {
+  DEFAULT_IMPORT_BATCH_SIZE,
+  DEFAULT_OPENCODE_BUSY_TIMEOUT_MS,
+  DEFAULT_MIN_DELETE_AGE_MINUTES,
+  expandImporterPath,
+  getDefaultJsonlPaths,
+  getDefaultOpenCodeDbPath,
+  measureSqliteFileSizes,
+  computeJsonlLineId,
+  parseCommandVariants,
+  readOpenCodeS2TargetMap,
+  importJsonlToEvalStore,
+  importOpenCodeDbToEvalStore,
+  correlateUnlinkedJsonlEvaluations,
+  migrateToEvalStore,
+} from "./eval-importer.js";
 export * as remote from "./remote/index.js";
 export * from "./remote/index.js";
 export { NtfyAdapter } from "./remote/index.js";

@@ -7,7 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveShadowedApproval } from "../src/approval-bridge.ts";
 import { registerShadowedEvalTool } from "../src/index.ts";
 import { registerToolCallHook } from "../src/hook.ts";
-import { formatActionDetails, loadConfig } from "@autogate/core";
+import { formatActionDetails, loadConfig, AutoGateEvalStore } from "@autogate/core";
 import { OmpNativeEvaluator } from "../src/evaluator.ts";
 import autoGateOmpExtension, { OmpHarnessAdapter } from "../src/index.ts";
 import * as piAi from "@oh-my-pi/pi-ai";
@@ -16,17 +16,27 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
   let store: Map<string, any>;
   let mockProvider: MockInferenceProvider;
 
+  let tempXdgDir: string;
+
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
     store = new Map();
     mockProvider = new MockInferenceProvider(0);
-    process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), `empty-xdg-omp-${Date.now()}`);
+    delete process.env.AUTOGATE_EVAL_DB;
+    tempXdgDir = path.join(
+      os.tmpdir(),
+      `empty-xdg-omp-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    process.env.XDG_CONFIG_HOME = tempXdgDir;
   });
 
   afterEach(async () => {
     process.env = { ...originalEnv };
     await mockProvider.stop();
+    try {
+      await fs.rm(tempXdgDir, { recursive: true, force: true });
+    } catch {}
   });
 
   const getModel = (reasoning = false) =>
@@ -498,8 +508,9 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
     });
   });
 
-  it("OmpNativeEvaluator appends valid JSON line to evalLogFile with action and decision details", async () => {
-    const tmpLog = path.join(os.tmpdir(), `autogate-eval-${Date.now()}.jsonl`);
+  it("OmpNativeEvaluator records evaluation to evalDbFile with action and decision details", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "autogate-omp-db-"));
+    const tmpDb = path.join(tmpDir, "evals.db");
     try {
       mockProvider.pushResponse({
         toolCall: {
@@ -516,36 +527,50 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
       const evaluator = new OmpNativeEvaluator({
         model: getModel(),
         apiKey: "test-key",
-        evalLogFile: tmpLog,
+        evalDbFile: tmpDb,
       });
 
       const result = await evaluator.evaluate({
         id: "act-log-1",
         harness: "omp",
+        sessionID: "ses-omp-db-1",
         toolName: "bash",
         commandString: "echo test-log",
+        targetPath: "/tmp/file.txt",
+        userPrompt: "Echo test log",
       });
       expect(result.verdict).toBe("ALLOW");
 
-      await new Promise((r) => setTimeout(r, 50));
-
-      const content = await fs.readFile(tmpLog, "utf8");
-      const lines = content.trim().split("\n");
-      expect(lines.length).toBeGreaterThan(0);
-      const parsed = JSON.parse(lines[lines.length - 1]);
-      expect(parsed.action.toolName).toBe("bash");
-      expect(parsed.action.command).toBe("echo test-log");
-      expect(parsed.decision.verdict).toBe("ALLOW");
-      expect(parsed.decision.reason).toBe("Logging test success");
-    } finally {
+      const evalStore = new AutoGateEvalStore(tmpDb, { readonly: true });
       try {
-        await fs.unlink(tmpLog);
-      } catch {}
+        const records = evalStore.queryEvaluations();
+        expect(records.length).toBe(1);
+        const rec = records[0]!;
+        expect(rec.sourceFormat).toBe("omp");
+        expect(rec.actionId).toBe("act-log-1");
+        expect(rec.sessionId).toBe("ses-omp-db-1");
+        expect(rec.toolName).toBe("bash");
+        expect(rec.commandString).toBe("echo test-log");
+        expect(rec.targetPath).toBe("/tmp/file.txt");
+        expect(rec.userPrompt).toBe("Echo test log");
+        expect(rec.verdict).toBe("ALLOW");
+        expect(rec.riskLevel).toBe("LOW");
+        expect(rec.userAuthorization).toBe("HIGH");
+        expect(rec.reasoning).toBe("Logging test success");
+        expect(rec.attempts).toBe(1);
+        expect(rec.modelId).toBe("mock-model");
+        expect(rec.modelProvider).toBe("mock-provider");
+      } finally {
+        evalStore.close();
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("OmpNativeEvaluator captures thinking trace and reasoning tokens in evalLogFile", async () => {
-    const tmpLog = path.join(os.tmpdir(), `autogate-eval-thinking-${Date.now()}.jsonl`);
+  it("OmpNativeEvaluator captures thinking trace and reasoning tokens in evalDbFile", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "autogate-omp-think-db-"));
+    const tmpDb = path.join(tmpDir, "evals.db");
     try {
       const spy = spyOn(piAi, "completeSimple").mockResolvedValueOnce({
         role: "assistant",
@@ -570,38 +595,45 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
         stopReason: "toolUse",
       } as any);
 
-      const evaluator = new OmpNativeEvaluator({
-        model: { id: "test-model" },
-        apiKey: "test-key",
-        evalLogFile: tmpLog,
-      });
-
-      const result = await evaluator.evaluate({
-        id: "act-thinking-1",
-        harness: "omp",
-        toolName: "bash",
-        commandString: "echo thinking",
-      });
-
-      expect(result.verdict).toBe("ALLOW");
-
-      await new Promise((r) => setTimeout(r, 50));
-
-      const content = await fs.readFile(tmpLog, "utf8");
-      const lines = content.trim().split("\n");
-      const parsed = JSON.parse(lines[lines.length - 1]);
-      expect(parsed.inference.thinking).toBe("Analyzing potential risk...");
-      expect(parsed.inference.reasoningTokens).toBe(42);
-      spy.mockRestore();
-    } finally {
       try {
-        await fs.unlink(tmpLog);
-      } catch {}
+        const evaluator = new OmpNativeEvaluator({
+          model: { id: "test-model", provider: "test-provider" },
+          apiKey: "test-key",
+          evalDbFile: tmpDb,
+        });
+
+        const result = await evaluator.evaluate({
+          id: "act-thinking-1",
+          harness: "omp",
+          sessionID: "ses-omp-think",
+          toolName: "bash",
+          commandString: "echo thinking",
+        });
+
+        expect(result.verdict).toBe("ALLOW");
+
+        const evalStore = new AutoGateEvalStore(tmpDb, { readonly: true });
+        try {
+          const records = evalStore.queryEvaluations();
+          expect(records.length).toBe(1);
+          const rec = records[0]!;
+          expect(rec.thinking).toBe("Analyzing potential risk...");
+          expect(rec.reasoningTokens).toBe(42);
+          expect(rec.promptTokens).toBe(10);
+          expect(rec.outputTokens).toBe(10);
+        } finally {
+          evalStore.close();
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("OmpNativeEvaluator completes normally when evalLogFile is unwritable or invalid", async () => {
-    const invalidLogPath = os.tmpdir();
+  it("OmpNativeEvaluator completes normally when evalDbFile is unwritable or invalid", async () => {
+    const invalidDbPath = os.tmpdir();
 
     mockProvider.pushResponse({
       toolCall: {
@@ -610,7 +642,7 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
           risk_level: "LOW",
           user_authorization: "HIGH",
           verdict: "ALLOW",
-          reason: "Unwritable log test",
+          reason: "Unwritable DB test",
         },
       },
     });
@@ -618,7 +650,7 @@ describe("shadowed eval tool & approval support & OmpNativeEvaluator strict tool
     const evaluator = new OmpNativeEvaluator({
       model: getModel(),
       apiKey: "test-key",
-      evalLogFile: invalidLogPath,
+      evalDbFile: invalidDbPath,
     });
 
     const result = await evaluator.evaluate({

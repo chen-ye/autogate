@@ -140,7 +140,7 @@ export function formatEvalCliHelp(): string {
     "  --s1-api-key <key>         System 1 Bearer API key",
     "  --s1-timeout <ms>          System 1 request timeout in milliseconds",
     "  --classifier-timeout <ms>  System 2 classifier timeout in milliseconds",
-    "  --file <path>              Historical JSONL eval log path",
+    "  --file <path>              Historical eval SQLite DB (.db / :memory:) or JSONL eval log path",
     "  --cache-dir <dir>          Dataset cache directory (default: ~/.cache/autogate/bench)",
     "  --out <path>               Output artifact JSON path",
     "  --compare <path>           Baseline artifact JSON path for diffing and regression checks",
@@ -343,7 +343,7 @@ export function parseEvalCliArgs(argv: readonly string[]): EvalCliOptions {
         const [val, nextIdx] = readValue(i, flag, inlineVal);
         i = nextIdx;
         if (!val.trim()) throw new Error("Invalid --file: cannot be empty");
-        file = path.resolve(expandHomePath(val.trim()));
+        file = val.trim() === ":memory:" ? ":memory:" : path.resolve(expandHomePath(val.trim()));
         break;
       }
       case "--cache-dir": {

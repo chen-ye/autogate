@@ -1,7 +1,8 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
-import type { AutoGateCoreEngine } from "../../core/src/index.ts";
+import {
+  AutoGateEvalStore,
+  type AutoGateCoreEngine,
+  type RecordEvaluationInput,
+} from "../../core/src/index.ts";
 import type { GateAction, GateDecision } from "../../core/src/types.ts";
 
 export const verdictStore = new Map<
@@ -9,15 +10,18 @@ export const verdictStore = new Map<
   { verdict: string; policy: "allow" | "deny" | "prompt"; reason?: string }
 >();
 
-async function appendCascadeEvalLog(
-  entry: Record<string, unknown>,
-  evalLogFile?: string,
-): Promise<void> {
-  const targetFile = evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
+function recordCascadeEval(entry: RecordEvaluationInput, evalDbFile?: string): void {
+  let store: AutoGateEvalStore | undefined;
   try {
-    await fs.mkdir(path.dirname(targetFile), { recursive: true });
-    await fs.appendFile(targetFile, JSON.stringify(entry) + "\n", "utf8");
-  } catch {}
+    store = new AutoGateEvalStore(evalDbFile);
+    store.recordEvaluation(entry);
+  } catch {
+    // Best-effort evaluation persistence
+  } finally {
+    try {
+      store?.close();
+    } catch {}
+  }
 }
 
 export function registerToolCallHook(
@@ -25,7 +29,8 @@ export function registerToolCallHook(
   engine: AutoGateCoreEngine,
   store = verdictStore,
   setContext?: (ctx: Record<string, unknown>) => void,
-  evalLogFile?: string,
+  evalDbFile?: string,
+  skipCascadeLog = false,
 ): void {
   const p = pi as
     | {
@@ -144,7 +149,7 @@ export function registerToolCallHook(
         ...(decision.cascade ? { cascade: decision.cascade } : {}),
       });
     } catch {}
-    if (decision.cascade) {
+    if (decision.cascade && !skipCascadeLog) {
       const metaModel =
         decision.metadata?.model && typeof decision.metadata.model === "object"
           ? (decision.metadata.model as Record<string, unknown>)
@@ -153,32 +158,38 @@ export function registerToolCallHook(
         decision.metadata?.inference && typeof decision.metadata.inference === "object"
           ? (decision.metadata.inference as Record<string, unknown>)
           : undefined;
-      appendCascadeEvalLog(
+      recordCascadeEval(
         {
-          timestamp: new Date().toISOString(),
+          sourceFormat: "omp",
+          timestamp: Date.now(),
+          sessionId: sessionID,
+          actionId: String(action.id),
+          toolName: action.toolName,
+          commandString: action.commandString ?? "",
+          targetPath: action.targetPath || null,
+          workspaceRoot: action.workspaceRoot,
           userPrompt: action.userPrompt,
-          action: {
-            id: action.id,
-            toolName: action.toolName,
-            command: action.commandString,
-            targetPath: action.targetPath,
-            sessionID,
-          },
-          ...(metaModel ? { model: metaModel } : {}),
-          inference: {
-            ...(metaInference ?? {}),
-            durationMs: hookDurationMs,
-          },
-          decision: {
-            verdict: decision.verdict,
-            riskLevel: decision.riskLevel,
-            userAuthorization: decision.userAuthorization,
-            reason: decision.reason,
-          },
+          modelId: typeof metaModel?.id === "string" ? metaModel.id : null,
+          modelProvider: typeof metaModel?.provider === "string" ? metaModel.provider : null,
+          durationMs: hookDurationMs,
+          promptTokens:
+            typeof metaInference?.promptTokens === "number" ? metaInference.promptTokens : null,
+          outputTokens:
+            typeof metaInference?.outputTokens === "number" ? metaInference.outputTokens : null,
+          reasoningTokens:
+            typeof metaInference?.reasoningTokens === "number"
+              ? metaInference.reasoningTokens
+              : null,
+          thinking: typeof metaInference?.thinking === "string" ? metaInference.thinking : null,
+          attempts: typeof metaInference?.attempts === "number" ? metaInference.attempts : null,
+          verdict: decision.verdict,
+          riskLevel: decision.riskLevel ?? null,
+          userAuthorization: decision.userAuthorization ?? null,
+          reasoning: decision.reason,
           cascade: decision.cascade,
         },
-        evalLogFile,
-      ).catch(() => {});
+        evalDbFile,
+      );
     }
 
     if (decision.verdict === "ALLOW") {

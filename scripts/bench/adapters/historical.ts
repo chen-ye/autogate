@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { loadFileConfig } from "../../../packages/core/src/config.js";
+import { resolveEvalDbFile } from "../../../packages/core/src/config.js";
+import { AutoGateEvalStore, type EvaluationRecord } from "../../../packages/core/src/eval-store.js";
 import type { ClassifierVerdict, PermissionEventData } from "../../../packages/core/src/types.js";
 import { ensureEmptyBenchWorkspace, expandHomePath } from "../paths.js";
 import {
@@ -15,37 +16,43 @@ import {
 
 export interface HistoricalLoadOptions {
   readonly file?: string;
+  readonly dbFile?: string;
   readonly maxCases?: number;
 }
 
-const DEFAULT_EVAL_LOG_CANDIDATES = [
-  "~/.config/autogate/logs/evals.jsonl",
-  "~/.omp/logs/autogate-evals.jsonl",
-] as const;
+export type HistoricalEvalSource =
+  | { readonly kind: "db"; readonly path: string }
+  | { readonly kind: "jsonl"; readonly path: string };
 
-export function resolveHistoricalEvalLogPath(explicitFile?: string): string | undefined {
+export function resolveHistoricalEvalSource(
+  explicitFile?: string,
+  explicitDbFile?: string,
+): HistoricalEvalSource | undefined {
+  if (typeof explicitDbFile === "string" && explicitDbFile.trim().length > 0) {
+    const trimmed = explicitDbFile.trim();
+    return {
+      kind: "db",
+      path: trimmed === ":memory:" ? ":memory:" : path.resolve(expandHomePath(trimmed)),
+    };
+  }
+
   if (typeof explicitFile === "string" && explicitFile.trim().length > 0) {
-    return path.resolve(expandHomePath(explicitFile.trim()));
-  }
-
-  const envLog = process.env.AUTOGATE_EVAL_LOG;
-  if (typeof envLog === "string" && envLog.trim().length > 0) {
-    return path.resolve(expandHomePath(envLog.trim()));
-  }
-
-  const fileCfg = loadFileConfig();
-  if (typeof fileCfg.evalLogFile === "string" && fileCfg.evalLogFile.trim().length > 0) {
-    return path.resolve(expandHomePath(fileCfg.evalLogFile.trim()));
-  }
-
-  for (const candidate of DEFAULT_EVAL_LOG_CANDIDATES) {
-    const resolved = path.resolve(expandHomePath(candidate));
-    if (fs.existsSync(resolved)) {
-      return resolved;
+    const trimmed = explicitFile.trim();
+    if (trimmed === ":memory:") {
+      return { kind: "db", path: ":memory:" };
     }
+    const resolved = path.resolve(expandHomePath(trimmed));
+    if (resolved.toLowerCase().endsWith(".jsonl")) {
+      return { kind: "jsonl", path: resolved };
+    }
+    return { kind: "db", path: resolved };
   }
 
-  return undefined;
+  const dbPath = resolveEvalDbFile();
+  if (dbPath !== ":memory:" && !fs.existsSync(dbPath)) {
+    return undefined;
+  }
+  return { kind: "db", path: dbPath };
 }
 
 interface UnwrappedHistoricalAction {
@@ -201,16 +208,89 @@ function projectHistoricalEvent(
   });
 }
 
+interface HistoricalCandidate {
+  readonly toolName: string;
+  readonly commandString?: string;
+  readonly targetPath?: string;
+  readonly userPromptRaw: string;
+  readonly workspaceRootRaw?: string;
+  readonly verdictRaw: string;
+}
+
+function appendHistoricalCandidate(
+  candidate: HistoricalCandidate,
+  sourceTag: string,
+  fallbackWorkspace: string,
+  seen: Set<string>,
+  byVerdict: Record<ClassifierVerdict, StaticBenchCase[]>,
+): void {
+  const { toolName, commandString, targetPath, userPromptRaw, workspaceRootRaw, verdictRaw } =
+    candidate;
+
+  if (verdictRaw !== "ALLOW" && verdictRaw !== "BLOCK" && verdictRaw !== "UNSURE") {
+    return;
+  }
+  if (!commandString && !targetPath) {
+    return;
+  }
+
+  const unwrapped = unwrapSerializedCommandString(commandString, targetPath);
+  if (isDummyHistoricalCommand(unwrapped)) {
+    return;
+  }
+
+  const dedupeKey = `${toolName}::${unwrapped.rawText ?? commandString ?? ""}::${targetPath ?? ""}::${userPromptRaw.slice(0, 80)}`;
+  if (seen.has(dedupeKey)) {
+    return;
+  }
+  seen.add(dedupeKey);
+
+  const workspaceRoot = workspaceRootRaw ?? fallbackWorkspace;
+  const caseId = `hist-${verdictRaw.toLowerCase()}-${byVerdict[verdictRaw].length + 1}`;
+  byVerdict[verdictRaw].push({
+    id: caseId,
+    dataset: "historical",
+    split: verdictRaw.toLowerCase(),
+    sourceTag,
+    event: projectHistoricalEvent(caseId, toolName, unwrapped, targetPath),
+    promptContext: {
+      userPrompt: neutralizeReservedPromptMarkers(userPromptRaw),
+      workspaceRoot,
+      environment: { trustedPaths: [workspaceRoot] },
+    },
+    expectedVerdict: verdictRaw,
+  });
+}
+
+function queryStoreRecordsDesc(dbPath: string): EvaluationRecord[] {
+  const store = new AutoGateEvalStore(dbPath, { readonly: true });
+  try {
+    const records: EvaluationRecord[] = [];
+    const pageSize = 1000;
+    for (let offset = 0; ; offset += pageSize) {
+      const batch = store.queryEvaluations({ limit: pageSize, offset, order: "desc" });
+      records.push(...batch);
+      if (batch.length < pageSize) {
+        break;
+      }
+    }
+    return records;
+  } finally {
+    store.close();
+  }
+}
+
 export function loadHistoricalBenchCases(options?: HistoricalLoadOptions): StaticBenchCase[] {
-  const filePath = resolveHistoricalEvalLogPath(options?.file);
-  if (!filePath || !fs.existsSync(filePath)) {
+  const source = resolveHistoricalEvalSource(options?.file, options?.dbFile);
+  if (!source) {
+    return [];
+  }
+  if (source.path !== ":memory:" && !fs.existsSync(source.path)) {
     return [];
   }
 
   const fallbackWorkspace = ensureEmptyBenchWorkspace();
-  const raw = fs.readFileSync(filePath, "utf8");
-  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-
+  const sourceTag = source.path === ":memory:" ? ":memory:" : path.basename(source.path);
   const byVerdict: Record<ClassifierVerdict, StaticBenchCase[]> = {
     ALLOW: [],
     BLOCK: [],
@@ -218,98 +298,130 @@ export function loadHistoricalBenchCases(options?: HistoricalLoadOptions): Stati
   };
   const seen = new Set<string>();
 
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let parsed: Record<string, unknown>;
-    try {
-      const obj: unknown = JSON.parse(lines[i]);
-      if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+  if (source.kind === "db") {
+    const records = queryStoreRecordsDesc(source.path);
+    for (const record of records) {
+      if (record.modelProvider === "mock-provider" || record.modelId === "mock-model") {
         continue;
       }
-      parsed = obj as Record<string, unknown>;
-    } catch (err) {
-      void err;
-      continue;
+      if (
+        (record.s2Aborted && record.cascadeWinner !== "system1") ||
+        (record.verdict === "UNSURE" && !record.riskLevel && Boolean(record.error))
+      ) {
+        continue;
+      }
+      appendHistoricalCandidate(
+        {
+          toolName: record.toolName.trim() || "bash",
+          commandString: record.commandString || undefined,
+          targetPath: record.targetPath ?? undefined,
+          userPromptRaw: record.userPrompt,
+          workspaceRootRaw: record.workspaceRoot?.trim() || undefined,
+          verdictRaw: record.verdict,
+        },
+        sourceTag,
+        fallbackWorkspace,
+        seen,
+        byVerdict,
+      );
     }
+  } else {
+    const raw = fs.readFileSync(source.path, "utf8");
+    const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
 
-    const modelObj =
-      parsed.model && typeof parsed.model === "object"
-        ? (parsed.model as Record<string, unknown>)
-        : undefined;
-    if (modelObj?.provider === "mock-provider" || modelObj?.id === "mock-model") {
-      continue;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let parsed: Record<string, unknown>;
+      try {
+        const obj: unknown = JSON.parse(lines[i]);
+        if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+          continue;
+        }
+        parsed = obj as Record<string, unknown>;
+      } catch (err) {
+        void err;
+        continue;
+      }
+
+      const modelObj =
+        parsed.model && typeof parsed.model === "object"
+          ? (parsed.model as Record<string, unknown>)
+          : undefined;
+      if (
+        modelObj?.provider === "mock-provider" ||
+        modelObj?.id === "mock-model" ||
+        parsed.modelProvider === "mock-provider" ||
+        parsed.modelId === "mock-model"
+      ) {
+        continue;
+      }
+
+      const actionObj =
+        parsed.action && typeof parsed.action === "object"
+          ? (parsed.action as Record<string, unknown>)
+          : undefined;
+      const decisionObj =
+        parsed.decision && typeof parsed.decision === "object"
+          ? (parsed.decision as Record<string, unknown>)
+          : undefined;
+
+      const verdictRaw =
+        (typeof parsed.verdict === "string" ? parsed.verdict : undefined) ??
+        (typeof decisionObj?.verdict === "string" ? decisionObj.verdict : undefined) ??
+        "";
+      const riskLevelRaw =
+        (typeof parsed.risk_level === "string" ? parsed.risk_level : undefined) ??
+        (typeof parsed.riskLevel === "string" ? parsed.riskLevel : undefined) ??
+        (typeof decisionObj?.risk_level === "string" ? decisionObj.risk_level : undefined);
+      const hasError = typeof parsed.error === "string" && parsed.error.trim().length > 0;
+      const isS2Aborted = Boolean(parsed.s2Aborted) && parsed.cascadeWinner !== "system1";
+      if (
+        isS2Aborted ||
+        (verdictRaw.trim().toUpperCase() === "UNSURE" && !riskLevelRaw && hasError)
+      ) {
+        continue;
+      }
+
+      const toolName =
+        (typeof parsed.toolName === "string" && parsed.toolName.trim()
+          ? parsed.toolName
+          : undefined) ??
+        (typeof actionObj?.toolName === "string" && actionObj.toolName.trim()
+          ? actionObj.toolName
+          : undefined) ??
+        "bash";
+      const commandString =
+        (typeof parsed.commandString === "string" ? parsed.commandString : undefined) ??
+        (typeof actionObj?.command === "string" ? actionObj.command : undefined);
+      const targetPath =
+        (typeof parsed.targetPath === "string" ? parsed.targetPath : undefined) ??
+        (typeof actionObj?.targetPath === "string" ? actionObj.targetPath : undefined);
+      const userPromptRaw =
+        (typeof parsed.userPrompt === "string" ? parsed.userPrompt : undefined) ??
+        (typeof actionObj?.userPrompt === "string" ? actionObj.userPrompt : undefined) ??
+        "";
+      const workspaceRootRaw =
+        (typeof parsed.workspaceRoot === "string" && parsed.workspaceRoot.trim()
+          ? parsed.workspaceRoot.trim()
+          : undefined) ??
+        (typeof actionObj?.workspaceRoot === "string" && actionObj.workspaceRoot.trim()
+          ? actionObj.workspaceRoot.trim()
+          : undefined);
+
+      appendHistoricalCandidate(
+        {
+          toolName,
+          commandString,
+          targetPath,
+          userPromptRaw,
+          workspaceRootRaw,
+          verdictRaw,
+        },
+        sourceTag,
+        fallbackWorkspace,
+        seen,
+        byVerdict,
+      );
     }
-
-    const actionObj =
-      parsed.action && typeof parsed.action === "object"
-        ? (parsed.action as Record<string, unknown>)
-        : undefined;
-    const decisionObj =
-      parsed.decision && typeof parsed.decision === "object"
-        ? (parsed.decision as Record<string, unknown>)
-        : undefined;
-
-    const toolName =
-      (typeof parsed.toolName === "string" && parsed.toolName.trim()
-        ? parsed.toolName
-        : undefined) ??
-      (typeof actionObj?.toolName === "string" && actionObj.toolName.trim()
-        ? actionObj.toolName
-        : undefined) ??
-      "bash";
-    const commandString =
-      (typeof parsed.commandString === "string" ? parsed.commandString : undefined) ??
-      (typeof actionObj?.command === "string" ? actionObj.command : undefined);
-    const targetPath =
-      (typeof parsed.targetPath === "string" ? parsed.targetPath : undefined) ??
-      (typeof actionObj?.targetPath === "string" ? actionObj.targetPath : undefined);
-    const userPromptRaw =
-      (typeof parsed.userPrompt === "string" ? parsed.userPrompt : undefined) ??
-      (typeof actionObj?.userPrompt === "string" ? actionObj.userPrompt : undefined) ??
-      "";
-    const workspaceRootRaw =
-      (typeof parsed.workspaceRoot === "string" && parsed.workspaceRoot.trim()
-        ? parsed.workspaceRoot.trim()
-        : undefined) ??
-      (typeof actionObj?.workspaceRoot === "string" && actionObj.workspaceRoot.trim()
-        ? actionObj.workspaceRoot.trim()
-        : undefined);
-    const verdictRaw =
-      (typeof parsed.verdict === "string" ? parsed.verdict : undefined) ??
-      (typeof decisionObj?.verdict === "string" ? decisionObj.verdict : undefined);
-
-    if (verdictRaw !== "ALLOW" && verdictRaw !== "BLOCK" && verdictRaw !== "UNSURE") {
-      continue;
-    }
-    if (!commandString && !targetPath) {
-      continue;
-    }
-
-    const unwrapped = unwrapSerializedCommandString(commandString, targetPath);
-    if (isDummyHistoricalCommand(unwrapped)) {
-      continue;
-    }
-
-    const dedupeKey = `${toolName}::${unwrapped.rawText ?? commandString ?? ""}::${targetPath ?? ""}::${userPromptRaw.slice(0, 80)}`;
-    if (seen.has(dedupeKey)) {
-      continue;
-    }
-    seen.add(dedupeKey);
-
-    const workspaceRoot = workspaceRootRaw ?? fallbackWorkspace;
-    const caseId = `hist-${verdictRaw.toLowerCase()}-${byVerdict[verdictRaw].length + 1}`;
-    byVerdict[verdictRaw].push({
-      id: caseId,
-      dataset: "historical",
-      split: verdictRaw.toLowerCase(),
-      sourceTag: path.basename(filePath),
-      event: projectHistoricalEvent(caseId, toolName, unwrapped, targetPath),
-      promptContext: {
-        userPrompt: neutralizeReservedPromptMarkers(userPromptRaw),
-        workspaceRoot,
-        environment: { trustedPaths: [workspaceRoot] },
-      },
-      expectedVerdict: verdictRaw,
-    });
   }
 
   const maxCases = options?.maxCases;

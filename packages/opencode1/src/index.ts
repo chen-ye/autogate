@@ -5,6 +5,7 @@ import {
   loadConfig,
   NtfyAdapter,
   AutoGateCoreEngine,
+  AutoGateEvalStore,
   recordEscalationIntent,
   isClassifierVerdict,
   isRiskLevel,
@@ -14,14 +15,14 @@ import {
   type PermissionEventData,
   type GateAction,
   type GateEvaluator,
-  type AutoGateConfig,
+  type ResolvedAutoGateConfig,
 } from "@autogate/core";
 import {
   OpenCodeV1SessionEvaluator,
   isEvaluationSession,
   recordEvaluationVerdict,
   evaluationSessions,
-  logEvaluationDecision,
+  recordEvaluationDecision,
 } from "./evaluator.js";
 import { OpenCodeV1PromptResolver } from "./prompt-resolver.js";
 import type { OpenCodeV1SessionClient, OpenCodeV1Event } from "./types.js";
@@ -88,12 +89,14 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
   private promptResolver: OpenCodeV1PromptResolver;
   private stopListener?: () => void;
   private ctx: PluginInput;
-  private config: AutoGateConfig;
+  private config: ResolvedAutoGateConfig;
+  private evalStore?: AutoGateEvalStore;
+  private storeClosed = false;
   readonly serverUrl: string;
 
   constructor(ctx: PluginInput, options?: Record<string, unknown>) {
     this.ctx = ctx;
-    const config = loadConfig(options);
+    const config = loadConfig(options, "opencode");
     this.config = config;
     const serverUrl =
       config.opencode?.serverUrl ||
@@ -117,9 +120,10 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
 
     const client = ctx.client as unknown as OpenCodeV1SessionClient;
     this.promptResolver = new OpenCodeV1PromptResolver(client);
+    const getStore = () => (this.storeClosed ? undefined : this.getEvalStore());
     const evaluator =
       (options?.evaluator as GateEvaluator | undefined) ??
-      new OpenCodeV1SessionEvaluator(client, config);
+      new OpenCodeV1SessionEvaluator(client, config, getStore);
     const remoteReviewEnabled = config.ntfyTopic
       ? typeof options?.remoteReviewEnabled === "boolean"
         ? options.remoteReviewEnabled
@@ -131,10 +135,47 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
       evaluator,
       workspaceRoot,
       remoteReviewEnabled,
+      onClassifierResult: ({ action, result, durationMs, startTime }) => {
+        if (!result.cascade || this.storeClosed) return;
+        recordEvaluationDecision(
+          {
+            sourceFormat: "opencode1",
+            timestamp: startTime,
+            sessionId: action.sessionID,
+            actionId: String(action.id),
+            toolName: action.toolName,
+            commandString:
+              action.commandString ?? JSON.stringify(action.patterns || action.metadata || {}),
+            targetPath: action.targetPath ?? null,
+            workspaceRoot: action.workspaceRoot,
+            userPrompt: action.userPrompt,
+            reasoning:
+              (typeof result.metadata?.reasoning === "string"
+                ? result.metadata.reasoning
+                : undefined) ?? result.reason,
+            verdict: result.verdict,
+            riskLevel: result.risk_level ?? null,
+            userAuthorization: result.user_authorization ?? null,
+            durationMs,
+            cascade: result.cascade,
+          },
+          this.config.evalDbFile,
+          getStore(),
+        );
+      },
     });
   }
 
+  private getEvalStore(): AutoGateEvalStore {
+    if (this.evalStore && this.evalStore.isOpen()) {
+      return this.evalStore;
+    }
+    this.evalStore = new AutoGateEvalStore(this.config.evalDbFile);
+    return this.evalStore;
+  }
+
   async start(): Promise<void> {
+    this.storeClosed = false;
     this.stopListener = await this.engine.start();
   }
 
@@ -143,6 +184,15 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
     if (this.stopListener) {
       this.stopListener();
       this.stopListener = undefined;
+    }
+    this.storeClosed = true;
+    if (this.evalStore) {
+      try {
+        this.evalStore.close();
+      } catch {
+        // Ignore cleanup errors on close
+      }
+      this.evalStore = undefined;
     }
   }
 
@@ -227,31 +277,7 @@ export class OpenCodeV1HarnessAdapter implements HarnessAdapter {
       metadata: request.metadata,
       ...(signal ? { signal } : {}),
     };
-    const evalStartTime = Date.now();
     const decision = await this.engine.evaluate(action);
-    const durationMs = Date.now() - evalStartTime;
-    if (decision.cascade) {
-      logEvaluationDecision(
-        {
-          timestamp: Date.now(),
-          sessionID,
-          toolName,
-          commandString:
-            commandString ?? JSON.stringify(request.patterns || request.metadata || {}),
-          userPrompt: action.userPrompt,
-          reasoning:
-            (typeof decision.metadata?.reasoning === "string"
-              ? decision.metadata.reasoning
-              : undefined) ?? decision.reason,
-          verdict: decision.verdict,
-          risk_level: decision.riskLevel,
-          user_authorization: decision.userAuthorization,
-          durationMs,
-          cascade: decision.cascade,
-        },
-        this.config.evalLogFile,
-      );
-    }
     if (decision.verdict === "UNSURE" && !decision.reply) {
       return;
     }

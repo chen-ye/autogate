@@ -1,5 +1,11 @@
-import type { GateEvaluator, GateAction, ClassifierResult } from "@autogate/core";
+import type {
+  GateEvaluator,
+  GateAction,
+  ClassifierResult,
+  RecordEvaluationInput,
+} from "@autogate/core";
 import {
+  AutoGateEvalStore,
   buildClassifierSystemPrompt,
   buildClassifierUserPrompt,
   isClassifierVerdict,
@@ -7,9 +13,6 @@ import {
   isUserAuthorization,
   resolveClassifierActionArgs,
 } from "@autogate/core";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { OmpEvaluatorOptions, OmpLogger, OmpContext } from "./types.js";
 
@@ -36,7 +39,8 @@ export class OmpNativeEvaluator implements GateEvaluator {
   private currentCtx: OmpContext | null = null;
   private classifierTimeout?: number;
   private logger?: OmpLogger;
-  private evalLogFile?: string;
+  private evalDbFile?: string;
+  private getEvalStore?: () => AutoGateEvalStore | undefined;
   private suppressEvalLog?: boolean;
 
   constructor(
@@ -61,7 +65,8 @@ export class OmpNativeEvaluator implements GateEvaluator {
       this.classifierTimeout = opts.classifierTimeout;
       this.getCtx = opts.getCtx;
       this.logger = opts.logger;
-      this.evalLogFile = opts.evalLogFile;
+      this.evalDbFile = opts.evalDbFile;
+      this.getEvalStore = opts.getEvalStore;
       this.suppressEvalLog = opts.suppressEvalLog;
     } else if (typeof arg1 === "function") {
       this.getCtx = arg1 as () => unknown;
@@ -75,6 +80,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
         if (o.apiKey) this.fallbackApiKey = o.apiKey;
         if (o.logger) this.logger = o.logger;
+        if (o.evalDbFile) this.evalDbFile = o.evalDbFile;
       }
       if (typeof arg4 === "number") {
         this.classifierTimeout = arg4;
@@ -82,7 +88,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         const o = arg4 as OmpEvaluatorOptions;
         this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
         if (o.logger) this.logger = o.logger;
-        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
+        if (o.evalDbFile) this.evalDbFile = o.evalDbFile;
       }
     } else {
       this.fallbackModel = arg1;
@@ -94,7 +100,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         if (o.apiKey) this.fallbackApiKey = o.apiKey;
         if (o.sessionId) this.fallbackSessionId = o.sessionId;
         if (o.logger) this.logger = o.logger;
-        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
+        if (o.evalDbFile) this.evalDbFile = o.evalDbFile;
       }
       if (typeof arg3 === "string") {
         this.fallbackSessionId = arg3;
@@ -104,14 +110,14 @@ export class OmpNativeEvaluator implements GateEvaluator {
         const o = arg3 as OmpEvaluatorOptions;
         this.classifierTimeout = o.classifierTimeout ?? this.classifierTimeout;
         if (o.logger) this.logger = o.logger;
-        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
+        if (o.evalDbFile) this.evalDbFile = o.evalDbFile;
       }
       if (typeof arg4 === "number") {
         this.classifierTimeout = arg4;
       } else if (typeof arg4 === "object" && arg4 !== null) {
         const o = arg4 as OmpEvaluatorOptions;
         if (o.logger) this.logger = o.logger;
-        if (o.evalLogFile) this.evalLogFile = o.evalLogFile;
+        if (o.evalDbFile) this.evalDbFile = o.evalDbFile;
       }
     }
 
@@ -124,14 +130,30 @@ export class OmpNativeEvaluator implements GateEvaluator {
     this.currentCtx = ctx;
   }
 
-  private async appendEvalLog(entry: Record<string, unknown>): Promise<void> {
+  private recordEvalLog(entry: RecordEvaluationInput): void {
     if (this.suppressEvalLog) return;
-    const targetFile =
-      this.evalLogFile || path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
+    const shared = this.getEvalStore?.();
+    if (shared && shared.isOpen()) {
+      try {
+        shared.recordEvaluation(entry);
+      } catch {
+        // Best-effort evaluation persistence
+      }
+      return;
+    }
+    let store: AutoGateEvalStore | undefined;
     try {
-      await fs.mkdir(path.dirname(targetFile), { recursive: true });
-      await fs.appendFile(targetFile, JSON.stringify(entry) + "\n", "utf8");
-    } catch {}
+      store = new AutoGateEvalStore(this.evalDbFile);
+      store.recordEvaluation(entry);
+    } catch {
+      // Best-effort evaluation persistence
+    } finally {
+      try {
+        store?.close();
+      } catch {
+        // Ignore cleanup errors on close
+      }
+    }
   }
 
   private log(level: "debug" | "info" | "warn" | "error", message: string, data?: unknown) {
@@ -149,7 +171,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
       ? AbortSignal.any([action.signal, timeoutSignal])
       : timeoutSignal;
 
-    let sessionId: string = String(action.sessionID);
+    let sessionId: string = typeof action.sessionID === "string" ? action.sessionID : "";
     let lastResponse: unknown = null;
     let attempts = 0;
     let thinking: string | undefined = undefined;
@@ -259,6 +281,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
       let validResult: ClassifierResult | null = null;
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        attempts = attempt + 1;
         const response = await completeSimple(
           model as Parameters<typeof completeSimple>[0],
           {
@@ -414,7 +437,7 @@ export class OmpNativeEvaluator implements GateEvaluator {
         rawRespObj.usage && typeof rawRespObj.usage === "object" ? rawRespObj.usage : {}
       ) as Record<string, unknown>;
 
-      const thinking =
+      thinking =
         rawThinking ||
         (typeof lastObj.reasoning_content === "string" ? lastObj.reasoning_content : undefined) ||
         (typeof lastObj.reasoning === "string" ? lastObj.reasoning : undefined) ||
@@ -459,69 +482,66 @@ export class OmpNativeEvaluator implements GateEvaluator {
           }
         : undefined;
 
+      const modelId = typeof modelObj.id === "string" ? modelObj.id : null;
+      const modelProvider = typeof modelObj.provider === "string" ? modelObj.provider : null;
+      const promptTokens = typeof respUsage.input === "number" ? respUsage.input : null;
+      const outputTokens = typeof respUsage.output === "number" ? respUsage.output : null;
+      const userPromptText = typeof action.userPrompt === "string" ? action.userPrompt : "";
+
       if (!validResult) {
-        this.appendEvalLog({
-          timestamp: new Date().toISOString(),
-          action: {
-            id: action.id,
-            toolName: action.toolName,
-            command: action.commandString,
-            targetPath: action.targetPath,
-            sessionID: sessionId,
-          },
-          model: {
-            id: typeof modelObj.id === "string" ? modelObj.id : undefined,
-            provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
-          },
-          inference: {
-            durationMs,
-            promptTokens: typeof respUsage.input === "number" ? respUsage.input : undefined,
-            outputTokens: typeof respUsage.output === "number" ? respUsage.output : undefined,
-            reasoningTokens,
-            thinking,
-            attempts,
-          },
-          decision: {
-            verdict: "UNSURE",
-            reason: "Model failed to invoke classify_result tool call after retries",
-          },
-          error: "Model failed to invoke classify_result tool call after retries",
-        }).catch(() => {});
+        const failReason = "Model failed to invoke classify_result tool call after retries";
+        this.recordEvalLog({
+          sourceFormat: "omp",
+          timestamp: Date.now(),
+          sessionId,
+          actionId: String(action.id),
+          toolName: action.toolName,
+          commandString: action.commandString ?? "",
+          targetPath: action.targetPath ?? null,
+          workspaceRoot: action.workspaceRoot ?? null,
+          userPrompt: userPromptText,
+          modelId,
+          modelProvider,
+          durationMs,
+          promptTokens,
+          outputTokens,
+          reasoningTokens,
+          thinking: thinking ?? null,
+          attempts,
+          verdict: "UNSURE",
+          reasoning: failReason,
+          error: failReason,
+        });
         return {
           verdict: "UNSURE",
-          reason: "Model failed to invoke classify_result tool call after retries",
+          reason: failReason,
           ...(evalMetadata ? { metadata: evalMetadata } : {}),
         };
       }
 
-      this.appendEvalLog({
-        timestamp: new Date().toISOString(),
-        action: {
-          id: action.id,
-          toolName: action.toolName,
-          command: action.commandString,
-          targetPath: action.targetPath,
-          sessionID: sessionId,
-        },
-        model: {
-          id: typeof modelObj.id === "string" ? modelObj.id : undefined,
-          provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
-        },
-        inference: {
-          durationMs,
-          promptTokens: typeof respUsage.input === "number" ? respUsage.input : undefined,
-          outputTokens: typeof respUsage.output === "number" ? respUsage.output : undefined,
-          reasoningTokens,
-          thinking,
-          attempts,
-        },
-        decision: {
-          verdict: validResult.verdict,
-          riskLevel: validResult.risk_level,
-          userAuthorization: validResult.user_authorization,
-          reason: validResult.reason,
-        },
-      }).catch(() => {});
+      this.recordEvalLog({
+        sourceFormat: "omp",
+        timestamp: Date.now(),
+        sessionId,
+        actionId: String(action.id),
+        toolName: action.toolName,
+        commandString: action.commandString ?? "",
+        targetPath: action.targetPath ?? null,
+        workspaceRoot: action.workspaceRoot ?? null,
+        userPrompt: userPromptText,
+        modelId,
+        modelProvider,
+        durationMs,
+        promptTokens,
+        outputTokens,
+        reasoningTokens,
+        thinking: thinking ?? null,
+        attempts,
+        verdict: validResult.verdict,
+        riskLevel: validResult.risk_level ?? null,
+        userAuthorization: validResult.user_authorization ?? null,
+        reasoning: validResult.reason,
+      });
 
       this.log("info", "[AutoGate OMP Evaluator] Inference finished", {
         durationMs,
@@ -545,29 +565,24 @@ export class OmpNativeEvaluator implements GateEvaluator {
       const modelObj = (model && typeof model === "object" ? model : {}) as Record<string, unknown>;
 
       if (!(action.signal?.aborted && !isTimeout)) {
-        this.appendEvalLog({
-          timestamp: new Date().toISOString(),
-          action: {
-            id: action.id,
-            toolName: action.toolName,
-            command: action.commandString,
-            targetPath: action.targetPath,
-            sessionID: sessionId,
-          },
-          model: {
-            id: typeof modelObj.id === "string" ? modelObj.id : undefined,
-            provider: typeof modelObj.provider === "string" ? modelObj.provider : undefined,
-          },
-          inference: {
-            durationMs,
-            attempts: typeof attempts !== "undefined" ? attempts : 0,
-          },
-          decision: {
-            verdict: "UNSURE",
-            reason: errorMsg,
-          },
+        this.recordEvalLog({
+          sourceFormat: "omp",
+          timestamp: Date.now(),
+          sessionId,
+          actionId: String(action.id),
+          toolName: action.toolName,
+          commandString: action.commandString ?? "",
+          targetPath: action.targetPath ?? null,
+          workspaceRoot: action.workspaceRoot ?? null,
+          userPrompt: typeof action.userPrompt === "string" ? action.userPrompt : "",
+          modelId: typeof modelObj.id === "string" ? modelObj.id : null,
+          modelProvider: typeof modelObj.provider === "string" ? modelObj.provider : null,
+          durationMs,
+          attempts: typeof attempts !== "undefined" ? attempts : 0,
+          verdict: "UNSURE",
+          reasoning: errorMsg,
           error: errorMsg,
-        }).catch(() => {});
+        });
       }
 
       if (combinedSignal.aborted) {

@@ -13,7 +13,8 @@ export interface OmpEvaluatorOptions {
   sessionId?: string;
   fallbackSessionId?: string;
   classifierTimeout?: number;
-  evalLogFile?: string;
+  evalDbFile?: string;
+  getEvalStore?: () => import("@autogate/core").AutoGateEvalStore | undefined;
   suppressEvalLog?: boolean;
   getCtx?: () => unknown;
   logger?: OmpLogger;

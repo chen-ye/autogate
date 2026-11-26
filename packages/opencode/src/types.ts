@@ -1,4 +1,49 @@
-import type { AutoGateConfig, ClassifyInput, PermissionEventData } from "@autogate/core";
+import type {
+  AutoGateConfig,
+  AutoGateEvalStore,
+  ClassifyInput,
+  ClassifierVerdict,
+  EvalSessionCleanupMode,
+  PermissionEventData,
+  RiskLevel,
+  S2SessionStatus,
+  UserAuthorization,
+} from "@autogate/core";
+
+export interface OpenCodeSessionInfo {
+  id?: string;
+  parentID?: string;
+  title?: string;
+  agent?: string;
+  model?: {
+    id?: string;
+    providerID?: string;
+    variant?: string;
+  };
+  cost?: number;
+  tokens?: {
+    input?: number;
+    output?: number;
+    reasoning?: number;
+    cache?: {
+      read?: number;
+      write?: number;
+    };
+  };
+  outcome?: string;
+  location?: {
+    directory?: string;
+    workspaceID?: string;
+  };
+  time?: {
+    created?: number;
+    updated?: number;
+    idle?: number;
+    viewed?: number;
+    archived?: number;
+  };
+  [key: string]: unknown;
+}
 
 export interface OpenCodeSessionClient {
   session: {
@@ -14,16 +59,18 @@ export interface OpenCodeSessionClient {
       thinking?: string;
     }>;
     get(options: { sessionID: string }): Promise<{
-      data?: {
-        id?: string;
-        parentID?: string;
-        title?: string;
-        time?: { created?: number; updated?: number; archived?: number };
-      };
+      data?: OpenCodeSessionInfo;
       id?: string;
       parentID?: string;
       title?: string;
-      time?: { created?: number; updated?: number; archived?: number };
+      agent?: string;
+      model?: OpenCodeSessionInfo["model"];
+      cost?: number;
+      tokens?: OpenCodeSessionInfo["tokens"];
+      outcome?: string;
+      location?: OpenCodeSessionInfo["location"];
+      time?: OpenCodeSessionInfo["time"];
+      [key: string]: unknown;
     }>;
     list?(options?: {
       archived?: boolean;
@@ -59,12 +106,52 @@ export interface OpenCodeSessionClient {
   serverUrl?: string;
 }
 
+export interface S2SessionCapturedEvent {
+  actionId?: string;
+  targetSessionId?: string;
+  s2SessionId: string;
+  status: S2SessionStatus;
+  timestamp: number;
+  toolName: string;
+  commandString: string;
+  targetPath?: string;
+  workspaceRoot: string;
+  userPrompt: string;
+  verdict: ClassifierVerdict;
+  riskLevel?: RiskLevel;
+  userAuthorization?: UserAuthorization;
+  reasoning?: string;
+  thinking?: string;
+  durationMs: number;
+  modelId?: string;
+  modelProvider?: string;
+  promptTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cost?: number;
+  attempts?: number;
+  error?: string;
+}
+
 export interface OpenCodeClassifyInput extends ClassifyInput {
   client?: OpenCodeSessionClient;
   config?: AutoGateConfig;
   signal?: AbortSignal;
   serverUrl?: string;
   configDir?: string;
+  evalDbFile?: string;
+  getEvalDbFile?: () => string | undefined;
+  evalSessionCleanup?: EvalSessionCleanupMode;
+  getEvalSessionCleanup?: () => EvalSessionCleanupMode;
+  evalStore?: AutoGateEvalStore;
+  getEvalStore?: () => AutoGateEvalStore | undefined;
+  targetSessionId?: string;
+  actionId?: string;
+  toolName?: string;
+  commandString?: string;
+  targetPath?: string;
+  skipEvaluationRecord?: boolean;
+  onS2SessionRecorded?: (event: S2SessionCapturedEvent) => void;
 }
 
 export interface OpenCodeEvent {

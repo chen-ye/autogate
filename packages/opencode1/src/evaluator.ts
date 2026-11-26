@@ -5,14 +5,13 @@ import * as crypto from "crypto";
 import type {
   ClassifierResult,
   ClassifierVerdict,
-  RiskLevel,
-  UserAuthorization,
   GateEvaluator,
   GateAction,
   AutoGateConfig,
-  CascadeTrace,
+  RecordEvaluationInput,
 } from "@autogate/core";
 import {
+  AutoGateEvalStore,
   buildClassifierUserPrompt,
   parseVerdict,
   isRiskLevel,
@@ -24,31 +23,31 @@ import {
 import type { OpenCodeV1ClassifyInput, OpenCodeV1SessionClient } from "./types.js";
 export type { OpenCodeV1ClassifyInput, OpenCodeV1SessionClient };
 
-export interface EvaluationAuditEntry {
-  timestamp: number;
-  sessionID: string;
-  toolName: string;
-  commandString: string;
-  userPrompt: string;
-  reasoning?: string;
-  verdict: ClassifierVerdict;
-  risk_level?: RiskLevel;
-  user_authorization?: UserAuthorization;
-  durationMs: number;
-  cascade?: CascadeTrace;
-}
-
-export function logEvaluationDecision(entry: EvaluationAuditEntry, logFilePath?: string): void {
-  try {
-    const filePath =
-      logFilePath ?? path.join(os.homedir(), ".config", "autogate", "logs", "evals.jsonl");
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+export function recordEvaluationDecision(
+  entry: RecordEvaluationInput,
+  evalDbFile?: string,
+  sharedStore?: AutoGateEvalStore,
+): void {
+  if (sharedStore && sharedStore.isOpen()) {
+    try {
+      sharedStore.recordEvaluation(entry);
+    } catch (err) {
+      console.warn("[AutoGate] Failed to write evaluation store record:", err);
     }
-    fs.appendFileSync(filePath, JSON.stringify(entry) + "\n", "utf8");
+    return;
+  }
+  let store: AutoGateEvalStore | undefined;
+  try {
+    store = new AutoGateEvalStore(evalDbFile);
+    store.recordEvaluation(entry);
   } catch (err) {
-    console.warn("[AutoGate] Failed to write evaluation audit log:", err);
+    console.warn("[AutoGate] Failed to write evaluation store record:", err);
+  } finally {
+    try {
+      store?.close();
+    } catch {
+      // Ignore cleanup errors on close
+    }
   }
 }
 
@@ -470,6 +469,7 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
   }
 
   let promptLoopPromise: Promise<void> | undefined;
+  const modelRef = parseModelRef(input.model ?? input.config?.classifierModel);
 
   try {
     const timeoutMs = input.config?.classifierTimeout ?? 45000;
@@ -489,7 +489,6 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
       }, timeoutMs);
     });
 
-    const modelRef = parseModelRef(input.model ?? input.config?.classifierModel);
     const maxRetries = 2;
     const repromptText =
       "You must record your decision by calling the classify_result tool with { risk_level, user_authorization, verdict, reason }.";
@@ -593,20 +592,28 @@ export async function classifyRequest(input: OpenCodeV1ClassifyInput): Promise<C
       rawVerdict && isClassifierVerdict(rawVerdict) ? rawVerdict : "UNSURE";
     await archiveEvaluationSession(client, sessionID, actionName, finalVerdict);
     if (!aborted && !input.signal?.aborted && !input.config?.systemOne?.enabled) {
-      logEvaluationDecision(
+      recordEvaluationDecision(
         {
+          sourceFormat: "opencode1",
           timestamp: Date.now(),
-          sessionID,
+          sessionId: input.request?.sessionID ?? sessionID,
+          s2SessionId: sessionID,
+          actionId: input.request?.id ?? null,
           toolName: actionName,
           commandString: typeof actionArgs === "string" ? actionArgs : JSON.stringify(actionArgs),
+          targetPath: input.request?.targetPath ?? null,
+          workspaceRoot,
           userPrompt,
           reasoning: capturedReasoning ?? verdictResult?.reason,
           verdict: finalVerdict,
-          risk_level: verdictResult?.risk_level,
-          user_authorization: verdictResult?.user_authorization,
+          riskLevel: verdictResult?.risk_level ?? null,
+          userAuthorization: verdictResult?.user_authorization ?? null,
           durationMs,
+          modelId: modelRef.modelID,
+          modelProvider: modelRef.providerID,
         },
-        input.config?.evalLogFile,
+        input.config?.evalDbFile ?? input.config?.opencode?.evalDbFile,
+        input.getEvalStore?.(),
       );
     }
   }
@@ -617,10 +624,16 @@ export class OpenCodeV1SessionEvaluator implements GateEvaluator {
   constructor(
     private client: OpenCodeV1SessionClient,
     private config?: AutoGateConfig,
+    private getEvalStore?: () => AutoGateEvalStore | undefined,
   ) {}
   async evaluate(action: GateAction): Promise<ClassifierResult> {
     return classifyRequest({
       client: this.client,
+      request: {
+        id: String(action.id),
+        sessionID: String(action.sessionID),
+        targetPath: action.targetPath,
+      },
       userPrompt: action.userPrompt,
       subagentPrompt: action.subagentPrompt,
       actionName: action.toolName,
@@ -630,6 +643,7 @@ export class OpenCodeV1SessionEvaluator implements GateEvaluator {
       model: this.config?.classifierModel,
       config: this.config,
       signal: action.signal,
+      getEvalStore: this.getEvalStore,
     });
   }
 }

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { AutoGateEvalStore, loadConfig } from "@autogate/core";
 import {
   classifyRequest,
   archiveEvaluationSession,
@@ -17,6 +18,8 @@ describe("@autogate/opencode1 evaluator OpenCode v1 support", () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-eval-v1-test-"));
+    process.env.XDG_CONFIG_HOME = tempDir;
+    process.env.AUTOGATE_EVAL_DB = path.join(tempDir, "evals.db");
   });
 
   afterEach(() => {
@@ -233,6 +236,67 @@ describe("@autogate/opencode1 evaluator OpenCode v1 support", () => {
       expect(res.verdict).toBe("ALLOW");
       expect(capturedPrompts[0]).toContain("Target Script Inspected");
       expect(capturedPrompts[0]).toContain("print('v1_deploy_ok')");
+    });
+
+    it("records opencode1 evaluation decisions into AutoGateEvalStore when evalDbFile is configured", async () => {
+      const dbPath = path.join(tempDir, "custom-opencode1.db");
+      const mockClient = {
+        app: { agents: async () => ({ data: [{ name: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_s2_v1_record" } }),
+          update: async () => ({}),
+          prompt: async (opts: { path: { id?: string } }) => {
+            if (opts.path.id) {
+              recordEvaluationVerdict(opts.path.id, {
+                verdict: "BLOCK",
+                risk_level: "HIGH",
+                user_authorization: "NONE",
+                reason: "Blocked unauthorized write",
+              });
+            }
+            return { data: { parts: [] } };
+          },
+        },
+      } as unknown as OpenCodeV1SessionClient;
+
+      const config = loadConfig({
+        evalDbFile: dbPath,
+        classifierModel: "google/gemini-3.5-flash-lite",
+        systemOne: { enabled: false },
+      });
+      const evaluator = new OpenCodeV1SessionEvaluator(mockClient, config);
+      const res = await evaluator.evaluate({
+        id: "act-v1-db",
+        harness: "opencode",
+        sessionID: "ses-target-v1",
+        toolName: "edit",
+        targetPath: "/etc/hosts",
+        workspaceRoot: tempDir,
+        userPrompt: "Check readme",
+      });
+
+      expect(res.verdict).toBe("BLOCK");
+
+      const store = new AutoGateEvalStore(dbPath, { readonly: true });
+      try {
+        const records = store.queryEvaluations();
+        expect(records).toHaveLength(1);
+        const rec = records[0]!;
+        expect(rec.sourceFormat).toBe("opencode1");
+        expect(rec.sessionId).toBe("ses-target-v1");
+        expect(rec.s2SessionId).toBe("ses_s2_v1_record");
+        expect(rec.actionId).toBe("act-v1-db");
+        expect(rec.toolName).toBe("edit");
+        expect(rec.targetPath).toBe("/etc/hosts");
+        expect(rec.verdict).toBe("BLOCK");
+        expect(rec.riskLevel).toBe("HIGH");
+        expect(rec.userAuthorization).toBe("NONE");
+        expect(rec.reasoning).toBe("Blocked unauthorized write");
+        expect(rec.modelProvider).toBe("google");
+        expect(rec.modelId).toBe("gemini-3.5-flash-lite");
+      } finally {
+        store.close();
+      }
     });
   });
 });

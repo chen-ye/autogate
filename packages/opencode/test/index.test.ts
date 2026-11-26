@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import {
+  AutoGateEvalStore,
   sharedExplicitEscalations,
   sharedRecentlyRejected,
   type GateEvaluator,
@@ -152,6 +153,7 @@ describe("@autogate/opencode runtime agent injection", () => {
       options: {
         classifierModel: "google/gemini-3.5-flash-lite",
         ntfyServer: "http://127.0.0.1:59999",
+        evalDbFile: path.join(os.tmpdir(), "autogate-agent-inj-test-1.db"),
       },
       agent: {
         transform: async (
@@ -205,6 +207,7 @@ describe("@autogate/opencode runtime agent injection", () => {
       options: {
         classifierModel: "anthropic/claude-haiku-4-5#low",
         ntfyServer: "http://127.0.0.1:59999",
+        evalDbFile: path.join(os.tmpdir(), "autogate-agent-inj-test-2.db"),
       },
       agent: {
         transform: async (
@@ -283,7 +286,7 @@ describe("@autogate/opencode escalate_permission v2", () => {
       options: {
         ntfyServer: "http://127.0.0.1:59999",
         ntfyTopic: "test-esc-topic",
-        evalLogFile: path.join(tempDir, "evals.jsonl"),
+        evalDbFile: path.join(tempDir, "evals.db"),
       },
       tool: {
         transform: async (
@@ -366,7 +369,7 @@ describe("@autogate/opencode escalate_permission v2", () => {
         evaluator: mockEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
         notifyOnVerdict: false,
-        evalLogFile: path.join(tempDir, "evals.jsonl"),
+        evalDbFile: path.join(tempDir, "evals.db"),
       },
     );
 
@@ -502,7 +505,7 @@ describe("@autogate/opencode session.archived and session.deleted lifecycle", ()
         evaluator: slowEvaluator,
         ntfyServer: "http://127.0.0.1:59999",
         notifyOnVerdict: false,
-        evalLogFile: path.join(tempDir, "evals.jsonl"),
+        evalDbFile: path.join(tempDir, "evals.db"),
       },
       client: {
         session: {
@@ -735,7 +738,7 @@ describe("@autogate/opencode session.archived and session.deleted lifecycle", ()
         evaluator: slowEval,
         ntfyServer: "http://127.0.0.1:59999",
         notifyOnVerdict: false,
-        evalLogFile: path.join(tempDir, "evals.jsonl"),
+        evalDbFile: path.join(tempDir, "evals.db"),
       },
     );
 
@@ -819,5 +822,794 @@ describe("@autogate/opencode session.archived and session.deleted lifecycle", ()
     resolver.setSessionParent("ses-child-2", "ses-parent-sweep");
     resolver.cleanupSession("ses-parent-sweep");
     expect(resolver.getParentSessionID("ses-child-2")).toBeUndefined();
+  });
+});
+
+describe("@autogate/opencode evals.db persistence, cascade race, and evalSessionCleanup hot-reload", () => {
+  const origEnv = { ...process.env };
+  const origFetch = globalThis.fetch;
+  let tempDir: string;
+  let configPath: string;
+  let evalDbFile: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "autogate-evaldb-v2-"));
+    process.env.XDG_CONFIG_HOME = path.join(tempDir, "xdg");
+    fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, "autogate"), { recursive: true });
+    configPath = path.join(process.env.XDG_CONFIG_HOME, "autogate", "config.json");
+    evalDbFile = path.join(tempDir, "evals.db");
+    delete process.env.AUTOGATE_CONFIG;
+    delete process.env.AUTOGATE_EVAL_DB;
+    delete process.env.AUTOGATE_EVAL_SESSION_CLEANUP;
+    delete process.env.OPENCODE_SERVER_URL;
+    sharedExplicitEscalations.clear();
+    sharedRecentlyRejected.clear();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    process.env = { ...origEnv };
+    sharedExplicitEscalations.clear();
+    sharedRecentlyRejected.clear();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("records S2-only evaluations in evals.db without double-writing and closes store on dispose()", async () => {
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        autoMode: true,
+        reviewFallbackMode: "native",
+        evalDbFile,
+        evalSessionCleanup: "export-and-delete",
+      }),
+      "utf8",
+    );
+
+    const replies: Array<{ requestID: string; decision: string }> = [];
+    const removedS2: string[] = [];
+    const { recordEvaluationVerdict } = await import("../src/evaluator.js");
+
+    const adapter = new OpenCodeHarnessAdapter(
+      {
+        directory: tempDir,
+        client: {
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: "ses_s2_only_1" } }),
+            get: async ({ sessionID }) => ({
+              data: {
+                id: sessionID,
+                title: sessionID === "ses_coding_s2only" ? "Coding Task" : "[auto-gate-eval] bash",
+                agent: "auto-gate-eval",
+                model: { providerID: "google", id: "gemini-3.5-flash-lite" },
+                tokens: {
+                  input: 310,
+                  output: 42,
+                  reasoning: 18,
+                  cache: { read: 80, write: 5 },
+                },
+                cost: 0.00029,
+                outcome: "succeeded",
+              },
+            }),
+            context: async ({ sessionID }) => {
+              if (sessionID === "ses_coding_s2only") {
+                return [{ type: "user", text: "Check git status in repo" }];
+              }
+              return [
+                { type: "user", text: "Evaluate git status" },
+                {
+                  type: "assistant",
+                  agent: "auto-gate-eval",
+                  model: { providerID: "google", id: "gemini-3.5-flash-lite" },
+                  content: [
+                    { type: "reasoning", text: "Read-only git status inside workspace." },
+                    {
+                      type: "tool",
+                      id: "tool-1",
+                      name: "classify_result",
+                      state: {
+                        status: "completed",
+                        input: {
+                          verdict: "ALLOW",
+                          risk_level: "LOW",
+                          user_authorization: "HIGH",
+                          reason: "Safe git status check",
+                        },
+                      },
+                    },
+                  ],
+                },
+              ];
+            },
+            prompt: async ({ sessionID }) => {
+              recordEvaluationVerdict(sessionID, {
+                verdict: "ALLOW",
+                risk_level: "LOW",
+                user_authorization: "HIGH",
+                reason: "Safe git status check",
+              });
+              return { data: { parts: [] } };
+            },
+            remove: async ({ sessionID }) => {
+              removedS2.push(sessionID);
+            },
+          },
+          permission: {
+            reply: async (args) => {
+              replies.push({ requestID: args.requestID, decision: args.decision });
+            },
+          },
+        },
+        permission: {
+          reply: async (args) => {
+            replies.push({ requestID: args.requestID, decision: args.decision });
+          },
+        },
+      },
+      {
+        ntfyServer: "http://127.0.0.1:59999",
+        notifyOnVerdict: false,
+      },
+    );
+
+    await adapter.start();
+    try {
+      await adapter.handlePermissionAsked({
+        id: "perm-s2-only-1",
+        sessionID: "ses_coding_s2only",
+        action: "bash",
+        resources: ["git status"],
+        metadata: { directory: tempDir, command: "git status" },
+      });
+    } finally {
+      await adapter.dispose();
+    }
+
+    expect(replies).toEqual([{ requestID: "perm-s2-only-1", decision: "once" }]);
+    expect(removedS2).toEqual(["ses_s2_only_1"]);
+
+    const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+    try {
+      const rows = store.queryEvaluations();
+      expect(rows.length).toBe(1);
+      expect(rows[0]?.id).toBe("perm-s2-only-1");
+      expect(rows[0]?.sessionId).toBe("ses_coding_s2only");
+      expect(rows[0]?.s2SessionId).toBe("ses_s2_only_1");
+      expect(rows[0]?.verdict).toBe("ALLOW");
+      expect(rows[0]?.modelId).toBe("gemini-3.5-flash-lite");
+      expect(rows[0]?.modelProvider).toBe("google");
+      expect(rows[0]?.promptTokens).toBe(310);
+      expect(rows[0]?.outputTokens).toBe(42);
+      expect(rows[0]?.reasoningTokens).toBe(18);
+      expect(rows[0]?.cost).toBeCloseTo(0.00029, 8);
+      expect(rows[0]?.thinking).toBe("Read-only git status inside workspace.");
+      expect(rows[0]?.hasS2Session).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records System 1 race-win in evals.db, archives aborted S2 session, and links s2SessionId on teardown", async () => {
+    const s1Endpoint = "http://127.0.0.1:49991/v1/systemone";
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        autoMode: true,
+        reviewFallbackMode: "native",
+        evalDbFile,
+        evalSessionCleanup: "export-and-delete",
+        systemOne: {
+          enabled: true,
+          executionMode: "race",
+          endpoint: s1Endpoint,
+          model: "gemini-decision-1",
+          timeoutMs: 2000,
+        },
+      }),
+      "utf8",
+    );
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === s1Endpoint) {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              verdict: { probabilities: { ALLOW: 0.98, BLOCK: 0.02 } },
+              in_scope: { noul: 0.95 },
+              injection_risk: { noul: 0.01 },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch URL: ${String(input)}`);
+    }) as typeof fetch;
+
+    const replies: Array<{ requestID: string; decision: string }> = [];
+    const removedS2: string[] = [];
+
+    const adapter = new OpenCodeHarnessAdapter(
+      {
+        directory: tempDir,
+        client: {
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: "ses_s2_aborted_race" } }),
+            get: async ({ sessionID }) => ({
+              data: {
+                id: sessionID,
+                title: sessionID === "ses-race-coding" ? "Coding Session" : "[auto-gate-eval] bash",
+              },
+            }),
+            context: async ({ sessionID }) =>
+              sessionID === "ses-race-coding"
+                ? [{ type: "user", text: "Run pwd in workspace" }]
+                : [{ type: "user", text: "Evaluate pwd" }],
+            interrupt: async () => ({}),
+            prompt: async () => {
+              await new Promise((r) => setTimeout(r, 80));
+              return { data: { reasoning: "Aborted mid-thought", parts: [] } };
+            },
+            remove: async ({ sessionID }) => {
+              removedS2.push(sessionID);
+            },
+          },
+          permission: {
+            reply: async (args) => {
+              replies.push({ requestID: args.requestID, decision: args.decision });
+            },
+          },
+        },
+        permission: {
+          reply: async (args) => {
+            replies.push({ requestID: args.requestID, decision: args.decision });
+          },
+        },
+      },
+      {
+        ntfyServer: "http://127.0.0.1:59999",
+        notifyOnVerdict: false,
+      },
+    );
+
+    await adapter.start();
+    try {
+      await adapter.handlePermissionAsked({
+        id: "perm-race-s1-win",
+        sessionID: "ses-race-coding",
+        action: "bash",
+        resources: ["pwd"],
+        metadata: { directory: tempDir, command: "pwd" },
+      });
+    } finally {
+      // dispose() waits for the background aborted S2 archiving & linking before closing evalStore
+      await adapter.dispose();
+    }
+
+    expect(replies).toEqual([{ requestID: "perm-race-s1-win", decision: "once" }]);
+    expect(removedS2).toEqual(["ses_s2_aborted_race"]);
+
+    const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+    try {
+      const rows = store.queryEvaluations();
+      expect(rows.length).toBe(1);
+      expect(rows[0]?.id).toBe("perm-race-s1-win");
+      expect(rows[0]?.sessionId).toBe("ses-race-coding");
+      expect(rows[0]?.verdict).toBe("ALLOW");
+      expect(rows[0]?.cascadeWinner).toBe("system1");
+      expect(rows[0]?.s2Aborted).toBe(true);
+      expect(rows[0]?.s2SessionId).toBe("ses_s2_aborted_race");
+      expect(rows[0]?.hasS2Session).toBe(true);
+
+      const s2 = store.getS2Session("ses_s2_aborted_race");
+      expect(s2?.status).toBe("aborted");
+      expect(s2?.targetSessionId).toBe("ses-race-coding");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records System 2 cascade win with full S2 metadata and hot-reloads evalSessionCleanup across evaluations", async () => {
+    const s1Endpoint = "http://127.0.0.1:49992/v1/systemone";
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        autoMode: true,
+        reviewFallbackMode: "native",
+        evalDbFile,
+        evalSessionCleanup: "export-and-delete",
+        systemOne: {
+          enabled: true,
+          executionMode: "cascade",
+          endpoint: s1Endpoint,
+          model: "gemini-decision-1",
+          timeoutMs: 2000,
+        },
+      }),
+      "utf8",
+    );
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === s1Endpoint) {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              verdict: { probabilities: { ALLOW: 0.6, BLOCK: 0.4 } },
+              in_scope: { noul: 0.9 },
+              injection_risk: { noul: 0.05 },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch URL: ${String(input)}`);
+    }) as typeof fetch;
+
+    const replies: Array<{ requestID: string; decision: string }> = [];
+    const removedS2: string[] = [];
+    const archivedS2: string[] = [];
+    let s2Seq = 0;
+    const { recordEvaluationVerdict } = await import("../src/evaluator.js");
+
+    const adapter = new OpenCodeHarnessAdapter(
+      {
+        directory: tempDir,
+        client: {
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: `ses_s2_cas_${++s2Seq}` } }),
+            get: async ({ sessionID }) => ({
+              data: {
+                id: sessionID,
+                title: sessionID === "ses-cas-coding" ? "Coding" : "[auto-gate-eval] bash",
+                model: { providerID: "anthropic", id: "claude-haiku-4-5" },
+                tokens: { input: 500, output: 70, reasoning: 30, cache: { read: 0, write: 0 } },
+                cost: 0.0012,
+                outcome: "succeeded",
+              },
+            }),
+            context: async ({ sessionID }) =>
+              sessionID === "ses-cas-coding"
+                ? [{ type: "user", text: "Delete temp files" }]
+                : [
+                    { type: "user", text: "Evaluate rm" },
+                    {
+                      type: "assistant",
+                      content: [{ type: "reasoning", text: "Dangerous unrequested deletion." }],
+                    },
+                  ],
+            prompt: async ({ sessionID }) => {
+              recordEvaluationVerdict(sessionID, {
+                verdict: "BLOCK",
+                risk_level: "HIGH",
+                user_authorization: "NONE",
+                reason: "Blocked dangerous deletion",
+              });
+              return { data: { parts: [] } };
+            },
+            remove: async ({ sessionID }) => {
+              removedS2.push(sessionID);
+            },
+            update: async ({ sessionID }) => {
+              archivedS2.push(sessionID);
+            },
+          },
+          permission: {
+            reply: async (args) => {
+              replies.push({ requestID: args.requestID, decision: args.decision });
+            },
+          },
+        },
+        permission: {
+          reply: async (args) => {
+            replies.push({ requestID: args.requestID, decision: args.decision });
+          },
+        },
+      },
+      {
+        ntfyServer: "http://127.0.0.1:59999",
+        notifyOnVerdict: false,
+      },
+    );
+
+    await adapter.start();
+    try {
+      // Eval 1: export-and-delete -> session.remove called
+      await adapter.handlePermissionAsked({
+        id: "perm-cas-1",
+        sessionID: "ses-cas-coding",
+        action: "bash",
+        resources: ["rm -rf /tmp/foo"],
+        metadata: { directory: tempDir, command: "rm -rf /tmp/foo" },
+      });
+
+      expect(removedS2).toEqual(["ses_s2_cas_1"]);
+      expect(archivedS2).toEqual([]);
+
+      // Hot-reload evalSessionCleanup -> "archive" in config.json without restarting adapter
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          autoMode: true,
+          reviewFallbackMode: "native",
+          evalDbFile,
+          evalSessionCleanup: "archive",
+          systemOne: {
+            enabled: true,
+            executionMode: "cascade",
+            endpoint: s1Endpoint,
+            model: "gemini-decision-1",
+            timeoutMs: 2000,
+          },
+        }),
+        "utf8",
+      );
+
+      await adapter.handlePermissionAsked({
+        id: "perm-cas-2",
+        sessionID: "ses-cas-coding",
+        action: "bash",
+        resources: ["rm -rf /tmp/bar"],
+        metadata: { directory: tempDir, command: "rm -rf /tmp/bar" },
+      });
+
+      expect(removedS2).toEqual(["ses_s2_cas_1"]);
+      expect(archivedS2).toEqual(["ses_s2_cas_2"]);
+    } finally {
+      await adapter.dispose();
+    }
+
+    const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+    try {
+      const e1 = store.getEvaluation("perm-cas-1");
+      expect(e1).not.toBeNull();
+      expect(e1?.verdict).toBe("BLOCK");
+      expect(e1?.cascadeWinner).toBe("system2");
+      expect(e1?.cascade?.escalationReason).toBe("low_allow_prob");
+      expect(e1?.s2Aborted).toBe(false);
+      expect(e1?.s2SessionId).toBe("ses_s2_cas_1");
+      expect(e1?.modelId).toBe("claude-haiku-4-5");
+      expect(e1?.modelProvider).toBe("anthropic");
+      expect(e1?.promptTokens).toBe(500);
+      expect(e1?.outputTokens).toBe(70);
+      expect(e1?.reasoningTokens).toBe(30);
+      expect(e1?.cost).toBeCloseTo(0.0012, 8);
+      expect(e1?.thinking).toBe("Dangerous unrequested deletion.");
+
+      const e2 = store.getEvaluation("perm-cas-2");
+      expect(e2?.s2SessionId).toBe("ses_s2_cas_2");
+      expect(store.getS2Session("ses_s2_cas_2")?.status).toBe("completed");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists classifier UNSURE intact before requestReview() across terminal permission.replied and Ntfy overrides, and clears post-verdict interrupt errors", async () => {
+    const ntfyTopic = "autogate-test-unsure-preserve";
+    const publishedIds: string[] = [];
+    const ntfyServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === `/${ntfyTopic}`) {
+          await req.text();
+          const seqId = req.headers.get("x-sequence-id");
+          if (seqId) publishedIds.push(seqId);
+          return Response.json({ id: seqId ?? "ok" });
+        }
+        if (url.pathname.endsWith("/sse")) {
+          return new Response("", {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return new Response("ok");
+      },
+    });
+
+    try {
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          autoMode: true,
+          reviewFallbackMode: "ntfy",
+          ntfyServer: `http://127.0.0.1:${ntfyServer.port}`,
+          ntfyTopic,
+          notifyOnVerdict: false,
+          opencode: { evalDbFile },
+        }),
+        "utf8",
+      );
+
+      const { recordEvaluationVerdict } = await import("../src/evaluator.js");
+      let s2Seq = 0;
+
+      const adapter = new OpenCodeHarnessAdapter({
+        directory: tempDir,
+        client: {
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: `ses_unsure_${++s2Seq}` } }),
+            get: async ({ sessionID }) => ({
+              data: {
+                id: sessionID,
+                title: sessionID === "ses-unsure-coding" ? "Coding" : "[auto-gate-eval] bash",
+                outcome: "succeeded",
+              },
+            }),
+            context: async ({ sessionID }) =>
+              sessionID === "ses-unsure-coding"
+                ? [{ type: "user", text: "Deploy release" }]
+                : [
+                    { type: "user", text: "Evaluate deploy" },
+                    {
+                      type: "assistant",
+                      error: { message: "Step interrupted" },
+                      content: [],
+                    },
+                  ],
+            prompt: async ({ sessionID }) => {
+              recordEvaluationVerdict(sessionID, {
+                verdict: "UNSURE",
+                risk_level: "HIGH",
+                user_authorization: "LOW",
+                reason: "Needs human approval for deploy",
+              });
+              return { data: { parts: [] } };
+            },
+            remove: async () => ({}),
+          },
+          permission: { reply: async () => ({}) },
+        },
+        permission: { reply: async () => ({}) },
+      });
+
+      await adapter.start();
+      try {
+        // 1. Terminal permission.replied aborts requestReview() -> UNSURE row must still exist
+        const p1 = adapter.handlePermissionAsked({
+          id: "perm-unsure-term",
+          sessionID: "ses-unsure-coding",
+          action: "bash",
+          resources: ["npm publish"],
+          metadata: { directory: tempDir, command: "npm publish" },
+        });
+        const waitPub1 = Date.now();
+        while (!publishedIds.includes("perm-unsure-term") && Date.now() - waitPub1 < 2000) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        await adapter.handlePermissionReplied({ requestID: "perm-unsure-term", reply: "once" });
+        await p1;
+
+        // 2. Ntfy human override (reply: "once" -> ALLOW) must NOT overwrite classifier UNSURE row
+        const p2 = adapter.handlePermissionAsked({
+          id: "perm-unsure-ntfy",
+          sessionID: "ses-unsure-coding",
+          action: "bash",
+          resources: ["terraform apply"],
+          metadata: { directory: tempDir, command: "terraform apply" },
+        });
+        const waitPub2 = Date.now();
+        while (!publishedIds.includes("perm-unsure-ntfy") && Date.now() - waitPub2 < 2000) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        await new Promise((r) => setTimeout(r, 60));
+        adapter.getEngine().resolveReviewResponse({
+          req_id: "perm-unsure-ntfy",
+          reply: "once",
+          source: "ntfy",
+        });
+        await p2;
+      } finally {
+        await adapter.dispose();
+      }
+
+      const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+      try {
+        const termRow = store.getEvaluation("perm-unsure-term");
+        expect(termRow).not.toBeNull();
+        expect(termRow?.verdict).toBe("UNSURE");
+        expect(termRow?.riskLevel).toBe("HIGH");
+        expect(termRow?.userAuthorization).toBe("LOW");
+        expect(termRow?.reasoning).toBe("Needs human approval for deploy");
+        expect(termRow?.error).toBeNull();
+        expect(termRow?.hasS2Session).toBe(true);
+
+        const ntfyRow = store.getEvaluation("perm-unsure-ntfy");
+        expect(ntfyRow).not.toBeNull();
+        expect(ntfyRow?.verdict).toBe("UNSURE");
+        expect(ntfyRow?.riskLevel).toBe("HIGH");
+        expect(ntfyRow?.reasoning).toBe("Needs human approval for deploy");
+        expect(ntfyRow?.durationMs).toBeLessThan(60);
+        expect(ntfyRow?.error).toBeNull();
+      } finally {
+        store.close();
+      }
+    } finally {
+      ntfyServer.stop(true);
+    }
+  });
+
+  it("handles context_drifted (S2 #1 abort -> S2 #2 ALLOW) without UNSURE corruption and emits no phantom evaluation row on mid-S2 session.archived", async () => {
+    const s1Endpoint = "http://127.0.0.1:49993/v1/systemone";
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        autoMode: true,
+        reviewFallbackMode: "native",
+        evalDbFile,
+        evalSessionCleanup: "export-and-delete",
+        systemOne: {
+          enabled: true,
+          executionMode: "race",
+          endpoint: s1Endpoint,
+          model: "gemini-decision-1",
+          timeoutMs: 2000,
+        },
+      }),
+      "utf8",
+    );
+
+    const { recordEvaluationVerdict } = await import("../src/evaluator.js");
+    const replies: Array<{ requestID: string; decision: string }> = [];
+    let s2Count = 0;
+    let triggerDrift: (() => void) | undefined;
+    let firstS2PromptStarted!: () => void;
+    const firstS2PromptPromise = new Promise<void>((r) => {
+      firstS2PromptStarted = r;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === s1Endpoint) {
+        await firstS2PromptPromise;
+        triggerDrift?.();
+        return new Response(
+          JSON.stringify({
+            answers: {
+              verdict: { probabilities: { ALLOW: 0.99, BLOCK: 0.01 } },
+              in_scope: { noul: 0.96 },
+              injection_risk: { noul: 0.01 },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch URL: ${String(input)}`);
+    }) as typeof fetch;
+
+    const adapter = new OpenCodeHarnessAdapter({
+      directory: tempDir,
+      client: {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: `ses_drift_s2_${++s2Count}` } }),
+          get: async ({ sessionID }) => ({
+            data: {
+              id: sessionID,
+              title: sessionID.startsWith("ses_drift_s2_") ? "[auto-gate-eval] bash" : "Coding",
+              outcome: "succeeded",
+            },
+          }),
+          context: async ({ sessionID }) =>
+            sessionID.startsWith("ses_drift_s2_")
+              ? [{ type: "user", text: "Eval" }]
+              : [{ type: "user", text: "Initial prompt" }],
+          interrupt: async () => ({}),
+          prompt: async ({ sessionID }) => {
+            if (sessionID === "ses_drift_s2_1") {
+              firstS2PromptStarted();
+              await new Promise((r) => setTimeout(r, 120));
+              return { data: { parts: [] } };
+            }
+            if (sessionID === "ses_drift_s2_2") {
+              recordEvaluationVerdict(sessionID, {
+                verdict: "ALLOW",
+                risk_level: "LOW",
+                user_authorization: "HIGH",
+                reason: "Allowed after drift re-eval",
+              });
+              return { data: { parts: [] } };
+            }
+            // Test 2 (mid-S2 session.archived) waits to be aborted
+            firstS2PromptStarted();
+            await new Promise((r) => setTimeout(r, 120));
+            return { data: { parts: [] } };
+          },
+          remove: async () => ({}),
+        },
+        permission: {
+          reply: async (args) => {
+            replies.push({ requestID: args.requestID, decision: args.decision });
+          },
+        },
+      },
+      permission: {
+        reply: async (args) => {
+          replies.push({ requestID: args.requestID, decision: args.decision });
+        },
+      },
+    });
+
+    await adapter.start();
+    try {
+      // 1. context_drifted: S2 #1 aborts, S2 #2 returns ALLOW
+      triggerDrift = () => {
+        adapter.getEngine().setUserPrompt("ses-drift-coding", "Drifted prompt");
+      };
+      await adapter.handlePermissionAsked({
+        id: "perm-drift-1",
+        sessionID: "ses-drift-coding",
+        action: "bash",
+        resources: ["git status"],
+        metadata: { directory: tempDir, command: "git status" },
+      });
+      await adapter.dispose();
+
+      const store1 = new AutoGateEvalStore(evalDbFile, { readonly: true });
+      try {
+        const driftRow = store1.getEvaluation("perm-drift-1");
+        expect(driftRow).not.toBeNull();
+        expect(driftRow?.verdict).toBe("ALLOW");
+        expect(driftRow?.riskLevel).toBe("LOW");
+        expect(driftRow?.reasoning).toBe("Allowed after drift re-eval");
+        expect(driftRow?.s2SessionId).toBe("ses_drift_s2_2");
+      } finally {
+        store1.close();
+      }
+    } finally {
+      await adapter.dispose();
+    }
+
+    // 2. Mid-S2 session.archived cancellation must NOT insert a phantom UNSURE row in evaluations
+    const adapter2 = new OpenCodeHarnessAdapter(
+      {
+        directory: tempDir,
+        client: {
+          agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+          session: {
+            create: async () => ({ data: { id: "ses_cancel_s2" } }),
+            get: async ({ sessionID }) => ({ data: { id: sessionID, title: "S" } }),
+            context: async () => [{ type: "user", text: "Prompt" }],
+            interrupt: async () => ({}),
+            prompt: async () => {
+              await new Promise((r) => setTimeout(r, 80));
+              return { data: { parts: [] } };
+            },
+            remove: async () => ({}),
+          },
+          permission: { reply: async () => ({}) },
+        },
+        permission: { reply: async () => ({}) },
+      },
+      {
+        evalDbFile,
+        systemOne: { enabled: false },
+      },
+    );
+    await adapter2.start();
+    try {
+      const pCancel = adapter2.handlePermissionAsked({
+        id: "perm-cancel-mid-s2",
+        sessionID: "ses-cancel-coding",
+        action: "bash",
+        resources: ["ls"],
+        metadata: { directory: tempDir, command: "ls" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      adapter2.cleanupSession("ses-cancel-coding");
+      await pCancel;
+    } finally {
+      await adapter2.dispose();
+    }
+
+    const store2 = new AutoGateEvalStore(evalDbFile, { readonly: true });
+    try {
+      expect(store2.getEvaluation("perm-cancel-mid-s2")).toBeNull();
+      expect(store2.getS2Session("ses_cancel_s2")?.status).toBe("aborted");
+    } finally {
+      store2.close();
+    }
   });
 });

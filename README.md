@@ -219,8 +219,9 @@ AutoGate reads configuration from `~/.config/autogate/config.json`, or from `$XD
 | `ntfyToken`                             | `string`                | `undefined`                            | Optional bearer token for authenticated ntfy topics.                                                                                                                    |
 | `ntfyVerbosity`                         | `"normal" \| "verbose"` | `"normal"`                             | Notification detail level; `"verbose"` adds specs, cascade trace, reasoning, and trust boundaries.                                                                      |
 | `notifyOnVerdict`                       | `boolean`               | `true`                                 | Send informational ntfy alerts on `ALLOW` and `BLOCK` verdicts.                                                                                                         |
-| `reviewFallbackMode`                    | `"native" \| "ntfy"`    | `"ntfy"`                               | Fallback review channel when `ntfyTopic` is set, using remote ntfy push or a native terminal prompt.                                                                    |
-| `evalLogFile`                           | `string`                | `"~/.omp/logs/autogate-evals.jsonl"`   | JSONL audit log path for evaluation decisions and cascade traces.                                                                                                       |
+| `reviewFallbackMode`                    | `"native" \| "ntfy"`           | `"ntfy"`                               | Fallback review channel when `ntfyTopic` is set, using remote ntfy push or a native terminal prompt.                                                                    |
+| `evalDbFile`                            | `string`                       | `"~/.config/autogate/evals.db"`        | SQLite WAL database path (`AUTOGATE_EVAL_DB`) for evaluation decisions, cascade traces, and zstd-compressed System 2 session transcripts.                               |
+| `evalSessionCleanup`                    | `"export-and-delete" \| "archive"` | `"export-and-delete"`              | Cleanup policy (`AUTOGATE_EVAL_SESSION_CLEANUP`) for OpenCode System 2 evaluation sessions after export into `evals.db` (`"export-and-delete"` or `"archive"`).         |
 | `serverUrl`                             | `string`                | `"http://localhost:4096"`              | OpenCode server URL; defaults to port `4097` when `OPENCODE_CONFIG_DIR` targets `opencode1` or `opencode2`.                                                             |
 | `environment.trustedDomains`            | `string[]`              | `[]`                                   | Domains trusted for outbound network actions.                                                                                                                           |
 | `environment.trustedGitRemotes`         | `string[]`              | `["origin"]`                           | Git remotes trusted for push and remote commands.                                                                                                                       |
@@ -240,8 +241,8 @@ AutoGate reads configuration from `~/.config/autogate/config.json`, or from `$XD
 | `paseo.timelineBadges`                  | `boolean`               | `true`                                 | Render `kind: "autogate-eval"` audit cards on the Paseo timeline.                                                                                                       |
 | `paseo.evaluatorProvider`               | `string`                | `undefined`                            | Provider or model string for Paseo native evaluation, such as `"omp"` or `"antigravity"`.                                                                               |
 | `paseo.useDirectApi`                    | `boolean`               | `false`                                | Use `DirectApiEvaluator` instead of Paseo agent creation.                                                                                                               |
-| `opencode`                              | `object`                | `{}`                                   | OpenCode settings, including `serverUrl`.                                                                                                                               |
-| `omp`                                   | `object`                | `{}`                                   | Oh My Pi settings, including `reviewFallbackMode` and `evalLogFile`.                                                                                                    |
+| `opencode`                              | `object`                       | `{}`                                   | OpenCode settings, including `serverUrl`, `evalDbFile`, and `evalSessionCleanup`.                                                                                       |
+| `omp`                                   | `object`                       | `{}`                                   | Oh My Pi settings, including `reviewFallbackMode` and `evalDbFile`.                                                                                                     |
 
 ---
 
@@ -278,7 +279,8 @@ When `systemOne.enabled` is `true`, `AutoGateCoreEngine` wraps its System 2 eval
 - **Execution modes.** In `race` mode, System 1 and System 2 start in parallel with separate `AbortController` instances; if System 1 passes all policy gates first, `CascadeEvaluator` aborts System 2 and returns System 1's verdict. If System 1 escalates or System 2 finishes first, the in-flight System 2 call resolves the action, re-running System 2 if context drift occurred. In `cascade` mode, System 1 runs first and invokes System 2 only on escalation.
 - **Fail-safe escalation gates.** System 1 never emits `UNSURE` directly. `evaluateCascadePolicy` escalates to System 2 on transport errors, timeouts, invalid output, truncated payloads, SHA-256 context fingerprint drift with reason `context_drifted`, `injection_risk >= maxInjectionNoul`, `in_scope < minInScopeNoul`, winner probability below `allowMinProb` or `blockMinProb`, or winner-to-loser odds ratio below `minOddsRatio`.
 - **System 1 outage circuit breaker.** After 3 consecutive transport failures from timeouts, network errors, or HTTP 401, 403, 429, or 5xx responses, `CascadeEvaluator` opens a 30-second cooldown and routes directly to System 2 with reason `s1_circuit_open`.
-- **Offline calibration.** Run `bun run eval:cascade` to sweep `allowMinProb`, `blockMinProb`, and `minInScopeNoul` across historical JSONL eval logs and synthetic injection or out-of-distribution cases, producing Pareto curves of accuracy against the System 2 escalation rate.
+- **Offline calibration.** Run `bun run eval:cascade` (or pass `-- --datasets synthetic,historical` / `-- --file <path>` to include historical evaluations in `evals.db` or legacy JSONL eval logs) to sweep `allowMinProb`, `blockMinProb`, and `minInScopeNoul` across synthetic injection or out-of-distribution cases and historical logs, producing Pareto curves of accuracy against the System 2 escalation rate.
+- **SQLite migration.** Run `bun run scripts/migrate-to-sqlite.ts --dry-run` (and omit `--dry-run` to import, optionally with `--delete-opencode-sessions --vacuum`) to idempotently import legacy JSONL audit logs and historical `[auto-gate-eval]` sessions from `opencode.db` into `evals.db`.
 
 ### Paseo native evaluation
 
@@ -342,7 +344,8 @@ autogate/
 │   ├── opencode1/        # OpenCode v1 plugin adapter
 │   └── omp/              # Oh My Pi extension, slash commands, and approval bridge
 ├── scripts/
-│   └── eval-cascade.ts   # Offline System 1 cascade threshold evaluator
+│   ├── eval-cascade.ts       # Offline System 1 cascade threshold evaluator
+│   └── migrate-to-sqlite.ts  # Idempotent JSONL & OpenCode DB importer to evals.db
 ├── test/
 │   └── e2e/
 │       ├── paseo/        # RealPaseoHarness and Paseo blackbox E2E tests

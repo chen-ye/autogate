@@ -1,7 +1,9 @@
 import type {
   AutoGateConfig,
   EnvironmentConfig,
+  EvalSessionCleanupMode,
   NtfyVerbosity,
+  ResolvedAutoGateConfig,
   ReviewFallbackMode,
   SystemOneConfig,
   SystemOneExecutionMode,
@@ -203,12 +205,92 @@ export function resolveConfigDir(options?: Record<string, unknown>): string {
   return path.dirname(resolveConfigFilePath(options));
 }
 
+function pickNonEmptyString(...values: unknown[]): string | undefined {
+  for (const val of values) {
+    if (typeof val === "string" && val.trim().length > 0) {
+      return val.trim();
+    }
+  }
+  return undefined;
+}
+
+export function parseEvalSessionCleanupMode(
+  value: unknown,
+  fallback: EvalSessionCleanupMode = "export-and-delete",
+): EvalSessionCleanupMode {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "export-and-delete") {
+      return "export-and-delete";
+    }
+    if (normalized === "archive") {
+      return "archive";
+    }
+  }
+  return fallback;
+}
+
 export function resolveRuntimeDir(options?: Record<string, unknown>): string {
   return path.join(resolveConfigDir(options), "runtime");
 }
 
 export function resolveControlFilePath(options?: Record<string, unknown>): string {
   return path.join(resolveConfigDir(options), "control.json");
+}
+
+export type HarnessConfigKey = "omp" | "opencode" | "paseo";
+
+export function resolveEvalDbFileWithConfig(
+  options: Record<string, unknown> | undefined,
+  fileConfig: Record<string, unknown> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  harness?: HarnessConfigKey,
+): string {
+  const loadedFile = fileConfig ?? loadFileConfig(options);
+  const optHarness = harness ? parseHarnessRecord(options?.[harness]) : undefined;
+  const fileHarness = harness ? parseHarnessRecord(loadedFile[harness]) : undefined;
+
+  const rawEvalDbFile = pickNonEmptyString(
+    optHarness?.evalDbFile,
+    options?.evalDbFile,
+    env.AUTOGATE_EVAL_DB,
+    fileHarness?.evalDbFile,
+    loadedFile.evalDbFile,
+  );
+  if (rawEvalDbFile) {
+    if (rawEvalDbFile === ":memory:") {
+      return ":memory:";
+    }
+    return path.resolve(expandPath(rawEvalDbFile));
+  }
+  return path.join(resolveConfigDir(options), "evals.db");
+}
+
+export function resolveEvalDbFile(
+  options?: Record<string, unknown>,
+  harness?: HarnessConfigKey,
+): string {
+  return resolveEvalDbFileWithConfig(options, undefined, process.env, harness);
+}
+
+export function resolveEvalSessionCleanup(
+  options?: Record<string, unknown>,
+  harness?: HarnessConfigKey,
+  fileConfig?: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): EvalSessionCleanupMode {
+  const loadedFile = fileConfig ?? loadFileConfig(options);
+  const optHarness = harness ? parseHarnessRecord(options?.[harness]) : undefined;
+  const fileHarness = harness ? parseHarnessRecord(loadedFile[harness]) : undefined;
+
+  const raw = pickNonEmptyString(
+    optHarness?.evalSessionCleanup,
+    options?.evalSessionCleanup,
+    env.AUTOGATE_EVAL_SESSION_CLEANUP,
+    fileHarness?.evalSessionCleanup,
+    loadedFile.evalSessionCleanup,
+  );
+  return parseEvalSessionCleanupMode(raw, "export-and-delete");
 }
 
 export function loadFileConfig(options?: Record<string, unknown>): Record<string, unknown> {
@@ -231,7 +313,10 @@ export function loadFileConfig(options?: Record<string, unknown>): Record<string
   return {};
 }
 
-export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
+export function loadConfig(
+  options?: Record<string, unknown>,
+  harness?: HarnessConfigKey,
+): ResolvedAutoGateConfig {
   const env = process.env;
   const fileConfig = loadFileConfig(options);
 
@@ -363,11 +448,13 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
       ? rawModel.trim()
       : getDefaultClassifierModel();
 
-  const rawEvalLogFile = options?.evalLogFile ?? env.AUTOGATE_EVAL_LOG ?? fileConfig.evalLogFile;
-  const evalLogFile =
-    typeof rawEvalLogFile === "string" && rawEvalLogFile.trim().length > 0
-      ? path.resolve(expandPath(rawEvalLogFile.trim()))
-      : path.join(os.homedir(), ".omp", "logs", "autogate-evals.jsonl");
+  const evalDbFile = resolveEvalDbFileWithConfig(options, fileConfig, env, harness);
+  const evalSessionCleanup = resolveEvalSessionCleanup(options, harness, fileConfig, env);
+  const normalizeOptionalEvalDb = (raw: unknown): string | undefined => {
+    const picked = pickNonEmptyString(raw);
+    if (!picked) return undefined;
+    return picked === ":memory:" ? ":memory:" : path.resolve(expandPath(picked));
+  };
   const rawThreshold =
     options?.consecutiveBlockThreshold ??
     options?.CONSECUTIVE_BLOCK_THRESHOLD ??
@@ -448,6 +535,22 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
       ? { ...parsedSystemOne, enabled: false }
       : parsedSystemOne;
 
+  const rawOmp = {
+    ...parseHarnessRecord(fileConfig.omp),
+    ...parseHarnessRecord(options?.omp),
+  };
+  const ompEvalDb = normalizeOptionalEvalDb(rawOmp.evalDbFile);
+
+  const rawOpencode = {
+    ...parseHarnessRecord(fileConfig.opencode),
+    ...parseHarnessRecord(options?.opencode),
+  };
+  const opencodeEvalDb = normalizeOptionalEvalDb(rawOpencode.evalDbFile);
+  const opencodeCleanup =
+    rawOpencode.evalSessionCleanup !== undefined
+      ? parseEvalSessionCleanupMode(rawOpencode.evalSessionCleanup, evalSessionCleanup)
+      : undefined;
+
   return {
     autoMode,
     ntfyTopic,
@@ -461,19 +564,21 @@ export function loadConfig(options?: Record<string, unknown>): AutoGateConfig {
     environment,
     serverUrl,
     reviewFallbackMode,
-    evalLogFile,
+    evalDbFile,
+    evalSessionCleanup,
     systemOne,
     omp: {
-      ...parseHarnessRecord(fileConfig.omp),
-      ...parseHarnessRecord(options?.omp),
+      ...rawOmp,
+      ...(ompEvalDb !== undefined ? { evalDbFile: ompEvalDb } : {}),
     },
     opencode: {
-      ...parseHarnessRecord(fileConfig.opencode),
-      ...parseHarnessRecord(options?.opencode),
+      ...rawOpencode,
+      ...(opencodeEvalDb !== undefined ? { evalDbFile: opencodeEvalDb } : {}),
+      ...(opencodeCleanup !== undefined ? { evalSessionCleanup: opencodeCleanup } : {}),
     },
     paseo: {
       ...parseHarnessRecord(fileConfig.paseo),
       ...parseHarnessRecord(options?.paseo),
     },
-  } satisfies AutoGateConfig;
+  } satisfies ResolvedAutoGateConfig;
 }

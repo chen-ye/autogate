@@ -1,5 +1,6 @@
 import {
   AutoGateCoreEngine,
+  AutoGateEvalStore,
   NtfyAdapter,
   loadConfig,
   type HarnessAdapter,
@@ -23,13 +24,15 @@ export class OmpHarnessAdapter implements HarnessAdapter {
   private engine: AutoGateCoreEngine;
   private evaluator: GateEvaluator;
   private nativeEvaluator?: OmpNativeEvaluator;
-  private evalLogFile?: string;
+  private evalDbFile?: string;
+  private evalStore?: AutoGateEvalStore;
+  private storeClosed = false;
   private currentCtx: OmpContext | null = null;
 
   constructor(pi: unknown, options?: Record<string, unknown>) {
-    const config = loadConfig(options);
+    const config = loadConfig(options, "omp");
     const optObj = isRecord(options) ? options : undefined;
-    this.evalLogFile = config.evalLogFile;
+    this.evalDbFile = config.evalDbFile;
     const fallbackMode: ReviewFallbackMode =
       (typeof optObj?.reviewFallbackMode === "string" &&
       (optObj.reviewFallbackMode === "native" || optObj.reviewFallbackMode === "ntfy")
@@ -47,6 +50,7 @@ export class OmpHarnessAdapter implements HarnessAdapter {
         })
       : undefined;
     const piObj = (pi && typeof pi === "object" ? pi : {}) as { logger?: OmpLogger };
+    const getStore = () => (this.storeClosed ? undefined : this.getEvalStore());
 
     let evaluator: GateEvaluator;
     if (optObj?.evaluator) {
@@ -62,7 +66,8 @@ export class OmpHarnessAdapter implements HarnessAdapter {
           process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.AUTOGATE_API_KEY,
         logger: piObj.logger,
         classifierTimeout: config.classifierTimeout,
-        evalLogFile: config.evalLogFile,
+        evalDbFile: this.evalDbFile,
+        getEvalStore: getStore,
         suppressEvalLog: Boolean(config.systemOne?.enabled),
       });
       this.nativeEvaluator = nativeEval;
@@ -75,11 +80,63 @@ export class OmpHarnessAdapter implements HarnessAdapter {
       adapter,
       evaluator,
       remoteReviewEnabled: ntfyEnabled && fallbackMode !== "native",
+      onClassifierResult: ({ action, result, durationMs, startTime }) => {
+        if (!result.cascade || this.storeClosed) return;
+        const metaModel =
+          result.metadata?.model && typeof result.metadata.model === "object"
+            ? (result.metadata.model as Record<string, unknown>)
+            : undefined;
+        const metaInference =
+          result.metadata?.inference && typeof result.metadata.inference === "object"
+            ? (result.metadata.inference as Record<string, unknown>)
+            : undefined;
+        try {
+          getStore()?.recordEvaluation({
+            sourceFormat: "omp",
+            timestamp: startTime,
+            sessionId: String(action.sessionID ?? ""),
+            actionId: String(action.id),
+            toolName: action.toolName,
+            commandString: action.commandString ?? "",
+            targetPath: action.targetPath || null,
+            workspaceRoot: action.workspaceRoot,
+            userPrompt: action.userPrompt,
+            modelId: typeof metaModel?.id === "string" ? metaModel.id : null,
+            modelProvider: typeof metaModel?.provider === "string" ? metaModel.provider : null,
+            durationMs,
+            promptTokens:
+              typeof metaInference?.promptTokens === "number" ? metaInference.promptTokens : null,
+            outputTokens:
+              typeof metaInference?.outputTokens === "number" ? metaInference.outputTokens : null,
+            reasoningTokens:
+              typeof metaInference?.reasoningTokens === "number"
+                ? metaInference.reasoningTokens
+                : null,
+            thinking: typeof metaInference?.thinking === "string" ? metaInference.thinking : null,
+            attempts: typeof metaInference?.attempts === "number" ? metaInference.attempts : null,
+            verdict: result.verdict,
+            riskLevel: result.risk_level ?? null,
+            userAuthorization: result.user_authorization ?? null,
+            reasoning: result.reason,
+            cascade: result.cascade,
+          });
+        } catch {
+          // Best-effort evaluation persistence
+        }
+      },
     });
   }
 
-  public getEvalLogFile(): string | undefined {
-    return this.evalLogFile;
+  private getEvalStore(): AutoGateEvalStore {
+    if (this.evalStore && this.evalStore.isOpen()) {
+      return this.evalStore;
+    }
+    this.evalStore = new AutoGateEvalStore(this.evalDbFile);
+    return this.evalStore;
+  }
+
+  public getEvalDbFile(): string | undefined {
+    return this.evalDbFile;
   }
 
   setContext(ctx: OmpContext) {
@@ -106,11 +163,21 @@ export class OmpHarnessAdapter implements HarnessAdapter {
   }
 
   async start(): Promise<void> {
+    this.storeClosed = false;
     await this.engine.start();
   }
 
   async dispose(): Promise<void> {
     await this.engine.stop();
+    this.storeClosed = true;
+    if (this.evalStore) {
+      try {
+        this.evalStore.close();
+      } catch {
+        // Ignore cleanup errors on close
+      }
+      this.evalStore = undefined;
+    }
   }
 
   getEngine(): AutoGateCoreEngine {
@@ -292,7 +359,8 @@ export default function autoGateOmpExtension(
     engine,
     verdictStore,
     (ctx) => adapter.setContext(ctx),
-    adapter.getEvalLogFile(),
+    adapter.getEvalDbFile(),
+    true,
   );
   registerAutogateClassifierCommand(pi, engine);
   registerAutogateFallbackCommand(pi, engine);

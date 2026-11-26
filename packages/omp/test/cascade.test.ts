@@ -2,11 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { AutoGateCoreEngine, createConfiguredEvaluator, loadConfig } from "@autogate/core";
+import {
+  AutoGateCoreEngine,
+  AutoGateEvalStore,
+  createConfiguredEvaluator,
+  loadConfig,
+} from "@autogate/core";
 import type { GateEvaluator, ClassifierResult } from "@autogate/core";
 import { registerToolCallHook } from "../src/hook.ts";
 
-describe("OMP cascade hook integration & JSONL observability", () => {
+describe("OMP cascade hook integration & AutoGateEvalStore observability", () => {
   let tempDir: string;
   const origFetch = globalThis.fetch;
 
@@ -21,8 +26,8 @@ describe("OMP cascade hook integration & JSONL observability", () => {
     } catch {}
   });
 
-  it("logs cascade trace to JSONL evalLogFile and aborts System 2 when System 1 wins", async () => {
-    const evalLogFile = path.join(tempDir, "omp-cascade.jsonl");
+  it("logs cascade trace to evalDbFile and aborts System 2 when System 1 wins", async () => {
+    const evalDbFile = path.join(tempDir, "omp-cascade.db");
     let s2Aborted = false;
 
     globalThis.fetch = (async () =>
@@ -50,7 +55,7 @@ describe("OMP cascade hook integration & JSONL observability", () => {
     };
 
     const config = loadConfig({
-      evalLogFile,
+      evalDbFile,
       notifyOnVerdict: false,
       reviewFallbackMode: "native",
       systemOne: {
@@ -80,7 +85,7 @@ describe("OMP cascade hook integration & JSONL observability", () => {
       string,
       { verdict: string; policy: "allow" | "deny" | "prompt"; reason?: string }
     >();
-    registerToolCallHook(mockPi, engine, store, undefined, evalLogFile);
+    registerToolCallHook(mockPi, engine, store, undefined, evalDbFile);
 
     const handler = listeners.get("tool_call")!;
     const res = await handler(
@@ -96,13 +101,20 @@ describe("OMP cascade hook integration & JSONL observability", () => {
     expect(s2Aborted).toBe(true);
     expect(store.get("omp-call-1")?.verdict).toBe("ALLOW");
 
-    await new Promise((r) => setTimeout(r, 30));
-    const lines = fs.readFileSync(evalLogFile, "utf8").trim().split("\n");
-    expect(lines.length).toBe(1);
-    const parsed = JSON.parse(lines[0]);
-    expect(parsed.userPrompt).toBe("Check git status in repo");
-    expect(parsed.cascade.mode).toBe("race");
-    expect(parsed.cascade.winner).toBe("system1");
-    expect(parsed.cascade.s2Aborted).toBe(true);
+    const evalStore = new AutoGateEvalStore(evalDbFile, { readonly: true });
+    try {
+      const records = evalStore.queryEvaluations();
+      expect(records.length).toBe(1);
+      const rec = records[0]!;
+      expect(rec.sourceFormat).toBe("omp");
+      expect(rec.actionId).toBe("omp-call-1");
+      expect(rec.sessionId).toBe("ses-omp-1");
+      expect(rec.userPrompt).toBe("Check git status in repo");
+      expect(rec.cascade?.mode).toBe("race");
+      expect(rec.cascade?.winner).toBe("system1");
+      expect(rec.cascade?.s2Aborted).toBe(true);
+    } finally {
+      evalStore.close();
+    }
   });
 });
