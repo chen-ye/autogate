@@ -8,14 +8,16 @@ import {
   AutoGateEvalStore,
   PASSIVE_EVALUATOR_DIRECTIVE,
   buildClassifierUserPrompt,
+  loadEvalAgentDefinition,
+} from "../src/index.js";
+import {
   computeJsonlLineId,
   correlateUnlinkedJsonlEvaluations,
   importJsonlToEvalStore,
   importOpenCodeDbToEvalStore,
-  loadEvalAgentDefinition,
   migrateToEvalStore,
   parseCommandVariants,
-} from "../src/index.js";
+} from "../src/eval-importer.js";
 import { parseMigrateCliArgs, runMigrateCli } from "../../../scripts/migrate-to-sqlite.js";
 
 function createTestOpenCodeDb(dbPath: string): DatabaseSync {

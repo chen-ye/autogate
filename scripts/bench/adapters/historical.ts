@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveEvalDbFile } from "../../../packages/core/src/config.js";
-import { AutoGateEvalStore, type EvaluationRecord } from "../../../packages/core/src/eval-store.js";
+import { AutoGateEvalStore, type EvaluationRecord } from "@autogate/core";
 import type { ClassifierVerdict, PermissionEventData } from "../../../packages/core/src/types.js";
 import { ensureEmptyBenchWorkspace, expandHomePath } from "../paths.js";
 import {

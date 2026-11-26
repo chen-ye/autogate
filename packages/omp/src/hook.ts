@@ -1,9 +1,10 @@
 import {
   AutoGateEvalStore,
   type AutoGateCoreEngine,
+  type GateAction,
+  type GateDecision,
   type RecordEvaluationInput,
-} from "../../core/src/index.ts";
-import type { GateAction, GateDecision } from "../../core/src/types.ts";
+} from "@autogate/core";
 
 export const verdictStore = new Map<
   string,

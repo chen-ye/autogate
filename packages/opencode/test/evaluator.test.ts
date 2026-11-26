@@ -825,5 +825,82 @@ describe("@autogate/opencode evaluator OpenCode v2 support", () => {
       expect(removedSessions).toEqual(["ses_clean_1"]);
       expect(archivedSessions).toEqual(["ses_clean_2", "ses_clean_3", "ses_clean_4"]);
     });
+
+    it("does not leak session/message .id as modelId and keeps messageCount synced with sanitized payload", async () => {
+      const evalDbFile = path.join(tempDir, "model-and-count.db");
+      const { systemPrompt } = await import("@autogate/core").then((m) =>
+        m.resolveEvalPromptBundle("auto-gate-eval", "google/gemini-3.5-flash-lite"),
+      );
+
+      const client = {
+        agent: { list: async () => ({ data: [{ id: "auto-gate-eval" }] }) },
+        session: {
+          create: async () => ({ data: { id: "ses_s2_id_leak_guard" } }),
+          prompt: async (opts: { sessionID: string }) => {
+            recordEvaluationVerdict(opts.sessionID, {
+              verdict: "ALLOW",
+              risk_level: "LOW",
+              user_authorization: "HIGH",
+              reason: "Checked cleanly",
+            });
+            return { data: { parts: [] } };
+          },
+          get: async () => ({
+            data: {
+              id: "ses_s2_id_leak_guard",
+              title: "[auto-gate-eval] bash",
+              agent: "auto-gate-eval",
+            },
+          }),
+          context: async () => ({
+            data: [
+              { id: "msg_sys", type: "system", text: systemPrompt },
+              {
+                id: "msg_user",
+                type: "user",
+                content: [{ type: "text", text: `${systemPrompt}\n\nProposed Action: ls` }],
+              },
+              {
+                id: "msg_asst",
+                info: {
+                  id: "msg_asst",
+                  role: "assistant",
+                  modelID: "gemini-3.5-flash-lite",
+                  providerID: "google",
+                },
+                parts: [{ type: "text", text: "Done" }],
+              },
+            ],
+          }),
+          remove: async () => {},
+        },
+      } as unknown as OpenCodeSessionClient;
+
+      const res = await classifyRequest({
+        client,
+        evalDbFile,
+        targetSessionId: "ses_parent_id_guard",
+        actionId: "act_id_guard",
+        toolName: "bash",
+        commandString: "ls",
+        workspaceRoot: tempDir,
+        model: "google/gemini-3.5-flash-lite",
+      });
+
+      expect(res.metadata?.modelId).toBe("gemini-3.5-flash-lite");
+      expect(res.metadata?.modelProvider).toBe("google");
+
+      const store = new AutoGateEvalStore(evalDbFile, { readonly: true });
+      try {
+        const s2 = store.getS2Session("ses_s2_id_leak_guard");
+        expect(s2?.modelId).toBe("gemini-3.5-flash-lite");
+        expect(s2?.modelProvider).toBe("google");
+        const payload = s2?.payload as { messages?: unknown[] };
+        expect(payload.messages).toHaveLength(2);
+        expect(s2?.messageCount).toBe(2);
+      } finally {
+        store.close();
+      }
+    });
   });
 });

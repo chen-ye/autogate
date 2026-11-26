@@ -3,7 +3,7 @@ import {
   migrateToEvalStore,
   type MigrateToEvalStoreResult,
   type SqliteFileSizes,
-} from "../packages/core/src/index.js";
+} from "@autogate/core/eval-importer";
 
 export interface MigrateCliOptions {
   readonly evalDb?: string;

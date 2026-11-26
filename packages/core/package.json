@@ -2,5 +2,10 @@
   "name": "@autogate/core",
   "version": "1.0.0",
   "type": "module",
-  "main": "./src/index.ts"
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./eval-importer": "./src/eval-importer.ts",
+    "./eval-store": "./src/eval-store.ts"
+  }
 }

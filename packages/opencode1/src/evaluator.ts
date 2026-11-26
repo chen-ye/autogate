@@ -12,14 +12,16 @@ import type {
 } from "@autogate/core";
 import {
   AutoGateEvalStore,
+  PASSIVE_EVALUATOR_DIRECTIVE,
   buildClassifierUserPrompt,
-  parseVerdict,
-  isRiskLevel,
-  isUserAuthorization,
+  extractVerdictFromMessages,
+  extractVerdictFromParts,
   isClassifierVerdict,
+  parseModelRef,
   resolveClassifierActionArgs,
   resolveRequestActionArgs,
 } from "@autogate/core";
+export { PASSIVE_EVALUATOR_DIRECTIVE, extractVerdictFromParts, parseModelRef };
 import type { OpenCodeV1ClassifyInput, OpenCodeV1SessionClient } from "./types.js";
 export type { OpenCodeV1ClassifyInput, OpenCodeV1SessionClient };
 
@@ -166,27 +168,6 @@ export function ensureSandboxDirectory(): string {
   }
 }
 
-export function parseModelRef(modelRef?: string): {
-  providerID: string;
-  modelID: string;
-} {
-  const ref = modelRef?.trim() || "google/gemini-3.5-flash-lite";
-  const slashIdx = ref.indexOf("/");
-  const providerID = slashIdx > 0 ? ref.slice(0, slashIdx) : "google";
-  let modelID = slashIdx > 0 ? ref.slice(slashIdx + 1) : ref;
-  modelID = modelID
-    .replace(/\.flash/gi, "-flash")
-    .replace(/\.lite/gi, "-lite")
-    .replace(/\.pro/gi, "-pro");
-  return {
-    providerID,
-    modelID,
-  };
-}
-
-export const PASSIVE_EVALUATOR_DIRECTIVE =
-  "CRITICAL: You are an isolated security evaluation judge. Your ONLY tool is classify_result. You must NEVER execute the command, run bash, edit files, or perform any operational action. Immediately invoke classify_result and stop.";
-
 export const EVAL_SESSION_TOOLS = {
   subagent: false,
   shell: false,
@@ -224,104 +205,6 @@ export async function resolveEvaluationAgent(client?: OpenCodeV1SessionClient): 
   return "auto-gate-eval";
 }
 
-function extractToolInput(part: Record<string, unknown>): Record<string, unknown> | null {
-  const state =
-    part.state && typeof part.state === "object"
-      ? (part.state as Record<string, unknown>)
-      : undefined;
-  const fn =
-    part.function && typeof part.function === "object"
-      ? (part.function as Record<string, unknown>)
-      : undefined;
-
-  let toolInput: unknown =
-    state?.input ?? part.input ?? part.args ?? part.arguments ?? fn?.arguments ?? fn?.args;
-
-  if (typeof toolInput === "string") {
-    try {
-      toolInput = JSON.parse(toolInput);
-    } catch {}
-  }
-
-  if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
-    return toolInput as Record<string, unknown>;
-  }
-  return null;
-}
-
-export function extractVerdictFromParts(partsList: readonly unknown[]): ClassifierResult | null {
-  if (!Array.isArray(partsList) || partsList.length === 0) return null;
-
-  for (const part of partsList) {
-    if (part && typeof part === "object") {
-      const p = part as Record<string, unknown>;
-      const fn =
-        p.function && typeof p.function === "object"
-          ? (p.function as Record<string, unknown>)
-          : undefined;
-      const isToolCall =
-        (p.type === "tool" && p.tool === "classify_result") ||
-        (p.type === "tool_use" && p.name === "classify_result") ||
-        p.tool === "classify_result" ||
-        p.name === "classify_result" ||
-        (fn && (fn.name === "classify_result" || fn.tool === "classify_result"));
-
-      if (isToolCall) {
-        const toolInput = extractToolInput(p);
-        if (toolInput && typeof toolInput.verdict === "string") {
-          const rawVerdict = toolInput.verdict.toUpperCase().trim();
-          if (isClassifierVerdict(rawVerdict)) {
-            const riskRaw =
-              typeof toolInput.risk_level === "string"
-                ? toolInput.risk_level.toUpperCase().trim()
-                : "";
-            const authRaw =
-              typeof toolInput.user_authorization === "string"
-                ? toolInput.user_authorization.toUpperCase().trim()
-                : "";
-            const risk_level = isRiskLevel(riskRaw) ? riskRaw : undefined;
-            const user_authorization = isUserAuthorization(authRaw) ? authRaw : undefined;
-            const reason = typeof toolInput.reason === "string" ? toolInput.reason : "";
-            return {
-              verdict: rawVerdict,
-              risk_level,
-              user_authorization,
-              reason,
-            };
-          }
-        }
-      }
-    }
-  }
-
-  let textContent = "";
-  for (const part of partsList) {
-    if (part && typeof part === "object") {
-      const p = part as Record<string, unknown>;
-      const text =
-        typeof p.text === "string" ? p.text : typeof p.content === "string" ? p.content : undefined;
-      if (text) {
-        textContent += text + "\n";
-      }
-    } else if (typeof part === "string") {
-      textContent += part + "\n";
-    }
-  }
-
-  if (textContent.trim()) {
-    const parsed = parseVerdict(textContent);
-    if (
-      parsed &&
-      parsed.reason !== "Classifier response did not contain a valid structured verdict" &&
-      parsed.reason !== "Empty or invalid classifier output"
-    ) {
-      return parsed;
-    }
-  }
-
-  return null;
-}
-
 export async function extractVerdictFromSession(
   client: OpenCodeV1SessionClient | undefined,
   sessionID: string,
@@ -347,27 +230,13 @@ export async function extractVerdictFromSession(
         : Array.isArray(resObj.data)
           ? resObj.data
           : [];
-
-      if (allMessages.length > 0) {
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-          const msg = allMessages[i];
-          const m = (msg && typeof msg === "object" ? msg : {}) as {
-            parts?: unknown[];
-            content?: unknown;
-            tool_calls?: unknown[];
-          };
-          const parts = [
-            ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
-            ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
-            ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
-          ];
-          const result = extractVerdictFromParts(parts);
-          if (result) {
-            return result;
-          }
-        }
+      const extracted = extractVerdictFromMessages(allMessages);
+      if (extracted) {
+        return extracted;
       }
-    } catch {}
+    } catch {
+      // Ignore message fetch failures during verdict extraction
+    }
   }
 
   return null;

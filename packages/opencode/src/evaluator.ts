@@ -5,8 +5,6 @@ import * as crypto from "crypto";
 import type {
   ClassifierResult,
   ClassifierVerdict,
-  RiskLevel,
-  UserAuthorization,
   GateEvaluator,
   GateAction,
   AutoGateConfig,
@@ -16,21 +14,22 @@ import type {
 import {
   AutoGateEvalStore,
   EVAL_AGENT_ID,
-  PASSIVE_EVALUATOR_DIRECTIVE,
   buildClassifierUserPrompt,
+  extractAndStripSystemPrompt,
+  extractS2SessionDetails,
+  extractVerdictFromMessages,
+  extractVerdictFromParts,
   isClassifierVerdict,
+  isPostVerdictInterruptError,
   isRecord,
-  isRiskLevel,
-  isUserAuthorization,
-  loadEvalAgentDefinition,
   parseModelRef,
-  parseVerdict,
   resolveClassifierActionArgs,
   resolveEvalDbFile,
+  resolveEvalPromptBundle,
   resolveRequestActionArgs,
 } from "@autogate/core";
-export { parseModelRef };
-import { resolveServerPassword } from "./index.js";
+export { parseModelRef, extractVerdictFromParts };
+import { resolveServerPassword } from "./helpers.js";
 import type {
   OpenCodeClassifyInput,
   OpenCodeSessionClient,
@@ -266,104 +265,6 @@ export async function resolveEvaluationAgent(client?: OpenCodeSessionClient): Pr
   return EVAL_AGENT_ID;
 }
 
-function extractToolInput(part: Record<string, unknown>): Record<string, unknown> | null {
-  const state =
-    part.state && typeof part.state === "object"
-      ? (part.state as Record<string, unknown>)
-      : undefined;
-  const fn =
-    part.function && typeof part.function === "object"
-      ? (part.function as Record<string, unknown>)
-      : undefined;
-
-  let toolInput: unknown =
-    state?.input ?? part.input ?? part.args ?? part.arguments ?? fn?.arguments ?? fn?.args;
-
-  if (typeof toolInput === "string") {
-    try {
-      toolInput = JSON.parse(toolInput);
-    } catch {}
-  }
-
-  if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
-    return toolInput as Record<string, unknown>;
-  }
-  return null;
-}
-
-export function extractVerdictFromParts(partsList: readonly unknown[]): ClassifierResult | null {
-  if (!Array.isArray(partsList) || partsList.length === 0) return null;
-
-  for (const part of partsList) {
-    if (part && typeof part === "object") {
-      const p = part as Record<string, unknown>;
-      const fn =
-        p.function && typeof p.function === "object"
-          ? (p.function as Record<string, unknown>)
-          : undefined;
-      const isToolCall =
-        (p.type === "tool" && (p.tool === "classify_result" || p.name === "classify_result")) ||
-        (p.type === "tool_use" && p.name === "classify_result") ||
-        p.tool === "classify_result" ||
-        p.name === "classify_result" ||
-        (fn && (fn.name === "classify_result" || fn.tool === "classify_result"));
-
-      if (isToolCall) {
-        const toolInput = extractToolInput(p);
-        if (toolInput && typeof toolInput.verdict === "string") {
-          const rawVerdict = toolInput.verdict.toUpperCase().trim();
-          if (isClassifierVerdict(rawVerdict)) {
-            const riskRaw =
-              typeof toolInput.risk_level === "string"
-                ? toolInput.risk_level.toUpperCase().trim()
-                : "";
-            const authRaw =
-              typeof toolInput.user_authorization === "string"
-                ? toolInput.user_authorization.toUpperCase().trim()
-                : "";
-            const risk_level = isRiskLevel(riskRaw) ? riskRaw : undefined;
-            const user_authorization = isUserAuthorization(authRaw) ? authRaw : undefined;
-            const reason = typeof toolInput.reason === "string" ? toolInput.reason : "";
-            return {
-              verdict: rawVerdict,
-              risk_level,
-              user_authorization,
-              reason,
-            };
-          }
-        }
-      }
-    }
-  }
-
-  let textContent = "";
-  for (const part of partsList) {
-    if (part && typeof part === "object") {
-      const p = part as Record<string, unknown>;
-      const text =
-        typeof p.text === "string" ? p.text : typeof p.content === "string" ? p.content : undefined;
-      if (text) {
-        textContent += text + "\n";
-      }
-    } else if (typeof part === "string") {
-      textContent += part + "\n";
-    }
-  }
-
-  if (textContent.trim()) {
-    const parsed = parseVerdict(textContent);
-    if (
-      parsed &&
-      parsed.reason !== "Classifier response did not contain a valid structured verdict" &&
-      parsed.reason !== "Empty or invalid classifier output"
-    ) {
-      return parsed;
-    }
-  }
-
-  return null;
-}
-
 export async function extractVerdictFromSession(
   client: OpenCodeSessionClient | undefined,
   sessionID: string,
@@ -380,27 +281,13 @@ export async function extractVerdictFromSession(
       const allMessages: unknown[] = Array.isArray(res)
         ? res
         : (res as { data?: unknown[] })?.data || [];
-
-      if (allMessages.length > 0) {
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-          const msg = allMessages[i];
-          const m = (msg && typeof msg === "object" ? msg : {}) as {
-            parts?: unknown[];
-            content?: unknown;
-            tool_calls?: unknown[];
-          };
-          const parts = [
-            ...(Array.isArray(m.parts) ? m.parts : m.parts ? [m.parts] : []),
-            ...(Array.isArray(m.content) ? m.content : m.content ? [m.content] : []),
-            ...(Array.isArray(m.tool_calls) ? m.tool_calls : m.tool_calls ? [m.tool_calls] : []),
-          ];
-          const result = extractVerdictFromParts(parts);
-          if (result) {
-            return result;
-          }
-        }
+      const extracted = extractVerdictFromMessages(allMessages);
+      if (extracted) {
+        return extracted;
       }
-    } catch {}
+    } catch {
+      // Ignore context fetch failures during verdict extraction
+    }
   }
 
   return null;
@@ -414,28 +301,6 @@ function nonEmptyString(val: unknown): string | undefined {
   if (typeof val !== "string") return undefined;
   const trimmed = val.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function finiteNumber(val: unknown): number | undefined {
-  return typeof val === "number" && Number.isFinite(val) ? val : undefined;
-}
-
-function finiteInt(val: unknown): number | undefined {
-  const n = finiteNumber(val);
-  return n !== undefined ? Math.trunc(n) : undefined;
-}
-
-function parseTimestampMs(val: unknown): number | undefined {
-  if (typeof val === "number" && Number.isFinite(val)) {
-    return Math.trunc(val);
-  }
-  if (typeof val === "string" && val.trim().length > 0) {
-    const parsed = Date.parse(val);
-    if (Number.isFinite(parsed)) {
-      return Math.trunc(parsed);
-    }
-  }
-  return undefined;
 }
 
 async function settleWithTimeout<T>(
@@ -466,393 +331,6 @@ async function settleWithTimeout<T>(
     if (timer !== undefined) {
       clearTimeout(timer);
     }
-  }
-}
-
-interface ExtractedTokenTotals {
-  promptTokens?: number;
-  outputTokens?: number;
-  reasoningTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-}
-
-function readTokenTotals(raw: unknown): ExtractedTokenTotals | undefined {
-  if (!isRecord(raw)) return undefined;
-  const cacheObj = isRecord(raw.cache) ? raw.cache : undefined;
-  const completionDetails = isRecord(raw.completionTokensDetails)
-    ? raw.completionTokensDetails
-    : undefined;
-
-  const promptTokens =
-    finiteInt(raw.input) ??
-    finiteInt(raw.promptTokens) ??
-    finiteInt(raw.input_tokens) ??
-    finiteInt(raw.prompt_tokens);
-  const outputTokens =
-    finiteInt(raw.output) ??
-    finiteInt(raw.outputTokens) ??
-    finiteInt(raw.completion_tokens) ??
-    finiteInt(raw.output_tokens);
-  const reasoningTokens =
-    finiteInt(raw.reasoning) ??
-    finiteInt(raw.reasoningTokens) ??
-    finiteInt(raw.reasoning_tokens) ??
-    finiteInt(completionDetails?.reasoningTokens);
-  const cacheReadTokens =
-    finiteInt(cacheObj?.read) ?? finiteInt(raw.cacheReadTokens) ?? finiteInt(raw.cache_read_tokens);
-  const cacheWriteTokens =
-    finiteInt(cacheObj?.write) ??
-    finiteInt(raw.cacheWriteTokens) ??
-    finiteInt(raw.cache_write_tokens);
-
-  if (
-    promptTokens === undefined &&
-    outputTokens === undefined &&
-    reasoningTokens === undefined &&
-    cacheReadTokens === undefined &&
-    cacheWriteTokens === undefined
-  ) {
-    return undefined;
-  }
-
-  return {
-    ...(promptTokens !== undefined ? { promptTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
-  };
-}
-
-function hasPositiveTokenCount(tokens: ExtractedTokenTotals | undefined): boolean {
-  if (!tokens) return false;
-  return (
-    (tokens.promptTokens ?? 0) > 0 ||
-    (tokens.outputTokens ?? 0) > 0 ||
-    (tokens.reasoningTokens ?? 0) > 0 ||
-    (tokens.cacheReadTokens ?? 0) > 0 ||
-    (tokens.cacheWriteTokens ?? 0) > 0
-  );
-}
-
-function extractThinkingSegments(parts: readonly unknown[]): string[] {
-  const segments: string[] = [];
-  for (const item of parts) {
-    if (!isRecord(item)) continue;
-    const partType = typeof item.type === "string" ? item.type : "";
-    if (partType === "reasoning" || partType === "thinking" || partType === "reasoning_text") {
-      const text =
-        nonEmptyString(item.text) ??
-        nonEmptyString(item.thinking) ??
-        nonEmptyString(item.reasoning) ??
-        nonEmptyString(item.reasoning_content);
-      if (text) {
-        segments.push(text);
-      }
-    }
-  }
-  return segments;
-}
-
-function readModelFromRecord(
-  raw: unknown,
-): { modelId?: string; modelProvider?: string } | undefined {
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    const parsed = parseModelRef(raw.trim());
-    return { modelId: parsed.modelID, modelProvider: parsed.providerID };
-  }
-  if (!isRecord(raw)) return undefined;
-  const modelObj = isRecord(raw.model) ? raw.model : undefined;
-  const infoObj = isRecord(raw.info) ? raw.info : undefined;
-
-  if (typeof raw.model === "string" && raw.model.trim().length > 0) {
-    const parsed = parseModelRef(raw.model.trim());
-    return { modelId: parsed.modelID, modelProvider: parsed.providerID };
-  }
-
-  const modelId =
-    nonEmptyString(modelObj?.id) ??
-    nonEmptyString(modelObj?.modelID) ??
-    nonEmptyString(raw.modelID) ??
-    nonEmptyString(raw.modelId) ??
-    nonEmptyString(infoObj?.modelID) ??
-    nonEmptyString(infoObj?.modelId);
-  const modelProvider =
-    nonEmptyString(modelObj?.providerID) ??
-    nonEmptyString(modelObj?.providerId) ??
-    nonEmptyString(modelObj?.provider) ??
-    nonEmptyString(raw.providerID) ??
-    nonEmptyString(raw.providerId) ??
-    nonEmptyString(infoObj?.providerID) ??
-    nonEmptyString(infoObj?.providerId);
-
-  if (modelId || modelProvider) {
-    return {
-      ...(modelId ? { modelId } : {}),
-      ...(modelProvider ? { modelProvider } : {}),
-    };
-  }
-  if (infoObj) {
-    return readModelFromRecord(infoObj);
-  }
-  return undefined;
-}
-
-function isAssistantMessage(msg: Record<string, unknown>): boolean {
-  const info = isRecord(msg.info) ? msg.info : undefined;
-  const role = msg.type ?? msg.role ?? info?.role ?? info?.type;
-  return role === "assistant";
-}
-
-interface ExtractedSessionDetails {
-  modelId?: string;
-  modelProvider?: string;
-  promptTokens?: number;
-  outputTokens?: number;
-  reasoningTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  cost?: number;
-  thinking?: string;
-  messageCount: number;
-  title?: string;
-  agent?: string;
-  directory?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  archivedAt?: number;
-  outcome?: string;
-  assistantError?: string;
-}
-
-function extractSessionDetails(params: {
-  sessionInfo?: Record<string, unknown>;
-  messages?: unknown[];
-  capturedParts: readonly unknown[];
-  capturedReasoning?: string;
-  configuredModel?: string;
-}): ExtractedSessionDetails {
-  const { sessionInfo, messages, capturedParts, capturedReasoning, configuredModel } = params;
-
-  const infoModel = sessionInfo ? readModelFromRecord(sessionInfo) : undefined;
-  let modelId = infoModel?.modelId;
-  let modelProvider = infoModel?.modelProvider;
-
-  const infoTokens = sessionInfo ? readTokenTotals(sessionInfo.tokens) : undefined;
-  const infoCost = sessionInfo ? finiteNumber(sessionInfo.cost) : undefined;
-
-  let msgHasTokens = false;
-  let msgPrompt = 0;
-  let msgOutput = 0;
-  let msgReasoning = 0;
-  let msgCacheRead = 0;
-  let msgCacheWrite = 0;
-  let hasPromptSum = false;
-  let hasOutputSum = false;
-  let hasReasoningSum = false;
-  let hasCacheReadSum = false;
-  let hasCacheWriteSum = false;
-
-  let msgHasCost = false;
-  let msgCost = 0;
-
-  const thinkingSegments: string[] = [];
-  let assistantError: string | undefined;
-
-  if (Array.isArray(messages)) {
-    for (const rawMsg of messages) {
-      if (!isRecord(rawMsg) || !isAssistantMessage(rawMsg)) continue;
-      const info = isRecord(rawMsg.info) ? rawMsg.info : undefined;
-
-      const msgModel = readModelFromRecord(rawMsg);
-      if (msgModel) {
-        modelId = msgModel.modelId ?? modelId;
-        modelProvider = msgModel.modelProvider ?? modelProvider;
-      }
-
-      const tokens =
-        readTokenTotals(rawMsg.tokens) ??
-        readTokenTotals(info?.tokens) ??
-        readTokenTotals(rawMsg.usage) ??
-        readTokenTotals(info?.usage);
-      if (tokens) {
-        msgHasTokens = true;
-        if (tokens.promptTokens !== undefined) {
-          msgPrompt += tokens.promptTokens;
-          hasPromptSum = true;
-        }
-        if (tokens.outputTokens !== undefined) {
-          msgOutput += tokens.outputTokens;
-          hasOutputSum = true;
-        }
-        if (tokens.reasoningTokens !== undefined) {
-          msgReasoning += tokens.reasoningTokens;
-          hasReasoningSum = true;
-        }
-        if (tokens.cacheReadTokens !== undefined) {
-          msgCacheRead += tokens.cacheReadTokens;
-          hasCacheReadSum = true;
-        }
-        if (tokens.cacheWriteTokens !== undefined) {
-          msgCacheWrite += tokens.cacheWriteTokens;
-          hasCacheWriteSum = true;
-        }
-      }
-
-      const mCost = finiteNumber(rawMsg.cost) ?? finiteNumber(info?.cost);
-      if (mCost !== undefined) {
-        msgHasCost = true;
-        msgCost += mCost;
-      }
-
-      const contentList = Array.isArray(rawMsg.content)
-        ? rawMsg.content
-        : Array.isArray(rawMsg.parts)
-          ? rawMsg.parts
-          : [];
-      thinkingSegments.push(...extractThinkingSegments(contentList));
-
-      const directReasoning =
-        nonEmptyString(rawMsg.reasoning) ??
-        nonEmptyString(rawMsg.thinking) ??
-        nonEmptyString(rawMsg.reasoning_content) ??
-        nonEmptyString(info?.reasoning) ??
-        nonEmptyString(info?.thinking);
-      if (directReasoning && !thinkingSegments.includes(directReasoning)) {
-        thinkingSegments.push(directReasoning);
-      }
-
-      const errObj = isRecord(rawMsg.error)
-        ? rawMsg.error
-        : isRecord(info?.error)
-          ? info.error
-          : undefined;
-      if (errObj) {
-        assistantError =
-          nonEmptyString(errObj.message) ?? nonEmptyString(errObj.type) ?? assistantError;
-      } else if (typeof rawMsg.error === "string") {
-        assistantError = nonEmptyString(rawMsg.error) ?? assistantError;
-      }
-    }
-  }
-
-  if ((!modelId || !modelProvider) && configuredModel && configuredModel.trim().length > 0) {
-    const parsed = parseModelRef(configuredModel.trim());
-    modelId = modelId ?? parsed.modelID;
-    modelProvider = modelProvider ?? parsed.providerID;
-  }
-
-  const useInfoTokens =
-    infoTokens !== undefined && (hasPositiveTokenCount(infoTokens) || !msgHasTokens);
-  const promptTokens = useInfoTokens
-    ? infoTokens.promptTokens
-    : hasPromptSum
-      ? msgPrompt
-      : undefined;
-  const outputTokens = useInfoTokens
-    ? infoTokens.outputTokens
-    : hasOutputSum
-      ? msgOutput
-      : undefined;
-  const reasoningTokens = useInfoTokens
-    ? infoTokens.reasoningTokens
-    : hasReasoningSum
-      ? msgReasoning
-      : undefined;
-  const cacheReadTokens = useInfoTokens
-    ? infoTokens.cacheReadTokens
-    : hasCacheReadSum
-      ? msgCacheRead
-      : undefined;
-  const cacheWriteTokens = useInfoTokens
-    ? infoTokens.cacheWriteTokens
-    : hasCacheWriteSum
-      ? msgCacheWrite
-      : undefined;
-
-  const cost =
-    infoCost !== undefined && (infoCost > 0 || !msgHasCost)
-      ? infoCost
-      : msgHasCost
-        ? msgCost
-        : undefined;
-
-  if (thinkingSegments.length === 0) {
-    thinkingSegments.push(...extractThinkingSegments(capturedParts));
-  }
-  const thinking =
-    thinkingSegments.length > 0 ? thinkingSegments.join("\n") : nonEmptyString(capturedReasoning);
-
-  const timeObj = sessionInfo && isRecord(sessionInfo.time) ? sessionInfo.time : undefined;
-  const locationObj =
-    sessionInfo && isRecord(sessionInfo.location) ? sessionInfo.location : undefined;
-
-  return {
-    ...(modelId ? { modelId } : {}),
-    ...(modelProvider ? { modelProvider } : {}),
-    ...(promptTokens !== undefined ? { promptTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
-    ...(cost !== undefined ? { cost } : {}),
-    ...(thinking ? { thinking } : {}),
-    messageCount: Array.isArray(messages) ? messages.length : 0,
-    ...(nonEmptyString(sessionInfo?.title) ? { title: nonEmptyString(sessionInfo?.title) } : {}),
-    ...(nonEmptyString(sessionInfo?.agent) ? { agent: nonEmptyString(sessionInfo?.agent) } : {}),
-    ...(nonEmptyString(locationObj?.directory) || nonEmptyString(sessionInfo?.directory)
-      ? {
-          directory:
-            nonEmptyString(locationObj?.directory) ?? nonEmptyString(sessionInfo?.directory),
-        }
-      : {}),
-    ...(parseTimestampMs(timeObj?.created) !== undefined
-      ? { createdAt: parseTimestampMs(timeObj?.created) }
-      : {}),
-    ...(parseTimestampMs(timeObj?.updated) !== undefined
-      ? { updatedAt: parseTimestampMs(timeObj?.updated) }
-      : {}),
-    ...(parseTimestampMs(timeObj?.archived) !== undefined
-      ? { archivedAt: parseTimestampMs(timeObj?.archived) }
-      : {}),
-    ...(nonEmptyString(sessionInfo?.outcome)
-      ? { outcome: nonEmptyString(sessionInfo?.outcome) }
-      : {}),
-    ...(assistantError ? { assistantError } : {}),
-  };
-}
-
-function buildEvalPromptTemplate(
-  evalAgent: string,
-  configuredModel?: string,
-): { systemPrompt: string; agentConfig: Record<string, unknown> } {
-  try {
-    const def = loadEvalAgentDefinition();
-    const systemPrompt = def.system.includes(PASSIVE_EVALUATOR_DIRECTIVE)
-      ? def.system
-      : def.system
-        ? `${def.system}\n\n${PASSIVE_EVALUATOR_DIRECTIVE}`
-        : PASSIVE_EVALUATOR_DIRECTIVE;
-    const effectiveModel = nonEmptyString(configuredModel) ?? def.model;
-    return {
-      systemPrompt,
-      agentConfig: {
-        agent: evalAgent,
-        ...(effectiveModel ? { model: effectiveModel } : {}),
-        ...(def.steps !== undefined ? { steps: def.steps } : {}),
-        ...(def.request ? { request: def.request } : {}),
-        ...(def.permissions ? { permissions: def.permissions } : {}),
-      },
-    };
-  } catch {
-    return {
-      systemPrompt: PASSIVE_EVALUATOR_DIRECTIVE,
-      agentConfig: {
-        agent: evalAgent,
-        ...(nonEmptyString(configuredModel) ? { model: nonEmptyString(configuredModel) } : {}),
-      },
-    };
   }
 }
 
@@ -1302,7 +780,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
       // Best-effort capture; fall back to in-memory state
     }
 
-    const details = extractSessionDetails({
+    const details = extractS2SessionDetails({
       sessionInfo,
       messages: contextMessages,
       capturedParts,
@@ -1321,11 +799,10 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
             : rawCombinedError || details.outcome === "failed"
               ? "error"
               : "partial";
-    const isPostVerdictInterrupt =
-      s2Status === "completed" &&
-      typeof rawCombinedError === "string" &&
-      /^(?:step\s+interrupted|aborted(?:\s+by\s+signal)?)$/i.test(rawCombinedError.trim());
-    const combinedError = isPostVerdictInterrupt ? undefined : rawCombinedError;
+    const combinedError =
+      s2Status === "completed" && isPostVerdictInterruptError(rawCombinedError)
+        ? undefined
+        : rawCombinedError;
 
     const s2Title =
       details.title && details.title !== evalTitle
@@ -1334,7 +811,17 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
     const s2Agent = details.agent ?? evalAgent;
     const s2Directory = details.directory ?? sandboxDir;
     const nowTs = Date.now();
-    const { systemPrompt, agentConfig } = buildEvalPromptTemplate(evalAgent, configuredModel);
+    const { systemPrompt, agentConfig, knownSystemPrompts } = resolveEvalPromptBundle(
+      evalAgent,
+      configuredModel,
+    );
+    const messageRecords = Array.isArray(contextMessages)
+      ? contextMessages.filter((m): m is Record<string, unknown> => isRecord(m))
+      : [];
+    const { sanitizedMessages } =
+      messageRecords.length > 0
+        ? extractAndStripSystemPrompt(messageRecords, knownSystemPrompts)
+        : { sanitizedMessages: [] as Record<string, unknown>[] };
 
     const payload = {
       info: sessionInfo ?? {
@@ -1343,7 +830,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         agent: s2Agent,
         directory: s2Directory,
       },
-      messages: contextMessages ?? [],
+      messages: sanitizedMessages,
       capturedUserPrompt: userPromptText,
       ...(userPrompt ? { codingUserPrompt: userPrompt } : {}),
       ...(subagentPrompt ? { subagentPrompt } : {}),
@@ -1381,7 +868,7 @@ export async function classifyRequest(input: OpenCodeClassifyInput): Promise<Cla
         cacheReadTokens: details.cacheReadTokens ?? null,
         cacheWriteTokens: details.cacheWriteTokens ?? null,
         cost: details.cost ?? null,
-        messageCount: details.messageCount,
+        messageCount: messageRecords.length > 0 ? sanitizedMessages.length : details.messageCount,
         createdAt: details.createdAt ?? startTime,
         updatedAt: details.updatedAt ?? nowTs,
         archivedAt: details.archivedAt ?? nowTs,
